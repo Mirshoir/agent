@@ -10,7 +10,7 @@ VERIFY_TOKEN = "1234"
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 INSTAGRAM_BUSINESS_ID = os.getenv("INSTAGRAM_BUSINESS_ID")
-
+BOT_ENABLED = False
 # Prevent duplicate replies during runtime
 processed_comment_ids = set()
 processed_message_ids = set()
