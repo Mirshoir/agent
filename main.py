@@ -9,6 +9,11 @@ VERIFY_TOKEN = "1234"
 
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+INSTAGRAM_BUSINESS_ID = os.getenv("INSTAGRAM_BUSINESS_ID")
+
+# Prevent duplicate replies during runtime
+processed_comment_ids = set()
+processed_message_ids = set()
 
 
 def get_ai_reply(user_text: str) -> str:
@@ -24,7 +29,10 @@ def get_ai_reply(user_text: str) -> str:
         "messages": [
             {
                 "role": "system",
-                "content": "You are a friendly Instagram sales assistant. Reply shortly and naturally."
+                "content": (
+                    "You are a friendly Instagram sales assistant. "
+                    "Reply shortly and naturally. Do not mention that you are AI."
+                )
             },
             {
                 "role": "user",
@@ -32,7 +40,7 @@ def get_ai_reply(user_text: str) -> str:
             }
         ],
         "temperature": 0.7,
-        "max_tokens": 150
+        "max_tokens": 120
     }
 
     res = requests.post(url, headers=headers, json=payload, timeout=30)
@@ -102,10 +110,25 @@ async def receive_webhook(request: Request):
 
         for entry in data.get("entry", []):
 
-            # DM EVENTS
+            # ---------------- DM EVENTS ----------------
             for messaging in entry.get("messaging", []):
                 sender_id = messaging.get("sender", {}).get("id")
-                message_text = messaging.get("message", {}).get("text")
+                message = messaging.get("message", {})
+                message_text = message.get("text")
+                message_id = message.get("mid")
+
+                # Stop replying to your own account
+                if INSTAGRAM_BUSINESS_ID and sender_id == INSTAGRAM_BUSINESS_ID:
+                    print("Ignored own DM event")
+                    continue
+
+                # Prevent duplicate message processing
+                if message_id and message_id in processed_message_ids:
+                    print("Ignored duplicate DM:", message_id)
+                    continue
+
+                if message_id:
+                    processed_message_ids.add(message_id)
 
                 if sender_id and message_text:
                     print("DM user said:", message_text)
@@ -115,13 +138,27 @@ async def receive_webhook(request: Request):
 
                     send_dm(sender_id, ai_reply)
 
-            # COMMENT EVENTS
+            # ---------------- COMMENT EVENTS ----------------
             for change in entry.get("changes", []):
                 if change.get("field") == "comments":
                     value = change.get("value", {})
 
                     comment_id = value.get("id")
                     comment_text = value.get("text")
+                    from_id = value.get("from", {}).get("id")
+
+                    # Stop replying to your own comments
+                    if INSTAGRAM_BUSINESS_ID and from_id == INSTAGRAM_BUSINESS_ID:
+                        print("Ignored own comment")
+                        continue
+
+                    # Prevent duplicate comment processing
+                    if comment_id and comment_id in processed_comment_ids:
+                        print("Ignored duplicate comment:", comment_id)
+                        continue
+
+                    if comment_id:
+                        processed_comment_ids.add(comment_id)
 
                     if comment_id and comment_text:
                         print("Comment received:", comment_text)
