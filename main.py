@@ -19,22 +19,31 @@ processed_message_ids = set()
 
 
 def get_business(instagram_business_id: str):
+    instagram_business_id = str(instagram_business_id).strip()
+
+    print("Looking for business ID:", instagram_business_id)
+
     result = (
         supabase.table("businesses")
         .select("*")
         .eq("instagram_business_id", instagram_business_id)
-        .single()
+        .limit(1)
         .execute()
     )
 
-    return result.data
+    print("Supabase result:", result.data)
+
+    if not result.data:
+        return None
+
+    return result.data[0]
 
 
 def get_ai_reply(user_text: str, business: dict) -> str:
     url = "https://api.mistral.ai/v1/chat/completions"
 
     system_prompt = f"""
-You are the virtual assistant for {business['business_name']}.
+You are the virtual assistant for {business.get('business_name')}.
 
 Business type:
 {business.get('business_type')}
@@ -78,9 +87,7 @@ Rules:
 def send_dm(access_token: str, recipient_id: str, text: str):
     url = "https://graph.instagram.com/v25.0/me/messages"
 
-    params = {
-        "access_token": access_token
-    }
+    params = {"access_token": access_token}
 
     payload = {
         "recipient": {"id": recipient_id},
@@ -117,12 +124,12 @@ async def home():
 async def verify_webhook(request: Request):
     params = request.query_params
 
-    mode = params.get("hub.mode")
-    token = params.get("hub.verify_token")
-    challenge = params.get("hub.challenge")
-
-    if mode == "subscribe" and token == VERIFY_TOKEN and challenge:
-        return PlainTextResponse(challenge, status_code=200)
+    if (
+        params.get("hub.mode") == "subscribe"
+        and params.get("hub.verify_token") == VERIFY_TOKEN
+        and params.get("hub.challenge")
+    ):
+        return PlainTextResponse(params.get("hub.challenge"), status_code=200)
 
     return PlainTextResponse("Verification failed", status_code=403)
 
@@ -134,7 +141,8 @@ async def receive_webhook(request: Request):
         print("Received webhook:", data)
 
         for entry in data.get("entry", []):
-            instagram_business_id = entry.get("id")
+            instagram_business_id = str(entry.get("id", "")).strip()
+            print("ENTRY ID FROM META:", instagram_business_id)
 
             if not instagram_business_id:
                 print("No Instagram Business ID in entry")
@@ -156,7 +164,6 @@ async def receive_webhook(request: Request):
                 print("No access token for business:", business.get("business_name"))
                 continue
 
-            # DM EVENTS
             for messaging in entry.get("messaging", []):
                 sender_id = messaging.get("sender", {}).get("id")
                 message = messaging.get("message", {})
@@ -182,7 +189,6 @@ async def receive_webhook(request: Request):
 
                     send_dm(access_token, sender_id, ai_reply)
 
-            # COMMENT EVENTS
             for change in entry.get("changes", []):
                 if change.get("field") == "comments":
                     value = change.get("value", {})
