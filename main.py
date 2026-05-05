@@ -17,10 +17,7 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 META_APP_ID = os.getenv("META_APP_ID")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
-REDIRECT_URI = os.getenv(
-    "REDIRECT_URI",
-    "https://agent-1-xi6h.onrender.com/auth/callback"
-)
+REDIRECT_URI = os.getenv("REDIRECT_URI", "https://agent-1-xi6h.onrender.com/auth/callback")
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://your-dashboard-url")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -29,12 +26,8 @@ processed_comment_ids = set()
 processed_message_ids = set()
 
 
-# ---------------- BUSINESS DB ----------------
-
 def get_business(instagram_business_id: str):
     instagram_business_id = str(instagram_business_id).strip()
-
-    print("Looking for business ID:", repr(instagram_business_id))
 
     result = (
         supabase.table("businesses")
@@ -44,8 +37,6 @@ def get_business(instagram_business_id: str):
         .execute()
     )
 
-    print("Supabase result:", result.data)
-
     if not result.data:
         debug_rows = (
             supabase.table("businesses")
@@ -53,6 +44,7 @@ def get_business(instagram_business_id: str):
             .limit(10)
             .execute()
         )
+        print("Business not found:", instagram_business_id)
         print("Available businesses:", debug_rows.data)
         return None
 
@@ -111,8 +103,6 @@ def upsert_connected_business(profile: dict, access_token: str):
     return result.data
 
 
-# ---------------- INSTAGRAM OAUTH ----------------
-
 @app.get("/connect-instagram")
 async def connect_instagram():
     if not META_APP_ID:
@@ -150,44 +140,40 @@ async def auth_callback(request: Request):
         return PlainTextResponse("Missing code from Instagram", status_code=400)
 
     if not META_APP_ID or not META_APP_SECRET:
-        return PlainTextResponse(
-            "Missing META_APP_ID or META_APP_SECRET",
-            status_code=500
-        )
+        return PlainTextResponse("Missing META_APP_ID or META_APP_SECRET", status_code=500)
 
     try:
-        token_url = "https://api.instagram.com/oauth/access_token"
-
-        token_payload = {
-            "client_id": META_APP_ID,
-            "client_secret": META_APP_SECRET,
-            "grant_type": "authorization_code",
-            "redirect_uri": REDIRECT_URI,
-            "code": code,
-        }
-
-        token_res = requests.post(token_url, data=token_payload, timeout=30)
+        token_res = requests.post(
+            "https://api.instagram.com/oauth/access_token",
+            data={
+                "client_id": META_APP_ID,
+                "client_secret": META_APP_SECRET,
+                "grant_type": "authorization_code",
+                "redirect_uri": REDIRECT_URI,
+                "code": code,
+            },
+            timeout=30
+        )
         print("OAuth token result:", token_res.status_code, token_res.text)
         token_res.raise_for_status()
 
-        token_data = token_res.json()
-        access_token = token_data.get("access_token")
+        access_token = token_res.json().get("access_token")
 
         if not access_token:
             return PlainTextResponse("No access token returned", status_code=500)
 
-        profile_url = "https://graph.instagram.com/me"
-        profile_params = {
-            "fields": "id,username,account_type",
-            "access_token": access_token,
-        }
-
-        profile_res = requests.get(profile_url, params=profile_params, timeout=30)
+        profile_res = requests.get(
+            "https://graph.instagram.com/me",
+            params={
+                "fields": "id,username",
+                "access_token": access_token,
+            },
+            timeout=30
+        )
         print("Instagram profile result:", profile_res.status_code, profile_res.text)
         profile_res.raise_for_status()
 
         profile = profile_res.json()
-
         upsert_connected_business(profile, access_token)
 
         return RedirectResponse(
@@ -199,17 +185,13 @@ async def auth_callback(request: Request):
         return PlainTextResponse(f"OAuth error: {str(e)}", status_code=500)
 
 
-# ---------------- CATALOG LOGIC ----------------
-
 def is_catalog_request(text: str) -> bool:
     text = text.lower()
-
     keywords = [
         "catalog", "katalog", "каталог",
         "price", "narx", "narxi", "цена", "прайс",
         "cost", "how much", "qancha", "сколько"
     ]
-
     return any(keyword in text for keyword in keywords)
 
 
@@ -241,8 +223,6 @@ def build_catalog_dm(business: dict) -> str:
         "Qo‘shimcha ma’lumot kerak bo‘lsa, yozib qoldiring 😊"
     )
 
-
-# ---------------- AI ----------------
 
 def build_business_context(business: dict) -> str:
     return f"""
@@ -324,59 +304,55 @@ Strict business rules:
 - If user wants a human/sales manager, provide the contact details from business profile.
 """
 
-    headers = {
-        "Authorization": f"Bearer {MISTRAL_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "model": "mistral-small-latest",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_text}
-        ],
-        "temperature": 0.4,
-        "max_tokens": 180
-    }
-
-    res = requests.post(url, headers=headers, json=payload, timeout=30)
+    res = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {MISTRAL_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": "mistral-small-latest",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_text}
+            ],
+            "temperature": 0.4,
+            "max_tokens": 180
+        },
+        timeout=30
+    )
     print("Mistral result:", res.status_code, res.text)
     res.raise_for_status()
 
     return res.json()["choices"][0]["message"]["content"]
 
 
-# ---------------- INSTAGRAM ACTIONS ----------------
-
 def send_dm(access_token: str, recipient_id: str, text: str):
-    url = "https://graph.instagram.com/v25.0/me/messages"
-
-    params = {"access_token": access_token}
-
-    payload = {
-        "recipient": {"id": recipient_id},
-        "message": {"text": text}
-    }
-
-    res = requests.post(url, params=params, json=payload, timeout=30)
+    res = requests.post(
+        "https://graph.instagram.com/v25.0/me/messages",
+        params={"access_token": access_token},
+        json={
+            "recipient": {"id": recipient_id},
+            "message": {"text": text}
+        },
+        timeout=30
+    )
     print("DM send result:", res.status_code, res.text)
     return res
 
 
 def reply_to_comment(access_token: str, comment_id: str, text: str):
-    url = f"https://graph.instagram.com/v25.0/{comment_id}/replies"
-
-    params = {
-        "access_token": access_token,
-        "message": text
-    }
-
-    res = requests.post(url, params=params, timeout=30)
+    res = requests.post(
+        f"https://graph.instagram.com/v25.0/{comment_id}/replies",
+        params={
+            "access_token": access_token,
+            "message": text
+        },
+        timeout=30
+    )
     print("Comment reply result:", res.status_code, res.text)
     return res
 
-
-# ---------------- ROUTES ----------------
 
 @app.get("/")
 async def home():
@@ -409,7 +385,6 @@ async def receive_webhook(request: Request):
 
         for entry in data.get("entry", []):
             instagram_business_id = str(entry.get("id", "")).strip()
-            print("ENTRY ID FROM META:", repr(instagram_business_id))
 
             if not instagram_business_id:
                 continue
@@ -417,17 +392,14 @@ async def receive_webhook(request: Request):
             business = get_business(instagram_business_id)
 
             if not business:
-                print("Business not found:", instagram_business_id)
                 continue
 
             if not business.get("bot_enabled", True):
-                print("Bot disabled for:", business.get("business_name"))
                 continue
 
             access_token = business.get("access_token")
 
             if not access_token:
-                print("No access token for business:", business.get("business_name"))
                 continue
 
             for messaging in entry.get("messaging", []):
