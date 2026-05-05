@@ -60,31 +60,34 @@ def get_business(instagram_business_id: str):
 
 
 def upsert_connected_business(profile: dict, access_token: str):
-    instagram_business_id = str(profile.get("id", "")).strip()
+    instagram_business_id = str(
+        profile.get("user_id") or profile.get("id") or ""
+    ).strip()
+
     username = profile.get("username", "")
     account_type = profile.get("account_type", "")
 
     if not instagram_business_id:
-        raise ValueError("Instagram profile did not return id")
+        raise ValueError("Instagram profile did not return user_id or id")
 
     existing = get_business(instagram_business_id)
 
-    data = {
+    update_data = {
         "instagram_business_id": instagram_business_id,
         "access_token": access_token,
         "bot_enabled": True,
     }
 
     if username:
-        data["business_name"] = username
+        update_data["business_name"] = username
 
     if account_type:
-        data["business_type"] = account_type
+        update_data["business_type"] = account_type
 
     if existing:
         result = (
             supabase.table("businesses")
-            .update(data)
+            .update(update_data)
             .eq("id", existing["id"])
             .execute()
         )
@@ -126,7 +129,7 @@ async def connect_instagram():
         "scope": ",".join([
             "instagram_business_basic",
             "instagram_business_manage_messages",
-            "instagram_business_manage_comments"
+            "instagram_business_manage_comments",
         ]),
         "response_type": "code",
         "state": secrets.token_urlsafe(16),
@@ -145,7 +148,7 @@ async def auth_callback(request: Request):
     if error:
         return PlainTextResponse(
             f"Instagram connection failed: {error} - {error_description}",
-            status_code=400
+            status_code=400,
         )
 
     if not code:
@@ -154,7 +157,7 @@ async def auth_callback(request: Request):
     if not META_APP_ID or not META_APP_SECRET:
         return PlainTextResponse(
             "Missing META_APP_ID or META_APP_SECRET",
-            status_code=500
+            status_code=500,
         )
 
     try:
@@ -167,7 +170,7 @@ async def auth_callback(request: Request):
                 "redirect_uri": REDIRECT_URI,
                 "code": code,
             },
-            timeout=30
+            timeout=30,
         )
 
         print("OAuth token status:", token_res.status_code)
@@ -181,18 +184,18 @@ async def auth_callback(request: Request):
         if not access_token:
             return PlainTextResponse(
                 f"No access token returned: {token_data}",
-                status_code=500
+                status_code=500,
             )
 
         print("Received access token:", safe_token(access_token))
 
         profile_res = requests.get(
-            "https://graph.instagram.com/v25.0/me",
+            "https://graph.instagram.com/me",
             params={
-                "fields": "id,username,account_type",
+                "fields": "user_id,username,account_type",
                 "access_token": access_token,
             },
-            timeout=30
+            timeout=30,
         )
 
         print("Instagram profile status:", profile_res.status_code)
@@ -201,10 +204,12 @@ async def auth_callback(request: Request):
         if profile_res.status_code >= 400:
             return PlainTextResponse(
                 f"Instagram profile error: {profile_res.text}",
-                status_code=400
+                status_code=400,
             )
 
         profile = profile_res.json()
+        profile["id"] = str(profile.get("user_id") or profile.get("id"))
+
         upsert_connected_business(profile, access_token)
 
         return RedirectResponse(
@@ -216,14 +221,14 @@ async def auth_callback(request: Request):
         print("OAuth HTTP error:", response_text)
         return PlainTextResponse(
             f"OAuth HTTP error: {response_text}",
-            status_code=400
+            status_code=400,
         )
 
     except Exception as e:
         print("OAuth callback error:", str(e))
         return PlainTextResponse(
             f"OAuth error: {str(e)}",
-            status_code=500
+            status_code=500,
         )
 
 
@@ -232,7 +237,7 @@ def is_catalog_request(text: str) -> bool:
     keywords = [
         "catalog", "katalog", "каталог",
         "price", "narx", "narxi", "цена", "прайс",
-        "cost", "how much", "qancha", "сколько"
+        "cost", "how much", "qancha", "сколько",
     ]
     return any(keyword in text for keyword in keywords)
 
@@ -350,18 +355,18 @@ Strict business rules:
         url,
         headers={
             "Authorization": f"Bearer {MISTRAL_API_KEY}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         },
         json={
             "model": "mistral-small-latest",
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text}
+                {"role": "user", "content": user_text},
             ],
             "temperature": 0.4,
-            "max_tokens": 180
+            "max_tokens": 180,
         },
-        timeout=30
+        timeout=30,
     )
 
     print("Mistral result:", res.status_code, res.text)
@@ -376,9 +381,9 @@ def send_dm(access_token: str, recipient_id: str, text: str):
         params={"access_token": access_token},
         json={
             "recipient": {"id": recipient_id},
-            "message": {"text": text}
+            "message": {"text": text},
         },
-        timeout=30
+        timeout=30,
     )
 
     print("DM send result:", res.status_code, res.text)
@@ -390,9 +395,9 @@ def reply_to_comment(access_token: str, comment_id: str, text: str):
         f"https://graph.instagram.com/v25.0/{comment_id}/replies",
         params={
             "access_token": access_token,
-            "message": text
+            "message": text,
         },
-        timeout=30
+        timeout=30,
     )
 
     print("Comment reply result:", res.status_code, res.text)
@@ -495,7 +500,7 @@ async def receive_webhook(request: Request):
                         reply_to_comment(
                             access_token,
                             comment_id,
-                            "Katalog va narxlar haqida ma’lumotni DM orqali yubordik 😊"
+                            "Katalog va narxlar haqida ma’lumotni DM orqali yubordik 😊",
                         )
                     else:
                         ai_reply = get_ai_reply(comment_text, business)
@@ -507,7 +512,7 @@ async def receive_webhook(request: Request):
         print("Webhook error:", str(e))
         return JSONResponse(
             content={"status": "error", "message": str(e)},
-            status_code=500
+            status_code=500,
         )
 
 
