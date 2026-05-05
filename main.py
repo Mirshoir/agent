@@ -49,24 +49,47 @@ def get_business(instagram_business_id: str):
 def get_ai_reply(user_text: str, business: dict) -> str:
     url = "https://api.mistral.ai/v1/chat/completions"
 
+    business_name = business.get("business_name", "this business")
+    business_type = business.get("business_type", "business")
+    tone = business.get("tone", "friendly and professional")
+    language = business.get("language", "uz")
+    knowledge = business.get("knowledge", "")
+
     system_prompt = f"""
-You are the virtual assistant for {business.get('business_name')}.
+You are the virtual Instagram sales assistant for {business_name}.
 
 Business type:
-{business.get('business_type')}
+{business_type}
 
-Tone:
-{business.get('tone')}
+Business tone:
+{tone}
 
 Business knowledge:
-{business.get('knowledge')}
+{knowledge}
 
-Rules:
-- Reply naturally and shortly.
-- Use the business knowledge only.
-- Do not invent prices, addresses, stock, or delivery details.
+Language rules:
+- Detect the user's language.
+- If the user writes in Uzbek, reply in Uzbek.
+- If the user writes in Russian, reply in Russian.
+- If the user writes in English, reply in English.
+- If unclear, use this default language: {language}.
+
+Sales style:
+- Reply shortly, naturally, and politely.
+- Be helpful and sales-focused.
+- Do not sound robotic.
+- Do not say you are an AI model.
+- If this is the beginning of a conversation, briefly introduce yourself as the virtual assistant.
+
+Strict business rules:
+- Use only the business knowledge above.
+- Do NOT invent prices, stock, addresses, discounts, delivery details, or product availability.
+- If price/catalog is requested and a catalog link exists in knowledge, send that link.
 - If information is missing, ask one short follow-up question.
+- Do not force users to share phone/address/name.
 - Do not repeatedly ask for contact details.
+- If the user wants a human/sales manager, provide the contact details from business knowledge.
+- At the end, politely thank the user and invite them to follow the social pages if it feels natural.
 """
 
     headers = {
@@ -80,7 +103,7 @@ Rules:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text}
         ],
-        "temperature": 0.5,
+        "temperature": 0.4,
         "max_tokens": 180
     }
 
@@ -171,7 +194,6 @@ async def receive_webhook(request: Request):
                 print("No access token for business:", business.get("business_name"))
                 continue
 
-            # DM EVENTS
             for messaging in entry.get("messaging", []):
                 sender_id = messaging.get("sender", {}).get("id")
                 message = messaging.get("message", {})
@@ -197,7 +219,6 @@ async def receive_webhook(request: Request):
 
                     send_dm(access_token, sender_id, ai_reply)
 
-            # COMMENT EVENTS
             for change in entry.get("changes", []):
                 if change.get("field") == "comments":
                     value = change.get("value", {})
