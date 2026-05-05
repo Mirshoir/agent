@@ -22,6 +22,7 @@ def get_secret(key: str, default=None):
 
 SUPABASE_URL = get_secret("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = get_secret("SUPABASE_SERVICE_KEY")
+BACKEND_URL = get_secret("BACKEND_URL", "https://agent-1-xi6h.onrender.com")
 
 if not SUPABASE_URL:
     st.error("Missing SUPABASE_URL. Add it in Streamlit Secrets.")
@@ -50,35 +51,6 @@ def get_businesses():
         return []
 
 
-def find_business_by_instagram_id(instagram_business_id):
-    try:
-        result = (
-            supabase.table("businesses")
-            .select("id, business_name, instagram_business_id")
-            .eq("instagram_business_id", instagram_business_id)
-            .execute()
-        )
-        return result.data or []
-    except Exception as e:
-        st.error(f"Failed to check duplicate business: {e}")
-        return []
-
-
-def create_business(data):
-    try:
-        existing = find_business_by_instagram_id(data["instagram_business_id"])
-
-        if existing:
-            st.warning("Business with this Instagram Business ID already exists.")
-            return None
-
-        return supabase.table("businesses").insert(data).execute()
-
-    except Exception as e:
-        st.error(f"Supabase insert error: {e}")
-        return None
-
-
 def update_business(business_id, data):
     try:
         return (
@@ -95,21 +67,42 @@ def update_business(business_id, data):
 # ---------------- UI ----------------
 
 st.title("🤖 Instagram Bot Business Dashboard")
-st.info("Manage Instagram bot business data without editing code.")
+
+query_params = st.query_params
+
+if query_params.get("connected") == "success":
+    st.success(f"Instagram connected successfully. IG ID: {query_params.get('ig_id')}")
+
+st.info("Connect Instagram, then manage bot business data without editing code.")
+
+st.link_button(
+    "🔗 Connect Instagram Account",
+    f"{BACKEND_URL}/connect-instagram",
+    type="primary"
+)
+
+st.caption("Instagram token is now handled by OAuth. Manual token input is removed.")
 
 businesses = get_businesses()
 
-tab1, tab2 = st.tabs(["📋 Edit Business", "➕ Add Business"])
+tab1, tab2 = st.tabs(["📋 Edit Business", "➕ Add Business Profile"])
 
 
-# ---------------- ADD BUSINESS ----------------
+# ---------------- ADD BUSINESS PROFILE ----------------
 
 with tab2:
-    st.subheader("Add New Business")
+    st.subheader("Add Business Profile")
+
+    st.warning(
+        "Use this only to create a business profile manually. "
+        "For real Instagram connection, use the Connect Instagram button above."
+    )
 
     new_business_name = st.text_input("Business name", key="new_business_name")
-    new_instagram_business_id = st.text_input("Instagram Business ID", key="new_ig_id")
-    new_access_token = st.text_area("Instagram Access Token", height=120, key="new_token")
+    new_instagram_business_id = st.text_input(
+        "Instagram Business ID",
+        key="new_ig_id"
+    )
 
     new_business_type = st.text_input("Business type", key="new_type")
     new_language = st.selectbox("Default language", ["uz", "ru", "en"], key="new_language")
@@ -119,24 +112,20 @@ with tab2:
         key="new_tone"
     )
 
-    if st.button("➕ Create Business", type="primary"):
+    if st.button("➕ Create Business Profile", type="primary"):
         if not new_business_name.strip():
             st.error("Business name is required.")
         elif not new_instagram_business_id.strip():
             st.error("Instagram Business ID is required.")
-        elif not new_access_token.strip():
-            st.error("Instagram Access Token is required.")
         else:
-            result = create_business({
+            data = {
                 "business_name": new_business_name.strip(),
                 "instagram_business_id": new_instagram_business_id.strip(),
-                "access_token": new_access_token.strip(),
+                "access_token": "",
                 "business_type": new_business_type.strip(),
                 "language": new_language,
                 "tone": new_tone.strip(),
-                "bot_enabled": True,
-
-                # Empty defaults to avoid NOT NULL insert errors
+                "bot_enabled": False,
                 "knowledge": "",
                 "products": "",
                 "prices": "",
@@ -148,10 +137,12 @@ with tab2:
                 "telegram_single": "",
                 "telegram_package": "",
                 "telegram_bag": "",
-            })
+            }
+
+            result = supabase.table("businesses").insert(data).execute()
 
             if result:
-                st.success("Business created successfully.")
+                st.success("Business profile created successfully.")
                 st.rerun()
 
 
@@ -159,7 +150,7 @@ with tab2:
 
 with tab1:
     if not businesses:
-        st.warning("No businesses found. Add your first business in the Add Business tab.")
+        st.warning("No businesses found. Connect Instagram or add a business profile.")
         st.stop()
 
     business_names = {
@@ -212,16 +203,19 @@ with tab1:
 
         instagram_business_id = st.text_input(
             "Instagram Business ID",
-            value=business.get("instagram_business_id") or ""
+            value=business.get("instagram_business_id") or "",
+            disabled=True
         )
 
-        access_token = st.text_area(
-            "Instagram Access Token",
-            value=business.get("access_token") or "",
-            height=120
-        )
+        token_exists = bool(business.get("access_token"))
 
-        st.caption("Access token is sensitive. Do not share it publicly.")
+        st.write("Access token status:")
+        st.success("Connected ✅" if token_exists else "Not connected ❌")
+
+        st.link_button(
+            "Reconnect Instagram",
+            f"{BACKEND_URL}/connect-instagram"
+        )
 
     st.divider()
 
@@ -299,10 +293,6 @@ with tab1:
     if st.button("💾 Save Business", type="primary"):
         if not business_name.strip():
             st.error("Business name is required.")
-        elif not instagram_business_id.strip():
-            st.error("Instagram Business ID is required.")
-        elif not access_token.strip():
-            st.error("Instagram Access Token is required.")
         else:
             update_data = {
                 "business_name": business_name.strip(),
@@ -310,8 +300,6 @@ with tab1:
                 "language": language,
                 "tone": tone.strip(),
                 "bot_enabled": bot_enabled,
-                "instagram_business_id": instagram_business_id.strip(),
-                "access_token": access_token.strip(),
                 "products": products.strip(),
                 "prices": prices.strip(),
                 "delivery_info": delivery_info.strip(),
