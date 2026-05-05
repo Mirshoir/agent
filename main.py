@@ -21,12 +21,12 @@ processed_message_ids = set()
 def get_business(instagram_business_id: str):
     instagram_business_id = str(instagram_business_id).strip()
 
-    print("Looking for business ID:", instagram_business_id)
+    print("Looking for business ID:", repr(instagram_business_id))
 
     result = (
         supabase.table("businesses")
         .select("*")
-        .eq("instagram_business_id", instagram_business_id)
+        .ilike("instagram_business_id", instagram_business_id)
         .limit(1)
         .execute()
     )
@@ -34,6 +34,13 @@ def get_business(instagram_business_id: str):
     print("Supabase result:", result.data)
 
     if not result.data:
+        debug_rows = (
+            supabase.table("businesses")
+            .select("instagram_business_id,business_name")
+            .limit(10)
+            .execute()
+        )
+        print("Available businesses:", debug_rows.data)
         return None
 
     return result.data[0]
@@ -142,7 +149,7 @@ async def receive_webhook(request: Request):
 
         for entry in data.get("entry", []):
             instagram_business_id = str(entry.get("id", "")).strip()
-            print("ENTRY ID FROM META:", instagram_business_id)
+            print("ENTRY ID FROM META:", repr(instagram_business_id))
 
             if not instagram_business_id:
                 print("No Instagram Business ID in entry")
@@ -164,6 +171,7 @@ async def receive_webhook(request: Request):
                 print("No access token for business:", business.get("business_name"))
                 continue
 
+            # DM EVENTS
             for messaging in entry.get("messaging", []):
                 sender_id = messaging.get("sender", {}).get("id")
                 message = messaging.get("message", {})
@@ -189,6 +197,7 @@ async def receive_webhook(request: Request):
 
                     send_dm(access_token, sender_id, ai_reply)
 
+            # COMMENT EVENTS
             for change in entry.get("changes", []):
                 if change.get("field") == "comments":
                     value = change.get("value", {})
