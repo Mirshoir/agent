@@ -135,6 +135,19 @@ with tab2:
                 "language": new_language,
                 "tone": new_tone.strip(),
                 "bot_enabled": True,
+
+                # Empty defaults to avoid NOT NULL insert errors
+                "knowledge": "",
+                "products": "",
+                "prices": "",
+                "delivery_info": "",
+                "working_hours": "",
+                "faq": "",
+                "catalog_link": "",
+                "sales_phone": "",
+                "telegram_single": "",
+                "telegram_package": "",
+                "telegram_bag": "",
             })
 
             if result:
