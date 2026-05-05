@@ -46,6 +46,47 @@ def get_business(instagram_business_id: str):
     return result.data[0]
 
 
+def is_catalog_request(text: str) -> bool:
+    text = text.lower()
+
+    keywords = [
+        "catalog", "katalog", "каталог",
+        "price", "narx", "narxi", "цена", "прайс",
+        "cost", "how much", "qancha", "сколько"
+    ]
+
+    return any(keyword in text for keyword in keywords)
+
+
+def get_catalog_link(business: dict) -> str:
+    catalog_link = business.get("catalog_link")
+
+    if catalog_link:
+        return catalog_link
+
+    knowledge = business.get("knowledge", "")
+
+    if "https://bitly.cx/eIbT0" in knowledge:
+        return "https://bitly.cx/eIbT0"
+
+    return ""
+
+
+def build_catalog_dm(business: dict) -> str:
+    catalog_link = get_catalog_link(business)
+
+    if not catalog_link:
+        return (
+            "Katalog havolasi hozircha mavjud emas. "
+            "Tezroq ma’lumot olish uchun sales manager bilan bog‘lanishingiz mumkin: +998 50 155 10 10"
+        )
+
+    return (
+        f"Katalogni shu havola orqali ko‘rishingiz mumkin:\n{catalog_link}\n\n"
+        "Qo‘shimcha ma’lumot kerak bo‘lsa, yozib qoldiring 😊"
+    )
+
+
 def get_ai_reply(user_text: str, business: dict) -> str:
     url = "https://api.mistral.ai/v1/chat/completions"
 
@@ -54,6 +95,7 @@ def get_ai_reply(user_text: str, business: dict) -> str:
     tone = business.get("tone", "friendly and professional")
     language = business.get("language", "uz")
     knowledge = business.get("knowledge", "")
+    catalog_link = get_catalog_link(business)
 
     system_prompt = f"""
 You are the virtual Instagram sales assistant for {business_name}.
@@ -67,6 +109,9 @@ Business tone:
 Business knowledge:
 {knowledge}
 
+Catalog link:
+{catalog_link}
+
 Language rules:
 - Detect the user's language.
 - If the user writes in Uzbek, reply in Uzbek.
@@ -79,17 +124,14 @@ Sales style:
 - Be helpful and sales-focused.
 - Do not sound robotic.
 - Do not say you are an AI model.
-- If this is the beginning of a conversation, briefly introduce yourself as the virtual assistant.
 
 Strict business rules:
 - Use only the business knowledge above.
 - Do NOT invent prices, stock, addresses, discounts, delivery details, or product availability.
-- If price/catalog is requested and a catalog link exists in knowledge, send that link.
 - If information is missing, ask one short follow-up question.
 - Do not force users to share phone/address/name.
 - Do not repeatedly ask for contact details.
-- If the user wants a human/sales manager, provide the contact details from business knowledge.
-- At the end, politely thank the user and invite them to follow the social pages if it feels natural.
+- If user wants a human/sales manager, provide the contact details from business knowledge.
 """
 
     headers = {
@@ -194,6 +236,7 @@ async def receive_webhook(request: Request):
                 print("No access token for business:", business.get("business_name"))
                 continue
 
+            # DM EVENTS
             for messaging in entry.get("messaging", []):
                 sender_id = messaging.get("sender", {}).get("id")
                 message = messaging.get("message", {})
@@ -214,11 +257,15 @@ async def receive_webhook(request: Request):
                 if sender_id and message_text:
                     print("DM user said:", message_text)
 
-                    ai_reply = get_ai_reply(message_text, business)
-                    print("AI DM reply:", ai_reply)
+                    if is_catalog_request(message_text):
+                        dm_reply = build_catalog_dm(business)
+                        send_dm(access_token, sender_id, dm_reply)
+                    else:
+                        ai_reply = get_ai_reply(message_text, business)
+                        print("AI DM reply:", ai_reply)
+                        send_dm(access_token, sender_id, ai_reply)
 
-                    send_dm(access_token, sender_id, ai_reply)
-
+            # COMMENT EVENTS
             for change in entry.get("changes", []):
                 if change.get("field") == "comments":
                     value = change.get("value", {})
@@ -241,10 +288,22 @@ async def receive_webhook(request: Request):
                     if comment_id and comment_text:
                         print("Comment received:", comment_text)
 
-                        ai_reply = get_ai_reply(comment_text, business)
-                        print("AI comment reply:", ai_reply)
+                        if is_catalog_request(comment_text):
+                            dm_reply = build_catalog_dm(business)
 
-                        reply_to_comment(access_token, comment_id, ai_reply)
+                            if from_id:
+                                send_dm(access_token, from_id, dm_reply)
+
+                            public_reply = (
+                                "Katalog va narxlar haqida ma’lumotni DM orqali yubordik 😊"
+                            )
+
+                            reply_to_comment(access_token, comment_id, public_reply)
+
+                        else:
+                            ai_reply = get_ai_reply(comment_text, business)
+                            print("AI comment reply:", ai_reply)
+                            reply_to_comment(access_token, comment_id, ai_reply)
 
         return JSONResponse(content={"status": "ok"}, status_code=200)
 
