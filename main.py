@@ -1,45 +1,57 @@
 import os
-import time
-import logging
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
+from supabase import create_client
 
 app = FastAPI()
 
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
+VERIFY_TOKEN = "1234"
 
-INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-INSTAGRAM_BUSINESS_ID = os.getenv("INSTAGRAM_BUSINESS_ID")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
-BOT_ENABLED = os.getenv("BOT_ENABLED", "true").lower() == "true"
+supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-MAX_REPLIES_PER_USER = int(os.getenv("MAX_REPLIES_PER_USER", "5"))
-
-processed_message_ids = set()
 processed_comment_ids = set()
-user_reply_count = {}
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
-)
+processed_message_ids = set()
 
 
-def can_reply(user_id: str) -> bool:
-    count = user_reply_count.get(user_id, 0)
+def get_business(instagram_business_id: str):
+    result = (
+        supabase.table("businesses")
+        .select("*")
+        .eq("instagram_business_id", instagram_business_id)
+        .single()
+        .execute()
+    )
 
-    if count >= MAX_REPLIES_PER_USER:
-        logging.info(f"Reply limit reached for user: {user_id}")
-        return False
-
-    user_reply_count[user_id] = count + 1
-    return True
+    return result.data
 
 
-def get_ai_reply(user_text: str) -> str:
+def get_ai_reply(user_text: str, business: dict) -> str:
     url = "https://api.mistral.ai/v1/chat/completions"
+
+    system_prompt = f"""
+You are the virtual assistant for {business['business_name']}.
+
+Business type:
+{business.get('business_type')}
+
+Tone:
+{business.get('tone')}
+
+Business knowledge:
+{business.get('knowledge')}
+
+Rules:
+- Reply naturally and shortly.
+- Use the business knowledge only.
+- Do not invent prices, addresses, stock, or delivery details.
+- If information is missing, ask one short follow-up question.
+- Do not repeatedly ask for contact details.
+"""
 
     headers = {
         "Authorization": f"Bearer {MISTRAL_API_KEY}",
@@ -49,35 +61,25 @@ def get_ai_reply(user_text: str) -> str:
     payload = {
         "model": "mistral-small-latest",
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a friendly Instagram sales assistant. "
-                    "Reply shortly and naturally. "
-                    "Do not mention that you are AI."
-                )
-            },
-            {
-                "role": "user",
-                "content": user_text
-            }
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text}
         ],
-        "temperature": 0.7,
-        "max_tokens": 120
+        "temperature": 0.5,
+        "max_tokens": 180
     }
 
     res = requests.post(url, headers=headers, json=payload, timeout=30)
-    logging.info(f"Mistral status: {res.status_code}")
-
+    print("Mistral result:", res.status_code, res.text)
     res.raise_for_status()
+
     return res.json()["choices"][0]["message"]["content"]
 
 
-def send_dm(recipient_id: str, text: str):
+def send_dm(access_token: str, recipient_id: str, text: str):
     url = "https://graph.instagram.com/v25.0/me/messages"
 
     params = {
-        "access_token": INSTAGRAM_ACCESS_TOKEN
+        "access_token": access_token
     }
 
     payload = {
@@ -86,20 +88,20 @@ def send_dm(recipient_id: str, text: str):
     }
 
     res = requests.post(url, params=params, json=payload, timeout=30)
-    logging.info(f"DM send status: {res.status_code} | {res.text}")
+    print("DM send result:", res.status_code, res.text)
     return res
 
 
-def reply_to_comment(comment_id: str, text: str):
+def reply_to_comment(access_token: str, comment_id: str, text: str):
     url = f"https://graph.instagram.com/v25.0/{comment_id}/replies"
 
     params = {
-        "access_token": INSTAGRAM_ACCESS_TOKEN,
+        "access_token": access_token,
         "message": text
     }
 
     res = requests.post(url, params=params, timeout=30)
-    logging.info(f"Comment reply status: {res.status_code} | {res.text}")
+    print("Comment reply result:", res.status_code, res.text)
     return res
 
 
@@ -107,7 +109,6 @@ def reply_to_comment(comment_id: str, text: str):
 async def home():
     return {
         "status": "ok",
-        "bot_enabled": BOT_ENABLED,
         "message": "Instagram AI webhook server is running"
     }
 
@@ -130,73 +131,89 @@ async def verify_webhook(request: Request):
 async def receive_webhook(request: Request):
     try:
         data = await request.json()
-
-        if not BOT_ENABLED:
-            logging.info("Bot disabled. Webhook received but ignored.")
-            return JSONResponse(content={"status": "disabled"}, status_code=200)
+        print("Received webhook:", data)
 
         for entry in data.get("entry", []):
+            instagram_business_id = entry.get("id")
 
-            # DM EVENTS ONLY
+            if not instagram_business_id:
+                print("No Instagram Business ID in entry")
+                continue
+
+            business = get_business(instagram_business_id)
+
+            if not business:
+                print("Business not found:", instagram_business_id)
+                continue
+
+            if not business.get("bot_enabled", True):
+                print("Bot disabled for:", business.get("business_name"))
+                continue
+
+            access_token = business.get("access_token")
+
+            if not access_token:
+                print("No access token for business:", business.get("business_name"))
+                continue
+
+            # DM EVENTS
             for messaging in entry.get("messaging", []):
                 sender_id = messaging.get("sender", {}).get("id")
                 message = messaging.get("message", {})
                 message_text = message.get("text")
                 message_id = message.get("mid")
 
-                if not sender_id or not message_text:
+                if sender_id == instagram_business_id:
+                    print("Ignored own DM")
                     continue
 
-                if INSTAGRAM_BUSINESS_ID and sender_id == INSTAGRAM_BUSINESS_ID:
-                    logging.info("Ignored own DM event")
+                if message_id and message_id in processed_message_ids:
+                    print("Ignored duplicate DM:", message_id)
                     continue
 
-                if message_id in processed_message_ids:
-                    logging.info(f"Ignored duplicate DM: {message_id}")
-                    continue
+                if message_id:
+                    processed_message_ids.add(message_id)
 
-                processed_message_ids.add(message_id)
+                if sender_id and message_text:
+                    print("DM user said:", message_text)
 
-                if not can_reply(sender_id):
-                    continue
+                    ai_reply = get_ai_reply(message_text, business)
+                    print("AI DM reply:", ai_reply)
 
-                ai_reply = get_ai_reply(message_text)
-                send_dm(sender_id, ai_reply)
+                    send_dm(access_token, sender_id, ai_reply)
 
-            # COMMENT EVENTS ONLY
+            # COMMENT EVENTS
             for change in entry.get("changes", []):
-                if change.get("field") != "comments":
-                    continue
+                if change.get("field") == "comments":
+                    value = change.get("value", {})
 
-                value = change.get("value", {})
+                    comment_id = value.get("id")
+                    comment_text = value.get("text")
+                    from_id = value.get("from", {}).get("id")
 
-                comment_id = value.get("id")
-                comment_text = value.get("text")
-                from_id = value.get("from", {}).get("id")
+                    if from_id == instagram_business_id:
+                        print("Ignored own comment")
+                        continue
 
-                if not comment_id or not comment_text or not from_id:
-                    continue
+                    if comment_id and comment_id in processed_comment_ids:
+                        print("Ignored duplicate comment:", comment_id)
+                        continue
 
-                if INSTAGRAM_BUSINESS_ID and from_id == INSTAGRAM_BUSINESS_ID:
-                    logging.info("Ignored own comment")
-                    continue
+                    if comment_id:
+                        processed_comment_ids.add(comment_id)
 
-                if comment_id in processed_comment_ids:
-                    logging.info(f"Ignored duplicate comment: {comment_id}")
-                    continue
+                    if comment_id and comment_text:
+                        print("Comment received:", comment_text)
 
-                processed_comment_ids.add(comment_id)
+                        ai_reply = get_ai_reply(comment_text, business)
+                        print("AI comment reply:", ai_reply)
 
-                if not can_reply(from_id):
-                    continue
-
-                ai_reply = get_ai_reply(comment_text)
-                reply_to_comment(comment_id, ai_reply)
+                        reply_to_comment(access_token, comment_id, ai_reply)
 
         return JSONResponse(content={"status": "ok"}, status_code=200)
 
     except Exception as e:
-        logging.exception("Webhook error")
+        print("Webhook error:", str(e))
         return JSONResponse(
             content={"status": "error", "message": str(e)},
             status_code=500
