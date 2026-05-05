@@ -9,7 +9,7 @@ from supabase import create_client
 
 app = FastAPI()
 
-VERIFY_TOKEN = "1234"
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -17,13 +17,28 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 META_APP_ID = os.getenv("META_APP_ID")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
-REDIRECT_URI = os.getenv("REDIRECT_URI", "https://agent-1-xi6h.onrender.com/auth/callback")
-DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://your-dashboard-url")
+REDIRECT_URI = os.getenv(
+    "REDIRECT_URI",
+    "https://agent-1-xi6h.onrender.com/auth/callback"
+)
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://instaagent.streamlit.app")
+
+if not SUPABASE_URL:
+    raise RuntimeError("Missing SUPABASE_URL")
+
+if not SUPABASE_SERVICE_KEY:
+    raise RuntimeError("Missing SUPABASE_SERVICE_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 processed_comment_ids = set()
 processed_message_ids = set()
+
+
+def safe_token(token: str) -> str:
+    if not token:
+        return ""
+    return token[:10] + "..." + token[-6:]
 
 
 def get_business(instagram_business_id: str):
@@ -32,20 +47,13 @@ def get_business(instagram_business_id: str):
     result = (
         supabase.table("businesses")
         .select("*")
-        .ilike("instagram_business_id", instagram_business_id)
+        .eq("instagram_business_id", instagram_business_id)
         .limit(1)
         .execute()
     )
 
     if not result.data:
-        debug_rows = (
-            supabase.table("businesses")
-            .select("instagram_business_id,business_name")
-            .limit(10)
-            .execute()
-        )
         print("Business not found:", instagram_business_id)
-        print("Available businesses:", debug_rows.data)
         return None
 
     return result.data[0]
@@ -54,9 +62,10 @@ def get_business(instagram_business_id: str):
 def upsert_connected_business(profile: dict, access_token: str):
     instagram_business_id = str(profile.get("id", "")).strip()
     username = profile.get("username", "")
+    account_type = profile.get("account_type", "")
 
     if not instagram_business_id:
-        raise ValueError("Instagram profile did not return an id")
+        raise ValueError("Instagram profile did not return id")
 
     existing = get_business(instagram_business_id)
 
@@ -68,6 +77,9 @@ def upsert_connected_business(profile: dict, access_token: str):
 
     if username:
         data["business_name"] = username
+
+    if account_type:
+        data["business_type"] = account_type
 
     if existing:
         result = (
@@ -81,7 +93,7 @@ def upsert_connected_business(profile: dict, access_token: str):
     insert_data = {
         "instagram_business_id": instagram_business_id,
         "business_name": username or f"Instagram {instagram_business_id}",
-        "business_type": "",
+        "business_type": account_type or "",
         "language": "uz",
         "tone": "friendly, polite, sales-focused",
         "knowledge": "",
@@ -140,7 +152,10 @@ async def auth_callback(request: Request):
         return PlainTextResponse("Missing code from Instagram", status_code=400)
 
     if not META_APP_ID or not META_APP_SECRET:
-        return PlainTextResponse("Missing META_APP_ID or META_APP_SECRET", status_code=500)
+        return PlainTextResponse(
+            "Missing META_APP_ID or META_APP_SECRET",
+            status_code=500
+        )
 
     try:
         token_res = requests.post(
@@ -154,24 +169,40 @@ async def auth_callback(request: Request):
             },
             timeout=30
         )
-        print("OAuth token result:", token_res.status_code, token_res.text)
-        token_res.raise_for_status()
 
-        access_token = token_res.json().get("access_token")
+        print("OAuth token status:", token_res.status_code)
+        print("OAuth token response:", token_res.text)
+
+        token_res.raise_for_status()
+        token_data = token_res.json()
+
+        access_token = token_data.get("access_token")
 
         if not access_token:
-            return PlainTextResponse("No access token returned", status_code=500)
+            return PlainTextResponse(
+                f"No access token returned: {token_data}",
+                status_code=500
+            )
+
+        print("Received access token:", safe_token(access_token))
 
         profile_res = requests.get(
-            "https://graph.instagram.com/me",
+            "https://graph.instagram.com/v25.0/me",
             params={
-                "fields": "id,username",
+                "fields": "id,username,account_type",
                 "access_token": access_token,
             },
             timeout=30
         )
-        print("Instagram profile result:", profile_res.status_code, profile_res.text)
-        profile_res.raise_for_status()
+
+        print("Instagram profile status:", profile_res.status_code)
+        print("Instagram profile response:", profile_res.text)
+
+        if profile_res.status_code >= 400:
+            return PlainTextResponse(
+                f"Instagram profile error: {profile_res.text}",
+                status_code=400
+            )
 
         profile = profile_res.json()
         upsert_connected_business(profile, access_token)
@@ -180,9 +211,20 @@ async def auth_callback(request: Request):
             f"{DASHBOARD_URL}?connected=success&ig_id={profile.get('id')}"
         )
 
+    except requests.HTTPError as e:
+        response_text = e.response.text if e.response else str(e)
+        print("OAuth HTTP error:", response_text)
+        return PlainTextResponse(
+            f"OAuth HTTP error: {response_text}",
+            status_code=400
+        )
+
     except Exception as e:
         print("OAuth callback error:", str(e))
-        return PlainTextResponse(f"OAuth error: {str(e)}", status_code=500)
+        return PlainTextResponse(
+            f"OAuth error: {str(e)}",
+            status_code=500
+        )
 
 
 def is_catalog_request(text: str) -> bool:
@@ -321,6 +363,7 @@ Strict business rules:
         },
         timeout=30
     )
+
     print("Mistral result:", res.status_code, res.text)
     res.raise_for_status()
 
@@ -337,6 +380,7 @@ def send_dm(access_token: str, recipient_id: str, text: str):
         },
         timeout=30
     )
+
     print("DM send result:", res.status_code, res.text)
     return res
 
@@ -350,6 +394,7 @@ def reply_to_comment(access_token: str, comment_id: str, text: str):
         },
         timeout=30
     )
+
     print("Comment reply result:", res.status_code, res.text)
     return res
 
@@ -425,34 +470,36 @@ async def receive_webhook(request: Request):
                         send_dm(access_token, sender_id, ai_reply)
 
             for change in entry.get("changes", []):
-                if change.get("field") == "comments":
-                    value = change.get("value", {})
-                    comment_id = value.get("id")
-                    comment_text = value.get("text")
-                    from_id = value.get("from", {}).get("id")
+                if change.get("field") != "comments":
+                    continue
 
-                    if from_id == instagram_business_id:
-                        continue
+                value = change.get("value", {})
+                comment_id = value.get("id")
+                comment_text = value.get("text")
+                from_id = value.get("from", {}).get("id")
 
-                    if comment_id and comment_id in processed_comment_ids:
-                        continue
+                if from_id == instagram_business_id:
+                    continue
 
-                    if comment_id:
-                        processed_comment_ids.add(comment_id)
+                if comment_id and comment_id in processed_comment_ids:
+                    continue
 
-                    if comment_id and comment_text:
-                        if is_catalog_request(comment_text):
-                            if from_id:
-                                send_dm(access_token, from_id, build_catalog_dm(business))
+                if comment_id:
+                    processed_comment_ids.add(comment_id)
 
-                            reply_to_comment(
-                                access_token,
-                                comment_id,
-                                "Katalog va narxlar haqida ma’lumotni DM orqali yubordik 😊"
-                            )
-                        else:
-                            ai_reply = get_ai_reply(comment_text, business)
-                            reply_to_comment(access_token, comment_id, ai_reply)
+                if comment_id and comment_text:
+                    if is_catalog_request(comment_text):
+                        if from_id:
+                            send_dm(access_token, from_id, build_catalog_dm(business))
+
+                        reply_to_comment(
+                            access_token,
+                            comment_id,
+                            "Katalog va narxlar haqida ma’lumotni DM orqali yubordik 😊"
+                        )
+                    else:
+                        ai_reply = get_ai_reply(comment_text, business)
+                        reply_to_comment(access_token, comment_id, ai_reply)
 
         return JSONResponse(content={"status": "ok"}, status_code=200)
 
