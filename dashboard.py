@@ -50,17 +50,46 @@ def get_businesses():
         return []
 
 
+def find_business_by_instagram_id(instagram_business_id):
+    try:
+        result = (
+            supabase.table("businesses")
+            .select("id, business_name, instagram_business_id")
+            .eq("instagram_business_id", instagram_business_id)
+            .execute()
+        )
+        return result.data or []
+    except Exception as e:
+        st.error(f"Failed to check duplicate business: {e}")
+        return []
+
+
 def create_business(data):
-    return supabase.table("businesses").insert(data).execute()
+    try:
+        existing = find_business_by_instagram_id(data["instagram_business_id"])
+
+        if existing:
+            st.warning("Business with this Instagram Business ID already exists.")
+            return None
+
+        return supabase.table("businesses").insert(data).execute()
+
+    except Exception as e:
+        st.error(f"Supabase insert error: {e}")
+        return None
 
 
 def update_business(business_id, data):
-    return (
-        supabase.table("businesses")
-        .update(data)
-        .eq("id", business_id)
-        .execute()
-    )
+    try:
+        return (
+            supabase.table("businesses")
+            .update(data)
+            .eq("id", business_id)
+            .execute()
+        )
+    except Exception as e:
+        st.error(f"Supabase update error: {e}")
+        return None
 
 
 # ---------------- UI ----------------
@@ -91,21 +120,26 @@ with tab2:
     )
 
     if st.button("➕ Create Business", type="primary"):
-        if not new_business_name or not new_instagram_business_id or not new_access_token:
-            st.error("Business name, Instagram Business ID, and Access Token are required.")
+        if not new_business_name.strip():
+            st.error("Business name is required.")
+        elif not new_instagram_business_id.strip():
+            st.error("Instagram Business ID is required.")
+        elif not new_access_token.strip():
+            st.error("Instagram Access Token is required.")
         else:
-            create_business({
-                "business_name": new_business_name,
-                "instagram_business_id": new_instagram_business_id,
-                "access_token": new_access_token,
-                "business_type": new_business_type,
+            result = create_business({
+                "business_name": new_business_name.strip(),
+                "instagram_business_id": new_instagram_business_id.strip(),
+                "access_token": new_access_token.strip(),
+                "business_type": new_business_type.strip(),
                 "language": new_language,
-                "tone": new_tone,
+                "tone": new_tone.strip(),
                 "bot_enabled": True,
             })
 
-            st.success("Business created successfully.")
-            st.rerun()
+            if result:
+                st.success("Business created successfully.")
+                st.rerun()
 
 
 # ---------------- EDIT BUSINESS ----------------
@@ -250,30 +284,36 @@ with tab1:
     )
 
     if st.button("💾 Save Business", type="primary"):
-        update_data = {
-            "business_name": business_name,
-            "business_type": business_type,
-            "language": language,
-            "tone": tone,
-            "bot_enabled": bot_enabled,
-            "instagram_business_id": instagram_business_id,
-            "access_token": access_token,
-            "products": products,
-            "prices": prices,
-            "delivery_info": delivery_info,
-            "working_hours": working_hours,
-            "faq": faq,
-            "catalog_link": catalog_link,
-            "sales_phone": sales_phone,
-            "telegram_single": telegram_single,
-            "telegram_package": telegram_package,
-            "telegram_bag": telegram_bag,
-            "knowledge": knowledge,
-        }
+        if not business_name.strip():
+            st.error("Business name is required.")
+        elif not instagram_business_id.strip():
+            st.error("Instagram Business ID is required.")
+        elif not access_token.strip():
+            st.error("Instagram Access Token is required.")
+        else:
+            update_data = {
+                "business_name": business_name.strip(),
+                "business_type": business_type.strip(),
+                "language": language,
+                "tone": tone.strip(),
+                "bot_enabled": bot_enabled,
+                "instagram_business_id": instagram_business_id.strip(),
+                "access_token": access_token.strip(),
+                "products": products.strip(),
+                "prices": prices.strip(),
+                "delivery_info": delivery_info.strip(),
+                "working_hours": working_hours.strip(),
+                "faq": faq.strip(),
+                "catalog_link": catalog_link.strip(),
+                "sales_phone": sales_phone.strip(),
+                "telegram_single": telegram_single.strip(),
+                "telegram_package": telegram_package.strip(),
+                "telegram_bag": telegram_bag.strip(),
+                "knowledge": knowledge.strip(),
+            }
 
-        try:
-            update_business(business["id"], update_data)
-            st.success("Business updated successfully.")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Failed to update business: {e}")
+            result = update_business(business["id"], update_data)
+
+            if result:
+                st.success("Business updated successfully.")
+                st.rerun()
