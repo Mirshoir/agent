@@ -442,7 +442,7 @@ def reply_to_comment(access_token: str, comment_id: str, text: str):
 async def home():
     return {
         "status": "ok",
-        "oauth_mode": "direct_instagram_login_auto_bind_webhook_id",
+        "oauth_mode": "direct_instagram_login_auto_bind_webhook_id_dm_parser_fixed",
         "connect_instagram": "/connect-instagram",
     }
 
@@ -489,11 +489,26 @@ async def receive_webhook(request: Request):
                 continue
 
             for messaging in entry.get("messaging", []):
+                print("Raw messaging event:", messaging)
+
                 sender_id = messaging.get("sender", {}).get("id")
                 message = messaging.get("message", {})
-                message_text = message.get("text")
-                message_id = message.get("mid")
-                is_echo = message.get("is_echo", False)
+
+                message_text = (
+                    message.get("text")
+                    or messaging.get("message", {}).get("text")
+                )
+
+                message_id = (
+                    message.get("mid")
+                    or messaging.get("message", {}).get("mid")
+                    or str(messaging.get("timestamp", ""))
+                )
+
+                is_echo = (
+                    message.get("is_echo", False)
+                    or messaging.get("is_echo", False)
+                )
 
                 if is_echo:
                     print("Ignored echo message")
@@ -511,11 +526,26 @@ async def receive_webhook(request: Request):
                     processed_message_ids.add(message_id)
 
                 if sender_id and message_text:
-                    if is_catalog_request(message_text):
-                        send_dm(access_token, sender_id, build_catalog_dm(business))
-                    else:
-                        ai_reply = get_ai_reply(message_text, business)
-                        send_dm(access_token, sender_id, ai_reply)
+                    print("Incoming DM text:", message_text)
+
+                    try:
+                        if is_catalog_request(message_text):
+                            reply_text = build_catalog_dm(business)
+                        else:
+                            reply_text = get_ai_reply(message_text, business)
+
+                        print("AI reply:", reply_text)
+
+                        send_dm(
+                            access_token=access_token,
+                            recipient_id=sender_id,
+                            text=reply_text,
+                        )
+
+                    except Exception as e:
+                        print("DM processing error:", str(e))
+                else:
+                    print("Skipped DM. sender_id or message_text missing.")
 
             for change in entry.get("changes", []):
                 if change.get("field") != "comments":
