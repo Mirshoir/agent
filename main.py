@@ -158,11 +158,12 @@ def exchange_code_for_token(code: str) -> dict:
 def exchange_for_long_lived_token(short_lived_token: str) -> str:
     """
     Exchange a short-lived Instagram token (~1 hour) for a long-lived token (~60 days).
+    Must use graph.facebook.com — graph.instagram.com does NOT support this endpoint.
     Falls back to the original token on failure so we never block the OAuth flow.
     """
     try:
         res = requests.get(
-            "https://graph.instagram.com/access_token",
+            f"https://graph.facebook.com/{GRAPH_VERSION}/oauth/access_token",
             params={
                 "grant_type": "ig_exchange_token",
                 "client_secret": META_APP_SECRET,
@@ -186,30 +187,81 @@ def exchange_for_long_lived_token(short_lived_token: str) -> str:
     return short_lived_token
 
 
-def subscribe_to_instagram_webhooks(access_token: str) -> dict:
+def get_linked_facebook_page(access_token: str) -> dict:
     """
-    Tell Meta to start delivering webhook events (messages, comments)
-    for this Instagram account to our app.
-
-    This is the critical step that is missing for OAuth-connected accounts.
-    Without this call, Meta never sends DM/comment webhook events for the account
-    even though the app appears subscribed in the dashboard.
+    Get the Facebook Page linked to the Instagram Business account.
+    Instagram messaging webhooks are delivered via the Facebook Page subscription,
+    not via the Instagram user endpoint — so we need the Page ID first.
     """
     try:
-        res = requests.post(
-            f"https://graph.instagram.com/{GRAPH_VERSION}/me/subscribed_apps",
+        res = requests.get(
+            f"https://graph.facebook.com/{GRAPH_VERSION}/me/accounts",
             params={
                 "access_token": access_token,
-                "subscribed_fields": "messages,comments,mentions",
+                "fields": "id,name,instagram_business_account",
             },
             timeout=30,
         )
-        print("Webhook subscription status:", res.status_code)
-        print("Webhook subscription response:", res.text)
+        print("FB Pages status:", res.status_code)
+        print("FB Pages response:", res.text)
+
+        if res.ok:
+            pages = res.json().get("data", [])
+            for page in pages:
+                if page.get("instagram_business_account"):
+                    print("Found linked Facebook Page:", page.get("id"), page.get("name"))
+                    return page
+
+        print("No linked Facebook Page found with instagram_business_account.")
+        return {}
+    except Exception as e:
+        print("FB Page fetch error:", str(e))
+        return {}
+
+
+def subscribe_page_to_webhooks(page_id: str, page_access_token: str) -> dict:
+    """
+    Subscribe a Facebook Page to Instagram messaging webhooks.
+    This is the call that tells Meta to actually deliver DM events to our server.
+    Must use graph.facebook.com — graph.instagram.com returns IGApiException code 100.
+    """
+    try:
+        res = requests.post(
+            f"https://graph.facebook.com/{GRAPH_VERSION}/{page_id}/subscribed_apps",
+            params={
+                "access_token": page_access_token,
+                "subscribed_fields": "messages,messaging_postbacks,instagram_manage_messages",
+            },
+            timeout=30,
+        )
+        print("Page webhook subscription status:", res.status_code)
+        print("Page webhook subscription response:", res.text)
         return res.json()
     except Exception as e:
-        print("Webhook subscription error:", str(e))
+        print("Page webhook subscription error:", str(e))
         return {"error": str(e)}
+
+
+def subscribe_to_instagram_webhooks(access_token: str) -> dict:
+    """
+    Find the linked Facebook Page and subscribe it to messaging webhooks.
+
+    Instagram DM webhooks flow through Facebook's infrastructure — not the Instagram
+    Graph API directly. Calling /me/subscribed_apps on graph.instagram.com always
+    returns IGApiException code 100 (Unsupported request method type: post).
+
+    The correct flow is:
+      1. Find the Facebook Page linked to the Instagram account via /me/accounts
+      2. POST to /{page_id}/subscribed_apps on graph.facebook.com
+    """
+    page = get_linked_facebook_page(access_token)
+    page_id = page.get("id")
+
+    if not page_id:
+        print("No linked Facebook Page found — cannot subscribe to webhooks.")
+        return {"error": "No linked Facebook Page found. Ensure the Instagram account is linked to a Facebook Page and the user granted page permissions."}
+
+    return subscribe_page_to_webhooks(page_id, access_token)
 
 
 def get_instagram_profile(access_token: str, fallback_user_id: str = "") -> dict:
