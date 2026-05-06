@@ -442,7 +442,7 @@ def reply_to_comment(access_token: str, comment_id: str, text: str):
 async def home():
     return {
         "status": "ok",
-        "oauth_mode": "direct_instagram_login_auto_bind_webhook_id_dm_parser_fixed",
+        "oauth_mode": "direct_instagram_login_strict_incoming_only",
         "connect_instagram": "/connect-instagram",
     }
 
@@ -491,31 +491,49 @@ async def receive_webhook(request: Request):
             for messaging in entry.get("messaging", []):
                 print("Raw messaging event:", messaging)
 
-                sender_id = messaging.get("sender", {}).get("id")
-                message = messaging.get("message", {})
+                # Ignore non-message events
+                if "read" in messaging:
+                    print("Ignored read receipt")
+                    continue
 
-                message_text = (
-                    message.get("text")
-                    or messaging.get("message", {}).get("text")
-                )
+                if "delivery" in messaging:
+                    print("Ignored delivery receipt")
+                    continue
 
-                message_id = (
-                    message.get("mid")
-                    or messaging.get("message", {}).get("mid")
-                    or str(messaging.get("timestamp", ""))
-                )
+                message = messaging.get("message") or {}
 
-                is_echo = (
-                    message.get("is_echo", False)
-                    or messaging.get("is_echo", False)
-                )
+                if not message:
+                    print("Ignored event without message object")
+                    continue
 
+                sender_id = str(messaging.get("sender", {}).get("id", "")).strip()
+                recipient_id = str(messaging.get("recipient", {}).get("id", "")).strip()
+
+                message_text = message.get("text")
+                message_id = message.get("mid")
+                is_echo = bool(message.get("is_echo"))
+
+                # Critical self-loop protections
                 if is_echo:
                     print("Ignored echo message")
                     continue
 
                 if sender_id == webhook_entry_id:
-                    print("Ignored own sender message")
+                    print("Ignored self-sent message")
+                    continue
+
+                if recipient_id != webhook_entry_id:
+                    print(
+                        "Ignored message not addressed to this business.",
+                        "recipient_id:",
+                        recipient_id,
+                        "webhook_entry_id:",
+                        webhook_entry_id
+                    )
+                    continue
+
+                if not sender_id or not message_text:
+                    print("Skipped DM. sender_id or message_text missing.")
                     continue
 
                 if message_id and message_id in processed_message_ids:
@@ -525,27 +543,24 @@ async def receive_webhook(request: Request):
                 if message_id:
                     processed_message_ids.add(message_id)
 
-                if sender_id and message_text:
-                    print("Incoming DM text:", message_text)
+                print("Incoming customer DM:", message_text)
 
-                    try:
-                        if is_catalog_request(message_text):
-                            reply_text = build_catalog_dm(business)
-                        else:
-                            reply_text = get_ai_reply(message_text, business)
+                try:
+                    if is_catalog_request(message_text):
+                        reply_text = build_catalog_dm(business)
+                    else:
+                        reply_text = get_ai_reply(message_text, business)
 
-                        print("AI reply:", reply_text)
+                    print("AI reply:", reply_text)
 
-                        send_dm(
-                            access_token=access_token,
-                            recipient_id=sender_id,
-                            text=reply_text,
-                        )
+                    send_dm(
+                        access_token=access_token,
+                        recipient_id=sender_id,
+                        text=reply_text,
+                    )
 
-                    except Exception as e:
-                        print("DM processing error:", str(e))
-                else:
-                    print("Skipped DM. sender_id or message_text missing.")
+                except Exception as e:
+                    print("DM processing error:", str(e))
 
             for change in entry.get("changes", []):
                 if change.get("field") != "comments":
