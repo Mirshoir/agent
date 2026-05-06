@@ -17,16 +17,8 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 META_APP_ID = os.getenv("META_APP_ID")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
-
-REDIRECT_URI = os.getenv(
-    "REDIRECT_URI",
-    "https://agent-1-xi6h.onrender.com/auth/callback"
-)
-
-DASHBOARD_URL = os.getenv(
-    "DASHBOARD_URL",
-    "https://instaagent.streamlit.app"
-)
+REDIRECT_URI = os.getenv("REDIRECT_URI", "https://agent-1-xi6h.onrender.com/auth/callback")
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://instaagent.streamlit.app")
 
 if not SUPABASE_URL:
     raise RuntimeError("Missing SUPABASE_URL")
@@ -54,19 +46,11 @@ def get_business(instagram_business_id: str):
         .limit(1)
         .execute()
     )
-
-    if not result.data:
-        print("Business not found:", instagram_business_id)
-        return None
-
-    return result.data[0]
+    return result.data[0] if result.data else None
 
 
 def upsert_connected_business(profile: dict, access_token: str):
-    instagram_business_id = str(
-        profile.get("user_id") or profile.get("id") or ""
-    ).strip()
-
+    instagram_business_id = str(profile.get("user_id") or profile.get("id") or "").strip()
     username = profile.get("username", "")
 
     if not instagram_business_id:
@@ -74,28 +58,25 @@ def upsert_connected_business(profile: dict, access_token: str):
 
     existing = get_business(instagram_business_id)
 
-    update_data = {
+    data = {
         "instagram_business_id": instagram_business_id,
         "access_token": access_token,
         "bot_enabled": True,
-    }
-
-    if username:
-        update_data["business_name"] = username
-
-    if existing:
-        result = (
-            supabase.table("businesses")
-            .update(update_data)
-            .eq("id", existing["id"])
-            .execute()
-        )
-        return result.data
-
-    insert_data = {
-        "instagram_business_id": instagram_business_id,
         "business_name": username or f"Instagram {instagram_business_id}",
         "business_type": "Instagram Business",
+    }
+
+    if existing:
+        return (
+            supabase.table("businesses")
+            .update(data)
+            .eq("id", existing["id"])
+            .execute()
+            .data
+        )
+
+    insert_data = {
+        **data,
         "language": "uz",
         "tone": "friendly, polite, sales-focused",
         "knowledge": "",
@@ -109,15 +90,10 @@ def upsert_connected_business(profile: dict, access_token: str):
         "telegram_single": "",
         "telegram_package": "",
         "telegram_bag": "",
-        "access_token": access_token,
-        "bot_enabled": True,
     }
 
-    result = supabase.table("businesses").insert(insert_data).execute()
-    return result.data
+    return supabase.table("businesses").insert(insert_data).execute().data
 
-
-# ---------------- DIRECT INSTAGRAM OAUTH ----------------
 
 @app.get("/connect-instagram")
 async def connect_instagram():
@@ -136,8 +112,9 @@ async def connect_instagram():
         "state": secrets.token_urlsafe(16),
     }
 
-    auth_url = "https://www.instagram.com/oauth/authorize?" + urlencode(params)
-    return RedirectResponse(auth_url)
+    return RedirectResponse(
+        "https://www.instagram.com/oauth/authorize?" + urlencode(params)
+    )
 
 
 @app.get("/auth/callback")
@@ -154,12 +131,6 @@ async def auth_callback(request: Request):
 
     if not code:
         return PlainTextResponse("Missing code from Instagram", status_code=400)
-
-    if not META_APP_ID or not META_APP_SECRET:
-        return PlainTextResponse(
-            "Missing META_APP_ID or META_APP_SECRET",
-            status_code=500,
-        )
 
     try:
         token_res = requests.post(
@@ -178,20 +149,15 @@ async def auth_callback(request: Request):
         print("OAuth token response:", token_res.text)
 
         token_res.raise_for_status()
-        token_data = token_res.json()
-
-        access_token = token_data.get("access_token")
+        access_token = token_res.json().get("access_token")
 
         if not access_token:
-            return PlainTextResponse(
-                f"No access token returned: {token_data}",
-                status_code=500,
-            )
+            return PlainTextResponse("No access token returned", status_code=500)
 
-        print("Received Instagram access token:", safe_token(access_token))
+        print("Received token:", safe_token(access_token))
 
         profile_res = requests.get(
-            "https://graph.instagram.com/me",
+            "https://graph.instagram.com/v21.0/me",
             params={
                 "fields": "user_id,username",
                 "access_token": access_token,
@@ -217,41 +183,24 @@ async def auth_callback(request: Request):
             f"{DASHBOARD_URL}?connected=success&ig_id={profile.get('id')}"
         )
 
-    except requests.HTTPError as e:
-        response_text = e.response.text if e.response else str(e)
-        print("OAuth HTTP error:", response_text)
-        return PlainTextResponse(
-            f"OAuth HTTP error: {response_text}",
-            status_code=400,
-        )
-
     except Exception as e:
-        print("OAuth callback error:", str(e))
-        return PlainTextResponse(
-            f"OAuth error: {str(e)}",
-            status_code=500,
-        )
+        print("OAuth error:", str(e))
+        return PlainTextResponse(f"OAuth error: {str(e)}", status_code=500)
 
-
-# ---------------- BOT LOGIC ----------------
 
 def is_catalog_request(text: str) -> bool:
     text = text.lower()
-
     keywords = [
         "catalog", "katalog", "каталог",
         "price", "narx", "narxi", "цена", "прайс",
         "cost", "how much", "qancha", "сколько",
     ]
-
     return any(keyword in text for keyword in keywords)
 
 
 def get_catalog_link(business: dict) -> str:
-    catalog_link = business.get("catalog_link")
-
-    if catalog_link:
-        return catalog_link
+    if business.get("catalog_link"):
+        return business["catalog_link"]
 
     knowledge = business.get("knowledge", "")
 
@@ -278,55 +227,26 @@ def build_catalog_dm(business: dict) -> str:
 
 def build_business_context(business: dict) -> str:
     return f"""
-Business name:
-{business.get("business_name", "")}
-
-Business type:
-{business.get("business_type", "")}
-
-Tone:
-{business.get("tone", "")}
-
-Products / services:
-{business.get("products", "")}
-
-Prices:
-{business.get("prices", "")}
-
-Delivery info:
-{business.get("delivery_info", "")}
-
-Working hours:
-{business.get("working_hours", "")}
-
-FAQ:
-{business.get("faq", "")}
-
-Catalog link:
-{business.get("catalog_link", "")}
-
-Sales phone:
-{business.get("sales_phone", "")}
-
-Telegram single product:
-{business.get("telegram_single", "")}
-
-Telegram package:
-{business.get("telegram_package", "")}
-
-Telegram bag / meshok:
-{business.get("telegram_bag", "")}
-
-General knowledge:
-{business.get("knowledge", "")}
+Business name: {business.get("business_name", "")}
+Business type: {business.get("business_type", "")}
+Tone: {business.get("tone", "")}
+Products / services: {business.get("products", "")}
+Prices: {business.get("prices", "")}
+Delivery info: {business.get("delivery_info", "")}
+Working hours: {business.get("working_hours", "")}
+FAQ: {business.get("faq", "")}
+Catalog link: {business.get("catalog_link", "")}
+Sales phone: {business.get("sales_phone", "")}
+Telegram single product: {business.get("telegram_single", "")}
+Telegram package: {business.get("telegram_package", "")}
+Telegram bag / meshok: {business.get("telegram_bag", "")}
+General knowledge: {business.get("knowledge", "")}
 """
 
 
 def get_ai_reply(user_text: str, business: dict) -> str:
-    url = "https://api.mistral.ai/v1/chat/completions"
-
-    language = business.get("language", "uz")
     business_context = build_business_context(business)
+    language = business.get("language", "uz")
 
     system_prompt = f"""
 You are the virtual Instagram sales assistant for this business.
@@ -341,29 +261,17 @@ Language rules:
 - If English, reply in English.
 - If unclear, use this default language: {language}.
 
-Opening conversation rules:
-- If this is the beginning of a conversation, greet the user.
-- Introduce yourself as the business virtual assistant.
-- Politely say the user may leave name, phone number, address, interested product, and quantity for faster help.
-- Do not force details.
-- Do not repeat this request many times.
-- If user ignores it, continue naturally.
-
-Sales style:
-- Reply shortly, naturally, and politely.
-- Be helpful and sales-focused.
-- Do not sound robotic.
+Rules:
+- Reply shortly, naturally, politely.
 - Do not say you are an AI model.
-
-Strict business rules:
-- Use only the business profile above.
 - Do not invent prices, stock, addresses, discounts, delivery details, or product availability.
 - If information is missing, ask one short follow-up question.
-- If user wants a human/sales manager, provide the contact details from business profile.
+- Do not force users to share phone/address/name.
+- Do not repeatedly ask for contact details.
 """
 
     res = requests.post(
-        url,
+        "https://api.mistral.ai/v1/chat/completions",
         headers={
             "Authorization": f"Bearer {MISTRAL_API_KEY}",
             "Content-Type": "application/json",
@@ -388,7 +296,7 @@ Strict business rules:
 
 def send_dm(access_token: str, recipient_id: str, text: str):
     res = requests.post(
-        "https://graph.instagram.com/v25.0/me/messages",
+        "https://graph.instagram.com/v21.0/me/messages",
         params={"access_token": access_token},
         json={
             "recipient": {"id": recipient_id},
@@ -403,7 +311,7 @@ def send_dm(access_token: str, recipient_id: str, text: str):
 
 def reply_to_comment(access_token: str, comment_id: str, text: str):
     res = requests.post(
-        f"https://graph.instagram.com/v25.0/{comment_id}/replies",
+        f"https://graph.instagram.com/v21.0/{comment_id}/replies",
         params={
             "access_token": access_token,
             "message": text,
@@ -415,13 +323,11 @@ def reply_to_comment(access_token: str, comment_id: str, text: str):
     return res
 
 
-# ---------------- ROUTES ----------------
-
 @app.get("/")
 async def home():
     return {
         "status": "ok",
-        "oauth_mode": "direct_instagram_login",
+        "oauth_mode": "direct_instagram_login_v21",
         "connect_instagram": "/connect-instagram",
     }
 
@@ -449,15 +355,9 @@ async def receive_webhook(request: Request):
         for entry in data.get("entry", []):
             instagram_business_id = str(entry.get("id", "")).strip()
 
-            if not instagram_business_id:
-                continue
-
             business = get_business(instagram_business_id)
 
-            if not business:
-                continue
-
-            if not business.get("bot_enabled", True):
+            if not business or not business.get("bot_enabled", True):
                 continue
 
             access_token = business.get("access_token")
@@ -492,7 +392,6 @@ async def receive_webhook(request: Request):
                     continue
 
                 value = change.get("value", {})
-
                 comment_id = value.get("id")
                 comment_text = value.get("text")
                 from_id = value.get("from", {}).get("id")
@@ -524,7 +423,6 @@ async def receive_webhook(request: Request):
 
     except Exception as e:
         print("Webhook error:", str(e))
-
         return JSONResponse(
             content={"status": "error", "message": str(e)},
             status_code=500,
