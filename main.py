@@ -22,12 +22,12 @@ META_APP_SECRET = os.getenv("META_APP_SECRET")
 
 REDIRECT_URI = os.getenv(
     "REDIRECT_URI",
-    "https://agent-1-xi6h.onrender.com/auth/callback"
+    "https://agent-1-xi6h.onrender.com/auth/callback",
 )
 
 DASHBOARD_URL = os.getenv(
     "DASHBOARD_URL",
-    "https://instaagent.streamlit.app"
+    "https://instaagent.streamlit.app",
 )
 
 GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v21.0")
@@ -195,13 +195,6 @@ def exchange_code_for_token(code: str):
 
 
 def get_instagram_profile(access_token: str, fallback_user_id: str = ""):
-    """
-    IMPORTANT:
-    Do not use https://graph.instagram.com/v21.0/me here.
-    Instagram Login profile endpoint should be:
-    https://graph.instagram.com/me
-    """
-
     try:
         res = requests.get(
             "https://graph.instagram.com/me",
@@ -238,6 +231,56 @@ def get_instagram_profile(access_token: str, fallback_user_id: str = ""):
         "user_id": fallback_user_id,
         "username": f"instagram_{fallback_user_id}",
     }
+
+
+def subscribe_instagram_webhooks(instagram_account_id: str, access_token: str):
+    instagram_account_id = normalize_id(instagram_account_id)
+
+    if not instagram_account_id:
+        print("Webhook subscribe skipped: missing instagram_account_id")
+        return None
+
+    fields = ",".join([
+        "messages",
+        "messaging_postbacks",
+        "message_reactions",
+        "message_edit",
+        "messaging_seen",
+        "comments",
+        "mentions",
+    ])
+
+    urls = [
+        f"https://graph.instagram.com/{instagram_account_id}/subscribed_apps",
+        f"https://graph.facebook.com/{GRAPH_VERSION}/{instagram_account_id}/subscribed_apps",
+    ]
+
+    last_response = None
+
+    for url in urls:
+        try:
+            res = requests.post(
+                url,
+                params={
+                    "subscribed_fields": fields,
+                    "access_token": access_token,
+                },
+                timeout=30,
+            )
+
+            print("Webhook subscription URL:", url)
+            print("Webhook subscription status:", res.status_code)
+            print("Webhook subscription response:", res.text)
+
+            last_response = res
+
+            if res.ok:
+                return res
+
+        except Exception as e:
+            print("Webhook subscription error:", str(e))
+
+    return last_response
 
 
 def upsert_connected_business(profile: dict, access_token: str):
@@ -295,64 +338,22 @@ def upsert_connected_business(profile: dict, access_token: str):
         "telegram_bag": "",
     }
 
-    try:
-        result = (
-            supabase.table("businesses")
-            .upsert(insert_data, on_conflict="instagram_business_id")
-            .execute()
-        )
+    result = (
+        supabase.table("businesses")
+        .upsert(insert_data, on_conflict="instagram_business_id")
+        .execute()
+    )
 
-        return result.data
-
-    except Exception as e:
-        print("Upsert failed:", str(e))
-
-        existing = get_business(instagram_user_id)
-
-        if existing:
-            result = (
-                supabase.table("businesses")
-                .update({
-                    "access_token": access_token,
-                    "bot_enabled": True,
-                    "business_name": username,
-                    "business_type": "Instagram Business",
-                })
-                .eq("id", existing["id"])
-                .execute()
-            )
-
-            return result.data
-
-        raise
+    return result.data
 
 
 @app.get("/")
 async def home():
     return {
         "status": "ok",
-        "version": "fixed_profile_endpoint_with_supabase_debug",
+        "version": "oauth_auto_webhook_subscription",
         "connect_instagram": "/connect-instagram",
-        "debug_businesses": "/debug/businesses",
         "debug_business_ids": "/debug/business-ids",
-        "debug_enabled_businesses": "/debug/enabled-businesses",
-    }
-
-
-@app.get("/debug/businesses")
-async def debug_businesses():
-    result = (
-        supabase.table("businesses")
-        .select("*")
-        .order("created_at", desc=True)
-        .execute()
-    )
-
-    rows = [sanitize_business_row(row) for row in (result.data or [])]
-
-    return {
-        "count": len(rows),
-        "businesses": rows,
     }
 
 
@@ -381,47 +382,21 @@ async def debug_business_ids():
             "created_at": row.get("created_at"),
         })
 
-    return {
-        "count": len(rows),
-        "rows": rows,
-    }
+    return {"count": len(rows), "rows": rows}
 
 
-@app.get("/debug/business/{instagram_id}")
-async def debug_business_by_instagram_id(instagram_id: str):
-    instagram_id = normalize_id(instagram_id)
-
+@app.get("/debug/businesses")
+async def debug_businesses():
     result = (
         supabase.table("businesses")
         .select("*")
-        .eq("instagram_business_id", instagram_id)
+        .order("created_at", desc=True)
         .execute()
     )
 
     rows = [sanitize_business_row(row) for row in (result.data or [])]
 
-    return {
-        "instagram_id_searched": instagram_id,
-        "count": len(rows),
-        "rows": rows,
-    }
-
-
-@app.get("/debug/enabled-businesses")
-async def debug_enabled_businesses():
-    result = (
-        supabase.table("businesses")
-        .select("*")
-        .eq("bot_enabled", True)
-        .execute()
-    )
-
-    rows = [sanitize_business_row(row) for row in (result.data or [])]
-
-    return {
-        "count": len(rows),
-        "rows": rows,
-    }
+    return {"count": len(rows), "businesses": rows}
 
 
 @app.get("/debug/find-business")
@@ -433,6 +408,35 @@ async def debug_find_business(entry_id: str = "", recipient_id: str = ""):
         "recipient_id": recipient_id,
         "matched": bool(business),
         "business": sanitize_business_row(business) if business else None,
+    }
+
+
+@app.get("/debug/subscribe/{instagram_id}")
+async def debug_subscribe_instagram(instagram_id: str):
+    business = get_business(instagram_id)
+
+    if not business:
+        return {
+            "ok": False,
+            "message": "Business not found by instagram_business_id",
+            "instagram_id": instagram_id,
+        }
+
+    access_token = business.get("access_token")
+
+    if not access_token:
+        return {
+            "ok": False,
+            "message": "Business has no access token",
+            "instagram_id": instagram_id,
+        }
+
+    res = subscribe_instagram_webhooks(instagram_id, access_token)
+
+    return {
+        "ok": bool(res and res.ok),
+        "status_code": res.status_code if res else None,
+        "response": res.text if res else None,
     }
 
 
@@ -506,6 +510,15 @@ async def auth_callback(request: Request):
         stored = upsert_connected_business(profile, access_token)
 
         print("Stored business result:", stored)
+
+        subscribe_res = subscribe_instagram_webhooks(
+            instagram_account_id=profile.get("user_id") or instagram_user_id,
+            access_token=access_token,
+        )
+
+        if subscribe_res is not None:
+            print("Auto subscribe final status:", subscribe_res.status_code)
+            print("Auto subscribe final response:", subscribe_res.text)
 
         return RedirectResponse(
             f"{DASHBOARD_URL}?connected=success&ig_id={profile.get('user_id')}"
@@ -653,14 +666,6 @@ Language rules:
 - If English, reply in English.
 - If unclear, use this default language: {language}.
 
-Opening conversation rules:
-- If this is the beginning of a conversation, greet the user.
-- Introduce yourself as the business virtual assistant.
-- Politely say the user may leave name, phone number, address, interested product, and quantity for faster help.
-- Do not force details.
-- Do not repeat this request many times.
-- If user ignores it, continue naturally.
-
 Sales style:
 - Reply shortly, naturally, and politely.
 - Be helpful and sales-focused.
@@ -715,16 +720,8 @@ Strict business rules:
 def send_dm(access_token: str, recipient_id: str, text: str):
     recipient_id = normalize_id(recipient_id)
 
-    if not access_token:
-        print("Cannot send DM: missing access token")
-        return None
-
-    if not recipient_id:
-        print("Cannot send DM: missing recipient_id")
-        return None
-
-    if not text:
-        print("Cannot send DM: empty text")
+    if not access_token or not recipient_id or not text:
+        print("Cannot send DM: missing token, recipient_id, or text")
         return None
 
     res = requests.post(
@@ -744,12 +741,8 @@ def send_dm(access_token: str, recipient_id: str, text: str):
 def reply_to_comment(access_token: str, comment_id: str, text: str):
     comment_id = normalize_id(comment_id)
 
-    if not access_token:
-        print("Cannot reply comment: missing access token")
-        return None
-
-    if not comment_id:
-        print("Cannot reply comment: missing comment_id")
+    if not access_token or not comment_id or not text:
+        print("Cannot reply comment: missing token, comment_id, or text")
         return None
 
     res = requests.post(
@@ -802,16 +795,8 @@ async def process_messaging_event(entry_id: str, messaging: dict):
         print("Ignored echo message")
         return
 
-    if not sender_id or not recipient_id:
-        print("Skipped DM: sender_id or recipient_id missing")
-        return
-
-    if sender_id == recipient_id:
-        print("Ignored self-message where sender == recipient")
-        return
-
-    if not message_text:
-        print("Skipped DM: no text message")
+    if not sender_id or not recipient_id or not message_text:
+        print("Skipped DM: missing sender, recipient, or text")
         return
 
     if already_processed(processed_message_ids, message_id):
@@ -833,8 +818,6 @@ async def process_messaging_event(entry_id: str, messaging: dict):
     if not access_token:
         print("Missing access token for business:", business.get("business_name"))
         return
-
-    print("Incoming customer DM:", message_text)
 
     try:
         if is_catalog_request(message_text):
