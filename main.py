@@ -45,6 +45,19 @@ processed_message_ids = {}
 DEDUP_TTL_SECONDS = 60 * 60
 
 
+def normalize_id(value) -> str:
+    return str(value or "").strip()
+
+
+def safe_token(token: str) -> str:
+    if not token:
+        return ""
+    token = str(token)
+    if len(token) <= 18:
+        return token[:4] + "..."
+    return token[:10] + "..." + token[-6:]
+
+
 def cleanup_dedup_cache():
     now = time.time()
 
@@ -71,20 +84,10 @@ def already_processed(cache: dict, event_id: str) -> bool:
     return False
 
 
-def safe_token(token: str) -> str:
-    if not token:
-        return ""
-
-    token = str(token)
-
-    if len(token) <= 18:
-        return token[:4] + "..."
-
-    return token[:10] + "..." + token[-6:]
-
-
-def normalize_id(value) -> str:
-    return str(value or "").strip()
+def sanitize_business_row(row: dict):
+    clean = dict(row)
+    clean["access_token"] = safe_token(clean.get("access_token", ""))
+    return clean
 
 
 def get_business(instagram_business_id: str):
@@ -111,12 +114,19 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
     entry_id = normalize_id(entry_id)
     recipient_id = normalize_id(recipient_id)
 
+    print("Finding business for:", {
+        "entry_id": entry_id,
+        "recipient_id": recipient_id,
+    })
+
     business = get_business(entry_id)
+
     if business:
         print("Business matched by entry_id:", entry_id)
         return business
 
     business = get_business(recipient_id)
+
     if business:
         print("Business matched by recipient_id:", recipient_id)
         return business
@@ -139,7 +149,7 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
             print(
                 "SAFE AUTO-BIND:",
                 "webhook_id=", bind_id,
-                "business=", business.get("business_name")
+                "business=", business.get("business_name"),
             )
 
             updated = (
@@ -155,10 +165,10 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
         return business
 
     print(
-        "No matching business found.",
+        "No safe business match found.",
         "entry_id=", entry_id,
         "recipient_id=", recipient_id,
-        "enabled_business_count=", len(rows)
+        "enabled_business_count=", len(rows),
     )
 
     return None
@@ -185,11 +195,18 @@ def exchange_code_for_token(code: str):
 
 
 def get_instagram_profile(access_token: str, fallback_user_id: str = ""):
+    """
+    IMPORTANT:
+    Do not use https://graph.instagram.com/v21.0/me here.
+    Instagram Login profile endpoint should be:
+    https://graph.instagram.com/me
+    """
+
     try:
         res = requests.get(
-            f"https://graph.instagram.com/{GRAPH_VERSION}/me",
+            "https://graph.instagram.com/me",
             params={
-                "fields": "id,user_id,username,account_type",
+                "fields": "user_id,username",
                 "access_token": access_token,
             },
             timeout=30,
@@ -209,7 +226,6 @@ def get_instagram_profile(access_token: str, fallback_user_id: str = ""):
                 "id": instagram_id,
                 "user_id": instagram_id,
                 "username": data.get("username") or f"instagram_{instagram_id}",
-                "account_type": data.get("account_type", ""),
             }
 
     except Exception as e:
@@ -221,7 +237,6 @@ def get_instagram_profile(access_token: str, fallback_user_id: str = ""):
         "id": fallback_user_id,
         "user_id": fallback_user_id,
         "username": f"instagram_{fallback_user_id}",
-        "account_type": "",
     }
 
 
@@ -234,27 +249,6 @@ def upsert_connected_business(profile: dict, access_token: str):
         raise ValueError("Instagram profile did not return user_id/id")
 
     username = profile.get("username") or f"instagram_{instagram_user_id}"
-
-    row = {
-        "instagram_business_id": instagram_user_id,
-        "access_token": access_token,
-        "bot_enabled": True,
-        "business_name": username,
-        "business_type": "Instagram Business",
-        "language": "uz",
-        "tone": "friendly, polite, sales-focused",
-        "knowledge": "",
-        "products": "",
-        "prices": "",
-        "delivery_info": "",
-        "working_hours": "",
-        "faq": "",
-        "catalog_link": "",
-        "sales_phone": "",
-        "telegram_single": "",
-        "telegram_package": "",
-        "telegram_bag": "",
-    }
 
     existing = get_business(instagram_user_id)
 
@@ -280,17 +274,38 @@ def upsert_connected_business(profile: dict, access_token: str):
 
     print("Creating/upserting new business:", instagram_user_id)
 
+    insert_data = {
+        "instagram_business_id": instagram_user_id,
+        "access_token": access_token,
+        "bot_enabled": True,
+        "business_name": username,
+        "business_type": "Instagram Business",
+        "language": "uz",
+        "tone": "friendly, polite, sales-focused",
+        "knowledge": "",
+        "products": "",
+        "prices": "",
+        "delivery_info": "",
+        "working_hours": "",
+        "faq": "",
+        "catalog_link": "",
+        "sales_phone": "",
+        "telegram_single": "",
+        "telegram_package": "",
+        "telegram_bag": "",
+    }
+
     try:
         result = (
             supabase.table("businesses")
-            .upsert(row, on_conflict="instagram_business_id")
+            .upsert(insert_data, on_conflict="instagram_business_id")
             .execute()
         )
 
         return result.data
 
     except Exception as e:
-        print("Upsert failed, trying update fallback:", str(e))
+        print("Upsert failed:", str(e))
 
         existing = get_business(instagram_user_id)
 
@@ -312,19 +327,14 @@ def upsert_connected_business(profile: dict, access_token: str):
         raise
 
 
-def sanitize_business_row(row: dict):
-    clean = dict(row)
-    clean["access_token"] = safe_token(clean.get("access_token", ""))
-    return clean
-
-
 @app.get("/")
 async def home():
     return {
         "status": "ok",
-        "oauth_mode": "direct_instagram_login_fixed_with_debug",
+        "version": "fixed_profile_endpoint_with_supabase_debug",
         "connect_instagram": "/connect-instagram",
         "debug_businesses": "/debug/businesses",
+        "debug_business_ids": "/debug/business-ids",
         "debug_enabled_businesses": "/debug/enabled-businesses",
     }
 
@@ -343,6 +353,37 @@ async def debug_businesses():
     return {
         "count": len(rows),
         "businesses": rows,
+    }
+
+
+@app.get("/debug/business-ids")
+async def debug_business_ids():
+    result = (
+        supabase.table("businesses")
+        .select(
+            "id,business_name,instagram_business_id,bot_enabled,access_token,catalog_link,created_at"
+        )
+        .order("created_at", desc=True)
+        .execute()
+    )
+
+    rows = []
+
+    for row in result.data or []:
+        rows.append({
+            "id": row.get("id"),
+            "business_name": row.get("business_name"),
+            "instagram_business_id": row.get("instagram_business_id"),
+            "bot_enabled": row.get("bot_enabled"),
+            "has_access_token": bool(row.get("access_token")),
+            "access_token_preview": safe_token(row.get("access_token", "")),
+            "catalog_link": row.get("catalog_link"),
+            "created_at": row.get("created_at"),
+        })
+
+    return {
+        "count": len(rows),
+        "rows": rows,
     }
 
 
@@ -383,31 +424,15 @@ async def debug_enabled_businesses():
     }
 
 
-@app.get("/debug/business-ids")
-async def debug_business_ids():
-    result = (
-        supabase.table("businesses")
-        .select("id,business_name,instagram_business_id,bot_enabled,access_token,created_at")
-        .order("created_at", desc=True)
-        .execute()
-    )
-
-    rows = []
-
-    for row in result.data or []:
-        rows.append({
-            "id": row.get("id"),
-            "business_name": row.get("business_name"),
-            "instagram_business_id": row.get("instagram_business_id"),
-            "bot_enabled": row.get("bot_enabled"),
-            "has_access_token": bool(row.get("access_token")),
-            "access_token_preview": safe_token(row.get("access_token", "")),
-            "created_at": row.get("created_at"),
-        })
+@app.get("/debug/find-business")
+async def debug_find_business(entry_id: str = "", recipient_id: str = ""):
+    business = find_business_for_webhook(entry_id, recipient_id)
 
     return {
-        "count": len(rows),
-        "rows": rows,
+        "entry_id": entry_id,
+        "recipient_id": recipient_id,
+        "matched": bool(business),
+        "business": sanitize_business_row(business) if business else None,
     }
 
 
@@ -608,8 +633,8 @@ General knowledge:
 def get_ai_reply(user_text: str, business: dict) -> str:
     if not MISTRAL_API_KEY:
         return (
-            "Hozircha avtomatik javob berishda texnik muammo bor. "
-            "Iltimos, savolingizni yozib qoldiring, tez orada javob beramiz."
+            "Xabaringiz qabul qilindi. "
+            "Hozir avtomatik javobda texnik muammo bor, tez orada javob beramiz."
         )
 
     language = business.get("language", "uz")
@@ -649,33 +674,42 @@ Strict business rules:
 - If user wants a human/sales manager, provide contact details from business profile.
 """
 
-    res = requests.post(
-        "https://api.mistral.ai/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {MISTRAL_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": "mistral-small-latest",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text},
-            ],
-            "temperature": 0.4,
-            "max_tokens": 220,
-        },
-        timeout=30,
-    )
+    try:
+        res = requests.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "mistral-small-latest",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_text},
+                ],
+                "temperature": 0.4,
+                "max_tokens": 220,
+            },
+            timeout=30,
+        )
 
-    print("Mistral result:", res.status_code, res.text)
+        print("Mistral result:", res.status_code, res.text)
 
-    if not res.ok:
+        if not res.ok:
+            return (
+                "Xabaringiz qabul qilindi. "
+                "Hozir avtomatik javobda texnik muammo bor, tez orada javob beramiz."
+            )
+
+        return res.json()["choices"][0]["message"]["content"]
+
+    except Exception as e:
+        print("Mistral error:", str(e))
+
         return (
             "Xabaringiz qabul qilindi. "
             "Hozir avtomatik javobda texnik muammo bor, tez orada javob beramiz."
         )
-
-    return res.json()["choices"][0]["message"]["content"]
 
 
 def send_dm(access_token: str, recipient_id: str, text: str):
