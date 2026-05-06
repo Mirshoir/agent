@@ -55,27 +55,68 @@ def get_business(instagram_business_id: str):
         .execute()
     )
 
-    if not result.data:
-        print("Business not found:", instagram_business_id)
-        return None
+    if result.data:
+        return result.data[0]
 
-    return result.data[0]
+    print("Business not found:", instagram_business_id)
+    return None
+
+
+def get_business_for_webhook(webhook_entry_id: str):
+    webhook_entry_id = str(webhook_entry_id).strip()
+
+    business = get_business(webhook_entry_id)
+    if business:
+        return business
+
+    fallback = (
+        supabase.table("businesses")
+        .select("*")
+        .eq("bot_enabled", True)
+        .limit(2)
+        .execute()
+    )
+
+    rows = fallback.data or []
+
+    if len(rows) == 1:
+        business = rows[0]
+
+        print(
+            "Auto-binding webhook entry id",
+            webhook_entry_id,
+            "to business",
+            business.get("business_name")
+        )
+
+        updated = (
+            supabase.table("businesses")
+            .update({"instagram_business_id": webhook_entry_id})
+            .eq("id", business["id"])
+            .execute()
+        )
+
+        if updated.data:
+            return updated.data[0]
+
+    print("No safe business fallback found for webhook id:", webhook_entry_id)
+    return None
 
 
 def upsert_connected_business(profile: dict, access_token: str):
-    instagram_business_id = str(
+    instagram_user_id = str(
         profile.get("user_id") or profile.get("id") or ""
     ).strip()
 
-    username = profile.get("username") or f"instagram_{instagram_business_id}"
+    username = profile.get("username") or f"instagram_{instagram_user_id}"
 
-    if not instagram_business_id:
+    if not instagram_user_id:
         raise ValueError("Instagram token response did not return user_id")
 
-    existing = get_business(instagram_business_id)
+    existing = get_business(instagram_user_id)
 
     update_data = {
-        "instagram_business_id": instagram_business_id,
+        "instagram_business_id": instagram_user_id,
         "access_token": access_token,
         "bot_enabled": True,
         "business_name": username,
@@ -189,7 +230,7 @@ async def auth_callback(request: Request):
             )
 
         print("Received Instagram token:", safe_token(access_token))
-        print("Instagram user_id:", instagram_user_id)
+        print("Instagram OAuth user_id:", instagram_user_id)
 
         profile = {
             "id": str(instagram_user_id),
@@ -401,7 +442,7 @@ def reply_to_comment(access_token: str, comment_id: str, text: str):
 async def home():
     return {
         "status": "ok",
-        "oauth_mode": "direct_instagram_login_no_me_lookup",
+        "oauth_mode": "direct_instagram_login_auto_bind_webhook_id",
         "connect_instagram": "/connect-instagram",
     }
 
@@ -427,22 +468,24 @@ async def receive_webhook(request: Request):
         print("Received webhook:", data)
 
         for entry in data.get("entry", []):
-            instagram_business_id = str(entry.get("id", "")).strip()
+            webhook_entry_id = str(entry.get("id", "")).strip()
 
-            if not instagram_business_id:
+            if not webhook_entry_id:
                 continue
 
-            business = get_business(instagram_business_id)
+            business = get_business_for_webhook(webhook_entry_id)
 
             if not business:
                 continue
 
             if not business.get("bot_enabled", True):
+                print("Bot disabled for:", webhook_entry_id)
                 continue
 
             access_token = business.get("access_token")
 
             if not access_token:
+                print("Missing access token for:", webhook_entry_id)
                 continue
 
             for messaging in entry.get("messaging", []):
@@ -450,11 +493,18 @@ async def receive_webhook(request: Request):
                 message = messaging.get("message", {})
                 message_text = message.get("text")
                 message_id = message.get("mid")
+                is_echo = message.get("is_echo", False)
 
-                if sender_id == instagram_business_id:
+                if is_echo:
+                    print("Ignored echo message")
+                    continue
+
+                if sender_id == webhook_entry_id:
+                    print("Ignored own sender message")
                     continue
 
                 if message_id and message_id in processed_message_ids:
+                    print("Ignored duplicate DM:", message_id)
                     continue
 
                 if message_id:
@@ -477,10 +527,12 @@ async def receive_webhook(request: Request):
                 comment_text = value.get("text")
                 from_id = value.get("from", {}).get("id")
 
-                if from_id == instagram_business_id:
+                if from_id == webhook_entry_id:
+                    print("Ignored own comment")
                     continue
 
                 if comment_id and comment_id in processed_comment_ids:
+                    print("Ignored duplicate comment:", comment_id)
                     continue
 
                 if comment_id:
