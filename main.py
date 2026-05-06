@@ -12,11 +12,9 @@ from supabase import create_client
 app = FastAPI()
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
-
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-
 META_APP_ID = os.getenv("META_APP_ID")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
 
@@ -120,57 +118,16 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
     })
 
     business = get_business(entry_id)
-
     if business:
         print("Business matched by entry_id:", entry_id)
         return business
 
     business = get_business(recipient_id)
-
     if business:
         print("Business matched by recipient_id:", recipient_id)
         return business
 
-    fallback = (
-        supabase.table("businesses")
-        .select("*")
-        .eq("bot_enabled", True)
-        .limit(2)
-        .execute()
-    )
-
-    rows = fallback.data or []
-
-    if len(rows) == 1:
-        business = rows[0]
-        bind_id = recipient_id or entry_id
-
-        if bind_id:
-            print(
-                "SAFE AUTO-BIND:",
-                "webhook_id=", bind_id,
-                "business=", business.get("business_name"),
-            )
-
-            updated = (
-                supabase.table("businesses")
-                .update({"instagram_business_id": bind_id})
-                .eq("id", business["id"])
-                .execute()
-            )
-
-            if updated.data:
-                return updated.data[0]
-
-        return business
-
-    print(
-        "No safe business match found.",
-        "entry_id=", entry_id,
-        "recipient_id=", recipient_id,
-        "enabled_business_count=", len(rows),
-    )
-
+    print("No business matched for webhook.")
     return None
 
 
@@ -195,11 +152,20 @@ def exchange_code_for_token(code: str):
 
 
 def get_instagram_profile(access_token: str, fallback_user_id: str = ""):
+    """
+    Correct Instagram Login profile request.
+
+    Important:
+    - id = app-scoped Instagram ID
+    - user_id = real Instagram professional/user ID used for webhook matching
+    - we store user_id as instagram_business_id
+    """
+
     try:
         res = requests.get(
             "https://graph.instagram.com/me",
             params={
-                "fields": "user_id,username",
+                "fields": "id,user_id,username,account_type",
                 "access_token": access_token,
             },
             timeout=30,
@@ -211,14 +177,16 @@ def get_instagram_profile(access_token: str, fallback_user_id: str = ""):
         if res.ok:
             data = res.json()
 
-            instagram_id = normalize_id(
-                data.get("user_id") or data.get("id") or fallback_user_id
-            )
+            app_scoped_id = normalize_id(data.get("id"))
+            real_user_id = normalize_id(data.get("user_id") or fallback_user_id)
+            username = data.get("username") or f"instagram_{real_user_id}"
 
             return {
-                "id": instagram_id,
-                "user_id": instagram_id,
-                "username": data.get("username") or f"instagram_{instagram_id}",
+                "app_scoped_id": app_scoped_id,
+                "id": real_user_id,
+                "user_id": real_user_id,
+                "username": username,
+                "account_type": data.get("account_type", ""),
             }
 
     except Exception as e:
@@ -227,84 +195,40 @@ def get_instagram_profile(access_token: str, fallback_user_id: str = ""):
     fallback_user_id = normalize_id(fallback_user_id)
 
     return {
+        "app_scoped_id": "",
         "id": fallback_user_id,
         "user_id": fallback_user_id,
         "username": f"instagram_{fallback_user_id}",
+        "account_type": "",
     }
 
 
-def subscribe_instagram_webhooks(instagram_account_id: str, access_token: str):
-    instagram_account_id = normalize_id(instagram_account_id)
-
-    if not instagram_account_id:
-        print("Webhook subscribe skipped: missing instagram_account_id")
-        return None
-
-    fields = ",".join([
-        "messages",
-        "messaging_postbacks",
-        "message_reactions",
-        "message_edit",
-        "messaging_seen",
-        "comments",
-        "mentions",
-    ])
-
-    urls = [
-        f"https://graph.instagram.com/{instagram_account_id}/subscribed_apps",
-        f"https://graph.facebook.com/{GRAPH_VERSION}/{instagram_account_id}/subscribed_apps",
-    ]
-
-    last_response = None
-
-    for url in urls:
-        try:
-            res = requests.post(
-                url,
-                params={
-                    "subscribed_fields": fields,
-                    "access_token": access_token,
-                },
-                timeout=30,
-            )
-
-            print("Webhook subscription URL:", url)
-            print("Webhook subscription status:", res.status_code)
-            print("Webhook subscription response:", res.text)
-
-            last_response = res
-
-            if res.ok:
-                return res
-
-        except Exception as e:
-            print("Webhook subscription error:", str(e))
-
-    return last_response
-
-
 def upsert_connected_business(profile: dict, access_token: str):
-    instagram_user_id = normalize_id(
-        profile.get("user_id") or profile.get("id")
-    )
+    instagram_business_id = normalize_id(profile.get("user_id"))
+    app_scoped_id = normalize_id(profile.get("app_scoped_id"))
+    username = profile.get("username") or f"instagram_{instagram_business_id}"
 
-    if not instagram_user_id:
-        raise ValueError("Instagram profile did not return user_id/id")
+    if not instagram_business_id:
+        raise ValueError("Instagram profile did not return user_id")
 
-    username = profile.get("username") or f"instagram_{instagram_user_id}"
+    print("Saving OAuth Instagram profile:", {
+        "instagram_business_id": instagram_business_id,
+        "app_scoped_id": app_scoped_id,
+        "username": username,
+    })
 
-    existing = get_business(instagram_user_id)
+    existing = get_business(instagram_business_id)
+
+    update_data = {
+        "instagram_business_id": instagram_business_id,
+        "access_token": access_token,
+        "bot_enabled": True,
+        "business_name": username,
+        "business_type": "Instagram Business",
+    }
 
     if existing:
         print("Updating existing business:", existing.get("id"))
-
-        update_data = {
-            "instagram_business_id": instagram_user_id,
-            "access_token": access_token,
-            "bot_enabled": True,
-            "business_name": username,
-            "business_type": "Instagram Business",
-        }
 
         result = (
             supabase.table("businesses")
@@ -315,14 +239,10 @@ def upsert_connected_business(profile: dict, access_token: str):
 
         return result.data
 
-    print("Creating/upserting new business:", instagram_user_id)
+    print("Creating/upserting new business:", instagram_business_id)
 
     insert_data = {
-        "instagram_business_id": instagram_user_id,
-        "access_token": access_token,
-        "bot_enabled": True,
-        "business_name": username,
-        "business_type": "Instagram Business",
+        **update_data,
         "language": "uz",
         "tone": "friendly, polite, sales-focused",
         "knowledge": "",
@@ -351,7 +271,7 @@ def upsert_connected_business(profile: dict, access_token: str):
 async def home():
     return {
         "status": "ok",
-        "version": "oauth_auto_webhook_subscription",
+        "version": "oauth_store_real_instagram_user_id",
         "connect_instagram": "/connect-instagram",
         "debug_business_ids": "/debug/business-ids",
     }
@@ -411,35 +331,6 @@ async def debug_find_business(entry_id: str = "", recipient_id: str = ""):
     }
 
 
-@app.get("/debug/subscribe/{instagram_id}")
-async def debug_subscribe_instagram(instagram_id: str):
-    business = get_business(instagram_id)
-
-    if not business:
-        return {
-            "ok": False,
-            "message": "Business not found by instagram_business_id",
-            "instagram_id": instagram_id,
-        }
-
-    access_token = business.get("access_token")
-
-    if not access_token:
-        return {
-            "ok": False,
-            "message": "Business has no access token",
-            "instagram_id": instagram_id,
-        }
-
-    res = subscribe_instagram_webhooks(instagram_id, access_token)
-
-    return {
-        "ok": bool(res and res.ok),
-        "status_code": res.status_code if res else None,
-        "response": res.text if res else None,
-    }
-
-
 @app.get("/connect-instagram")
 async def connect_instagram():
     if not META_APP_ID:
@@ -486,7 +377,7 @@ async def auth_callback(request: Request):
         token_data = exchange_code_for_token(code)
 
         access_token = token_data.get("access_token")
-        instagram_user_id = normalize_id(token_data.get("user_id"))
+        token_user_id = normalize_id(token_data.get("user_id"))
 
         if not access_token:
             return PlainTextResponse(
@@ -494,31 +385,22 @@ async def auth_callback(request: Request):
                 status_code=500,
             )
 
-        if not instagram_user_id:
+        if not token_user_id:
             return PlainTextResponse(
                 f"No user_id returned from Instagram token response: {token_data}",
                 status_code=500,
             )
 
         print("Received Instagram token:", safe_token(access_token))
-        print("Instagram OAuth user_id:", instagram_user_id)
+        print("Instagram OAuth token user_id:", token_user_id)
 
-        profile = get_instagram_profile(access_token, instagram_user_id)
+        profile = get_instagram_profile(access_token, token_user_id)
 
         print("Final profile used:", profile)
 
         stored = upsert_connected_business(profile, access_token)
 
         print("Stored business result:", stored)
-
-        subscribe_res = subscribe_instagram_webhooks(
-            instagram_account_id=profile.get("user_id") or instagram_user_id,
-            access_token=access_token,
-        )
-
-        if subscribe_res is not None:
-            print("Auto subscribe final status:", subscribe_res.status_code)
-            print("Auto subscribe final response:", subscribe_res.text)
 
         return RedirectResponse(
             f"{DASHBOARD_URL}?connected=success&ig_id={profile.get('user_id')}"
@@ -703,7 +585,7 @@ Strict business rules:
         if not res.ok:
             return (
                 "Xabaringiz qabul qilindi. "
-                "Hozir avtomatik javobda texnik muammo bor, tez orada javob beramiz."
+                "Hozir avtomatik javobda texnik muammo bor, тез orada javob beramiz."
             )
 
         return res.json()["choices"][0]["message"]["content"]
