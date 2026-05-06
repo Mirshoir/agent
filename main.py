@@ -17,11 +17,16 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 META_APP_ID = os.getenv("META_APP_ID")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
+
 REDIRECT_URI = os.getenv(
     "REDIRECT_URI",
     "https://agent-1-xi6h.onrender.com/auth/callback"
 )
-DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://instaagent.streamlit.app")
+
+DASHBOARD_URL = os.getenv(
+    "DASHBOARD_URL",
+    "https://instaagent.streamlit.app"
+)
 
 if not SUPABASE_URL:
     raise RuntimeError("Missing SUPABASE_URL")
@@ -34,6 +39,8 @@ supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 processed_comment_ids = set()
 processed_message_ids = set()
 
+
+# ---------------- HELPERS ----------------
 
 def safe_token(token: str) -> str:
     if not token:
@@ -59,30 +66,26 @@ def get_business(instagram_business_id: str):
     return result.data[0]
 
 
-def upsert_connected_business(profile: dict, access_token: str):
-    instagram_business_id = str(
-        profile.get("user_id") or profile.get("id") or ""
-    ).strip()
-
+def upsert_connected_business(profile: dict, page_access_token: str):
+    instagram_business_id = str(profile.get("instagram_business_id", "")).strip()
     username = profile.get("username", "")
-    account_type = profile.get("account_type", "")
+    page_name = profile.get("page_name", "")
 
     if not instagram_business_id:
-        raise ValueError("Instagram profile did not return user_id or id")
+        raise ValueError("No Instagram Business ID found")
 
     existing = get_business(instagram_business_id)
 
     update_data = {
         "instagram_business_id": instagram_business_id,
-        "access_token": access_token,
+        "access_token": page_access_token,
         "bot_enabled": True,
     }
 
     if username:
         update_data["business_name"] = username
-
-    if account_type:
-        update_data["business_type"] = account_type
+    elif page_name:
+        update_data["business_name"] = page_name
 
     if existing:
         result = (
@@ -95,8 +98,8 @@ def upsert_connected_business(profile: dict, access_token: str):
 
     insert_data = {
         "instagram_business_id": instagram_business_id,
-        "business_name": username or f"Instagram {instagram_business_id}",
-        "business_type": account_type or "",
+        "business_name": username or page_name or f"Instagram {instagram_business_id}",
+        "business_type": "Instagram Business",
         "language": "uz",
         "tone": "friendly, polite, sales-focused",
         "knowledge": "",
@@ -110,13 +113,15 @@ def upsert_connected_business(profile: dict, access_token: str):
         "telegram_single": "",
         "telegram_package": "",
         "telegram_bag": "",
-        "access_token": access_token,
+        "access_token": page_access_token,
         "bot_enabled": True,
     }
 
     result = supabase.table("businesses").insert(insert_data).execute()
     return result.data
 
+
+# ---------------- OAUTH ----------------
 
 @app.get("/connect-instagram")
 async def connect_instagram():
@@ -127,15 +132,18 @@ async def connect_instagram():
         "client_id": META_APP_ID,
         "redirect_uri": REDIRECT_URI,
         "scope": ",".join([
-            "instagram_business_basic",
-            "instagram_business_manage_messages",
-            "instagram_business_manage_comments",
+            "pages_show_list",
+            "pages_read_engagement",
+            "pages_manage_metadata",
+            "instagram_basic",
+            "instagram_manage_messages",
+            "instagram_manage_comments",
         ]),
         "response_type": "code",
         "state": secrets.token_urlsafe(16),
     }
 
-    auth_url = "https://www.instagram.com/oauth/authorize?" + urlencode(params)
+    auth_url = "https://www.facebook.com/v25.0/dialog/oauth?" + urlencode(params)
     return RedirectResponse(auth_url)
 
 
@@ -147,12 +155,12 @@ async def auth_callback(request: Request):
 
     if error:
         return PlainTextResponse(
-            f"Instagram connection failed: {error} - {error_description}",
+            f"Meta connection failed: {error} - {error_description}",
             status_code=400,
         )
 
     if not code:
-        return PlainTextResponse("Missing code from Instagram", status_code=400)
+        return PlainTextResponse("Missing code from Meta", status_code=400)
 
     if not META_APP_ID or not META_APP_SECRET:
         return PlainTextResponse(
@@ -161,12 +169,11 @@ async def auth_callback(request: Request):
         )
 
     try:
-        token_res = requests.post(
-            "https://api.instagram.com/oauth/access_token",
-            data={
+        token_res = requests.get(
+            "https://graph.facebook.com/v25.0/oauth/access_token",
+            params={
                 "client_id": META_APP_ID,
                 "client_secret": META_APP_SECRET,
-                "grant_type": "authorization_code",
                 "redirect_uri": REDIRECT_URI,
                 "code": code,
             },
@@ -177,48 +184,74 @@ async def auth_callback(request: Request):
         print("OAuth token response:", token_res.text)
 
         token_res.raise_for_status()
-        token_data = token_res.json()
 
-        access_token = token_data.get("access_token")
+        user_access_token = token_res.json().get("access_token")
 
-        if not access_token:
+        if not user_access_token:
             return PlainTextResponse(
-                f"No access token returned: {token_data}",
+                f"No user access token returned: {token_res.text}",
                 status_code=500,
             )
 
-        print("Received access token:", safe_token(access_token))
+        print("User access token:", safe_token(user_access_token))
 
-        profile_res = requests.get(
-            "https://graph.instagram.com/me",
+        pages_res = requests.get(
+            "https://graph.facebook.com/v25.0/me/accounts",
             params={
-                "fields": "user_id,username,account_type",
-                "access_token": access_token,
+                "fields": "id,name,access_token,instagram_business_account{id,username}",
+                "access_token": user_access_token,
             },
             timeout=30,
         )
 
-        print("Instagram profile status:", profile_res.status_code)
-        print("Instagram profile response:", profile_res.text)
+        print("Pages status:", pages_res.status_code)
+        print("Pages response:", pages_res.text)
 
-        if profile_res.status_code >= 400:
+        pages_res.raise_for_status()
+
+        pages = pages_res.json().get("data", [])
+
+        if not pages:
             return PlainTextResponse(
-                f"Instagram profile error: {profile_res.text}",
+                "No Facebook Pages found. Make sure your Facebook account manages a Page connected to Instagram.",
                 status_code=400,
             )
 
-        profile = profile_res.json()
-        profile["id"] = str(profile.get("user_id") or profile.get("id"))
+        selected_profile = None
+        selected_page_token = None
 
-        upsert_connected_business(profile, access_token)
+        for page in pages:
+            ig_account = page.get("instagram_business_account")
+
+            if ig_account and ig_account.get("id"):
+                selected_profile = {
+                    "instagram_business_id": ig_account.get("id"),
+                    "username": ig_account.get("username", ""),
+                    "page_id": page.get("id"),
+                    "page_name": page.get("name", ""),
+                }
+                selected_page_token = page.get("access_token")
+                break
+
+        if not selected_profile or not selected_page_token:
+            return PlainTextResponse(
+                "No connected Instagram Business account found. Connect your Instagram Professional account to a Facebook Page first.",
+                status_code=400,
+            )
+
+        print("Connected Instagram profile:", selected_profile)
+        print("Page access token:", safe_token(selected_page_token))
+
+        upsert_connected_business(selected_profile, selected_page_token)
 
         return RedirectResponse(
-            f"{DASHBOARD_URL}?connected=success&ig_id={profile.get('id')}"
+            f"{DASHBOARD_URL}?connected=success&ig_id={selected_profile.get('instagram_business_id')}"
         )
 
     except requests.HTTPError as e:
         response_text = e.response.text if e.response else str(e)
         print("OAuth HTTP error:", response_text)
+
         return PlainTextResponse(
             f"OAuth HTTP error: {response_text}",
             status_code=400,
@@ -226,19 +259,33 @@ async def auth_callback(request: Request):
 
     except Exception as e:
         print("OAuth callback error:", str(e))
+
         return PlainTextResponse(
             f"OAuth error: {str(e)}",
             status_code=500,
         )
 
 
+# ---------------- BUSINESS LOGIC ----------------
+
 def is_catalog_request(text: str) -> bool:
     text = text.lower()
+
     keywords = [
-        "catalog", "katalog", "каталог",
-        "price", "narx", "narxi", "цена", "прайс",
-        "cost", "how much", "qancha", "сколько",
+        "catalog",
+        "katalog",
+        "каталог",
+        "price",
+        "narx",
+        "narxi",
+        "цена",
+        "прайс",
+        "cost",
+        "how much",
+        "qancha",
+        "сколько",
     ]
+
     return any(keyword in text for keyword in keywords)
 
 
@@ -336,6 +383,14 @@ Language rules:
 - If the user writes in English, reply in English.
 - If unclear, use this default language: {language}.
 
+Opening conversation rules:
+- If this seems like the beginning of a conversation, greet the user.
+- Introduce yourself as the business virtual assistant.
+- Politely say the user may leave name, phone number, address, interested product, and quantity for faster help.
+- Do not force details.
+- Do not repeat this request many times.
+- If the user ignores it, continue naturally.
+
 Sales style:
 - Reply shortly, naturally, and politely.
 - Be helpful and sales-focused.
@@ -349,6 +404,7 @@ Strict business rules:
 - Do not force users to share phone/address/name.
 - Do not repeatedly ask for contact details.
 - If user wants a human/sales manager, provide the contact details from business profile.
+- At the end of helpful replies, politely thank the user.
 """
 
     res = requests.post(
@@ -364,7 +420,7 @@ Strict business rules:
                 {"role": "user", "content": user_text},
             ],
             "temperature": 0.4,
-            "max_tokens": 180,
+            "max_tokens": 220,
         },
         timeout=30,
     )
@@ -375,9 +431,11 @@ Strict business rules:
     return res.json()["choices"][0]["message"]["content"]
 
 
+# ---------------- META SENDERS ----------------
+
 def send_dm(access_token: str, recipient_id: str, text: str):
     res = requests.post(
-        "https://graph.instagram.com/v25.0/me/messages",
+        "https://graph.facebook.com/v25.0/me/messages",
         params={"access_token": access_token},
         json={
             "recipient": {"id": recipient_id},
@@ -392,7 +450,7 @@ def send_dm(access_token: str, recipient_id: str, text: str):
 
 def reply_to_comment(access_token: str, comment_id: str, text: str):
     res = requests.post(
-        f"https://graph.instagram.com/v25.0/{comment_id}/replies",
+        f"https://graph.facebook.com/v25.0/{comment_id}/replies",
         params={
             "access_token": access_token,
             "message": text,
@@ -404,11 +462,14 @@ def reply_to_comment(access_token: str, comment_id: str, text: str):
     return res
 
 
+# ---------------- ROUTES ----------------
+
 @app.get("/")
 async def home():
     return {
         "status": "ok",
         "message": "Instagram AI webhook server is running",
+        "oauth_mode": "facebook_login_for_business",
         "connect_instagram": "/connect-instagram",
     }
 
@@ -479,6 +540,7 @@ async def receive_webhook(request: Request):
                     continue
 
                 value = change.get("value", {})
+
                 comment_id = value.get("id")
                 comment_text = value.get("text")
                 from_id = value.get("from", {}).get("id")
@@ -510,6 +572,7 @@ async def receive_webhook(request: Request):
 
     except Exception as e:
         print("Webhook error:", str(e))
+
         return JSONResponse(
             content={"status": "error", "message": str(e)},
             status_code=500,
