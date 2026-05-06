@@ -152,15 +152,6 @@ def exchange_code_for_token(code: str):
 
 
 def get_instagram_profile(access_token: str, fallback_user_id: str = ""):
-    """
-    Correct Instagram Login profile request.
-
-    Important:
-    - id = app-scoped Instagram ID
-    - user_id = real Instagram professional/user ID used for webhook matching
-    - we store user_id as instagram_business_id
-    """
-
     try:
         res = requests.get(
             "https://graph.instagram.com/me",
@@ -271,7 +262,7 @@ def upsert_connected_business(profile: dict, access_token: str):
 async def home():
     return {
         "status": "ok",
-        "version": "oauth_store_real_instagram_user_id",
+        "version": "handle_messages_in_changes_payload",
         "connect_instagram": "/connect-instagram",
         "debug_business_ids": "/debug/business-ids",
     }
@@ -585,7 +576,7 @@ Strict business rules:
         if not res.ok:
             return (
                 "Xabaringiz qabul qilindi. "
-                "Hozir avtomatik javobda texnik muammo bor, тез orada javob beramiz."
+                "Hozir avtomatik javobda texnik muammo bor, tez orada javob beramiz."
             )
 
         return res.json()["choices"][0]["message"]["content"]
@@ -783,6 +774,24 @@ async def process_comment_event(entry_id: str, change: dict):
         print("Comment processing error:", str(e))
 
 
+async def process_message_change_event(entry_id: str, change: dict):
+    if change.get("field") != "messages":
+        return
+
+    value = change.get("value", {})
+
+    fake_messaging = {
+        "sender": value.get("sender", {}),
+        "recipient": value.get("recipient", {}),
+        "timestamp": value.get("timestamp"),
+        "message": value.get("message", {}),
+    }
+
+    print("Converted changes.messages payload to messaging event:", fake_messaging)
+
+    await process_messaging_event(entry_id, fake_messaging)
+
+
 @app.post("/webhook")
 async def receive_webhook(request: Request):
     try:
@@ -802,7 +811,16 @@ async def receive_webhook(request: Request):
                 await process_messaging_event(entry_id, messaging)
 
             for change in entry.get("changes", []):
-                await process_comment_event(entry_id, change)
+                field = change.get("field")
+
+                if field == "comments":
+                    await process_comment_event(entry_id, change)
+
+                elif field == "messages":
+                    await process_message_change_event(entry_id, change)
+
+                else:
+                    print("Ignored unsupported change field:", field)
 
         return JSONResponse(content={"status": "ok"}, status_code=200)
 
