@@ -67,32 +67,32 @@ def upsert_connected_business(profile: dict, access_token: str):
         profile.get("user_id") or profile.get("id") or ""
     ).strip()
 
-    username = profile.get("username", "")
+    username = profile.get("username") or f"instagram_{instagram_business_id}"
 
     if not instagram_business_id:
-        raise ValueError("Instagram profile did not return user_id or id")
+        raise ValueError("Instagram token response did not return user_id")
 
     existing = get_business(instagram_business_id)
 
-    data = {
+    update_data = {
         "instagram_business_id": instagram_business_id,
         "access_token": access_token,
         "bot_enabled": True,
-        "business_name": username or f"Instagram {instagram_business_id}",
+        "business_name": username,
         "business_type": "Instagram Business",
     }
 
     if existing:
         result = (
             supabase.table("businesses")
-            .update(data)
+            .update(update_data)
             .eq("id", existing["id"])
             .execute()
         )
         return result.data
 
     insert_data = {
-        **data,
+        **update_data,
         "language": "uz",
         "tone": "friendly, polite, sales-focused",
         "knowledge": "",
@@ -111,8 +111,6 @@ def upsert_connected_business(profile: dict, access_token: str):
     result = supabase.table("businesses").insert(insert_data).execute()
     return result.data
 
-
-# ---------------- DIRECT INSTAGRAM OAUTH ----------------
 
 @app.get("/connect-instagram")
 async def connect_instagram():
@@ -176,6 +174,7 @@ async def auth_callback(request: Request):
         token_data = token_res.json()
 
         access_token = token_data.get("access_token")
+        instagram_user_id = token_data.get("user_id")
 
         if not access_token:
             return PlainTextResponse(
@@ -183,33 +182,25 @@ async def auth_callback(request: Request):
                 status_code=500,
             )
 
-        print("Received Instagram token:", safe_token(access_token))
-
-        profile_res = requests.get(
-            "https://graph.instagram.com/me",
-            params={
-                "fields": "user_id,username",
-                "access_token": access_token,
-            },
-            timeout=30,
-        )
-
-        print("Instagram profile status:", profile_res.status_code)
-        print("Instagram profile response:", profile_res.text)
-
-        if profile_res.status_code >= 400:
+        if not instagram_user_id:
             return PlainTextResponse(
-                f"Instagram profile error: {profile_res.text}",
-                status_code=400,
+                f"No user_id returned from Instagram token response: {token_data}",
+                status_code=500,
             )
 
-        profile = profile_res.json()
-        profile["id"] = str(profile.get("user_id") or profile.get("id"))
+        print("Received Instagram token:", safe_token(access_token))
+        print("Instagram user_id:", instagram_user_id)
+
+        profile = {
+            "id": str(instagram_user_id),
+            "user_id": str(instagram_user_id),
+            "username": f"instagram_{instagram_user_id}",
+        }
 
         upsert_connected_business(profile, access_token)
 
         return RedirectResponse(
-            f"{DASHBOARD_URL}?connected=success&ig_id={profile.get('id')}"
+            f"{DASHBOARD_URL}?connected=success&ig_id={instagram_user_id}"
         )
 
     except requests.HTTPError as e:
@@ -227,8 +218,6 @@ async def auth_callback(request: Request):
             status_code=500,
         )
 
-
-# ---------------- BOT LOGIC ----------------
 
 def is_catalog_request(text: str) -> bool:
     text = text.lower()
@@ -408,13 +397,11 @@ def reply_to_comment(access_token: str, comment_id: str, text: str):
     return res
 
 
-# ---------------- ROUTES ----------------
-
 @app.get("/")
 async def home():
     return {
         "status": "ok",
-        "oauth_mode": "direct_instagram_login",
+        "oauth_mode": "direct_instagram_login_no_me_lookup",
         "connect_instagram": "/connect-instagram",
     }
 
