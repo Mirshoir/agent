@@ -134,50 +134,74 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
 
 # ─────────────────────────────────────────────
 # OAuth helpers
+#
+# ROOT CAUSE OF ALL PREVIOUS ERRORS:
+# We were using Instagram's own OAuth (api.instagram.com/oauth/access_token),
+# which produces an Instagram-scoped token. That token:
+#   - Works ONLY on graph.instagram.com
+#   - CANNOT be used on graph.facebook.com/me/accounts  → "Cannot parse access token"
+#   - CANNOT be exchanged for a long-lived token → "Missing client_id parameter"
+#   - CANNOT subscribe Facebook Pages to webhooks → "Unsupported request method type: post"
+#
+# FIX: Switch to Facebook Login OAuth (facebook.com/dialog/oauth).
+# This produces a proper Facebook User token that:
+#   - Works on graph.facebook.com for all Page and subscription operations
+#   - Can be correctly exchanged for a long-lived token using fb_exchange_token grant
+#   - Can list Pages via /me/accounts and subscribe them to webhook events
+#   - Still lets us look up the linked Instagram Business Account via the Page
 # ─────────────────────────────────────────────
 
-def exchange_code_for_token(code: str) -> dict:
-    """Exchange authorization code for a short-lived Instagram access token."""
-    token_res = requests.post(
-        "https://api.instagram.com/oauth/access_token",
-        data={
+def exchange_code_for_fb_token(code: str) -> dict:
+    """
+    Exchange the Facebook Login authorization code for a short-lived
+    Facebook User access token via graph.facebook.com.
+
+    This replaces the old api.instagram.com/oauth/access_token call.
+    A Facebook User token is required to:
+      - Call /me/accounts to list managed Pages
+      - Exchange for a long-lived token
+      - Subscribe Pages to webhook events
+    """
+    res = requests.get(
+        f"https://graph.facebook.com/{GRAPH_VERSION}/oauth/access_token",
+        params={
             "client_id": META_APP_ID,
             "client_secret": META_APP_SECRET,
-            "grant_type": "authorization_code",
             "redirect_uri": REDIRECT_URI,
             "code": code,
         },
         timeout=30,
     )
-    print("OAuth token status:", token_res.status_code)
-    print("OAuth token response:", token_res.text)
-    token_res.raise_for_status()
-    return token_res.json()
+    print("FB OAuth token status:", res.status_code)
+    print("FB OAuth token response:", res.text)
+    res.raise_for_status()
+    return res.json()
 
 
-def exchange_for_long_lived_token(short_lived_token: str) -> str:
+def exchange_for_long_lived_fb_token(short_lived_token: str) -> str:
     """
-    Exchange a short-lived Instagram token (~1 hour) for a long-lived token (~60 days).
-    Must use graph.facebook.com — graph.instagram.com does NOT support this endpoint.
-    Falls back to the original token on failure so we never block the OAuth flow.
+    Exchange a short-lived Facebook User token (~1 hour) for a long-lived one (~60 days).
+    Uses the fb_exchange_token grant on graph.facebook.com with client_id + client_secret.
+    Falls back to the short-lived token on error so we never block the OAuth flow.
     """
     try:
         res = requests.get(
             f"https://graph.facebook.com/{GRAPH_VERSION}/oauth/access_token",
             params={
-                "grant_type": "ig_exchange_token",
+                "grant_type": "fb_exchange_token",
+                "client_id": META_APP_ID,
                 "client_secret": META_APP_SECRET,
-                "access_token": short_lived_token,
+                "fb_exchange_token": short_lived_token,
             },
             timeout=30,
         )
-        print("Long-lived token status:", res.status_code)
-        print("Long-lived token response:", res.text)
+        print("Long-lived FB token status:", res.status_code)
+        print("Long-lived FB token response:", res.text)
 
         if res.ok:
             long_token = res.json().get("access_token")
             if long_token:
-                print("Successfully obtained long-lived token.")
+                print("Successfully obtained long-lived Facebook User token.")
                 return long_token
 
         print("Long-lived token exchange failed; using short-lived token as fallback.")
@@ -187,43 +211,71 @@ def exchange_for_long_lived_token(short_lived_token: str) -> str:
     return short_lived_token
 
 
-def get_linked_facebook_page(access_token: str) -> dict:
+def get_page_and_instagram_account(fb_user_token: str) -> dict:
     """
-    Get the Facebook Page linked to the Instagram Business account.
-    Instagram messaging webhooks are delivered via the Facebook Page subscription,
-    not via the Instagram user endpoint — so we need the Page ID first.
+    List all Facebook Pages the user manages, find the one linked to an
+    Instagram Business Account, and return combined Page + Instagram details.
+
+    Returns dict with keys:
+      page_id, page_name, page_access_token,
+      instagram_business_id, instagram_username
+    Returns empty dict if nothing is found.
     """
     try:
         res = requests.get(
             f"https://graph.facebook.com/{GRAPH_VERSION}/me/accounts",
             params={
-                "access_token": access_token,
-                "fields": "id,name,instagram_business_account",
+                "access_token": fb_user_token,
+                "fields": "id,name,access_token,instagram_business_account{id,username}",
             },
             timeout=30,
         )
-        print("FB Pages status:", res.status_code)
-        print("FB Pages response:", res.text)
+        print("FB /me/accounts status:", res.status_code)
+        print("FB /me/accounts response:", res.text)
 
-        if res.ok:
-            pages = res.json().get("data", [])
-            for page in pages:
-                if page.get("instagram_business_account"):
-                    print("Found linked Facebook Page:", page.get("id"), page.get("name"))
-                    return page
+        if not res.ok:
+            print("Failed to fetch Facebook Pages:", res.text)
+            return {}
 
-        print("No linked Facebook Page found with instagram_business_account.")
+        pages = res.json().get("data", [])
+        print(f"Found {len(pages)} Facebook Page(s).")
+
+        for page in pages:
+            ig_account = page.get("instagram_business_account")
+            if ig_account:
+                ig_id = normalize_id(ig_account.get("id"))
+                ig_username = ig_account.get("username") or f"instagram_{ig_id}"
+                page_id = normalize_id(page.get("id"))
+                page_name = page.get("name", "")
+                page_access_token = page.get("access_token", "")
+
+                print("Matched Page:", page_id, page_name)
+                print("Linked Instagram Business ID:", ig_id, ig_username)
+
+                return {
+                    "page_id": page_id,
+                    "page_name": page_name,
+                    "page_access_token": page_access_token,
+                    "instagram_business_id": ig_id,
+                    "instagram_username": ig_username,
+                }
+
+        print("No Facebook Page with a linked Instagram Business Account found.")
         return {}
+
     except Exception as e:
-        print("FB Page fetch error:", str(e))
+        print("get_page_and_instagram_account error:", str(e))
         return {}
 
 
 def subscribe_page_to_webhooks(page_id: str, page_access_token: str) -> dict:
     """
-    Subscribe a Facebook Page to Instagram messaging webhooks.
-    This is the call that tells Meta to actually deliver DM events to our server.
-    Must use graph.facebook.com — graph.instagram.com returns IGApiException code 100.
+    Subscribe the Facebook Page to Instagram messaging webhooks.
+    This is the call that tells Meta to deliver DM and comment events to our server.
+
+    Must use:
+      - graph.facebook.com (NOT graph.instagram.com)
+      - Page access token (NOT User token)
     """
     try:
         res = requests.post(
@@ -240,125 +292,6 @@ def subscribe_page_to_webhooks(page_id: str, page_access_token: str) -> dict:
     except Exception as e:
         print("Page webhook subscription error:", str(e))
         return {"error": str(e)}
-
-
-def subscribe_to_instagram_webhooks(access_token: str) -> dict:
-    """
-    Find the linked Facebook Page and subscribe it to messaging webhooks.
-
-    Instagram DM webhooks flow through Facebook's infrastructure — not the Instagram
-    Graph API directly. Calling /me/subscribed_apps on graph.instagram.com always
-    returns IGApiException code 100 (Unsupported request method type: post).
-
-    The correct flow is:
-      1. Find the Facebook Page linked to the Instagram account via /me/accounts
-      2. POST to /{page_id}/subscribed_apps on graph.facebook.com
-    """
-    page = get_linked_facebook_page(access_token)
-    page_id = page.get("id")
-
-    if not page_id:
-        print("No linked Facebook Page found — cannot subscribe to webhooks.")
-        return {"error": "No linked Facebook Page found. Ensure the Instagram account is linked to a Facebook Page and the user granted page permissions."}
-
-    return subscribe_page_to_webhooks(page_id, access_token)
-
-
-def get_instagram_profile(access_token: str, fallback_user_id: str = "") -> dict:
-    try:
-        res = requests.get(
-            "https://graph.instagram.com/me",
-            params={
-                "fields": "id,user_id,username,account_type",
-                "access_token": access_token,
-            },
-            timeout=30,
-        )
-        print("Profile status:", res.status_code)
-        print("Profile response:", res.text)
-
-        if res.ok:
-            data = res.json()
-            app_scoped_id = normalize_id(data.get("id"))
-            real_user_id = normalize_id(data.get("user_id") or fallback_user_id)
-            username = data.get("username") or f"instagram_{real_user_id}"
-            return {
-                "app_scoped_id": app_scoped_id,
-                "id": real_user_id,
-                "user_id": real_user_id,
-                "username": username,
-                "account_type": data.get("account_type", ""),
-            }
-    except Exception as e:
-        print("Profile fetch failed:", str(e))
-
-    fallback_user_id = normalize_id(fallback_user_id)
-    return {
-        "app_scoped_id": "",
-        "id": fallback_user_id,
-        "user_id": fallback_user_id,
-        "username": f"instagram_{fallback_user_id}",
-        "account_type": "",
-    }
-
-
-def upsert_connected_business(profile: dict, access_token: str):
-    instagram_business_id = normalize_id(profile.get("user_id"))
-    app_scoped_id = normalize_id(profile.get("app_scoped_id"))
-    username = profile.get("username") or f"instagram_{instagram_business_id}"
-
-    if not instagram_business_id:
-        raise ValueError("Instagram profile did not return user_id")
-
-    print("Saving OAuth Instagram profile:", {
-        "instagram_business_id": instagram_business_id,
-        "app_scoped_id": app_scoped_id,
-        "username": username,
-    })
-
-    existing = get_business(instagram_business_id)
-
-    update_data = {
-        "instagram_business_id": instagram_business_id,
-        "access_token": access_token,
-        "bot_enabled": True,
-        "business_name": username,
-        "business_type": "Instagram Business",
-    }
-
-    if existing:
-        print("Updating existing business:", existing.get("id"))
-        result = (
-            supabase.table("businesses")
-            .update(update_data)
-            .eq("id", existing["id"])
-            .execute()
-        )
-        return result.data
-
-    print("Creating/upserting new business:", instagram_business_id)
-    insert_data = {
-        **update_data,
-        "language": "uz",
-        "tone": "friendly, polite, sales-focused",
-        "knowledge": "",
-        "products": "",
-        "prices": "",
-        "delivery_info": "",
-        "working_hours": "",
-        "faq": "",
-        "catalog_link": "",
-        "sales_phone": "",
-        "telegram_single": "",
-        "telegram_package": "",
-        "telegram_bag": "",
-    }
-    result = (
-        supabase.table("businesses")
-        .upsert(insert_data, on_conflict="instagram_business_id")
-        .execute()
-    )
-    return result.data
 
 
 # ─────────────────────────────────────────────
@@ -713,7 +646,8 @@ async def process_message_change_event(entry_id: str, change: dict):
 async def home():
     return {
         "status": "ok",
-        "version": "full_fix_with_webhook_subscription_and_long_lived_token",
+        "version": "facebook_login_oauth_with_page_subscription",
+        "note": "Using Facebook Login OAuth to get a proper FB User token for Page subscriptions",
         "endpoints": {
             "connect_instagram": "/connect-instagram",
             "debug_business_ids": "/debug/business-ids",
@@ -776,8 +710,8 @@ async def debug_find_business(entry_id: str = "", recipient_id: str = ""):
 @app.get("/debug/check-subscription")
 async def debug_check_subscription(instagram_business_id: str = ""):
     """
-    Check whether Meta is currently delivering webhook events
-    for a given Instagram account.
+    Check whether the Facebook Page linked to this Instagram account
+    is subscribed to receive webhook events from our app.
     """
     if not instagram_business_id:
         return JSONResponse({"error": "instagram_business_id is required"}, status_code=400)
@@ -791,14 +725,32 @@ async def debug_check_subscription(instagram_business_id: str = ""):
         return JSONResponse({"error": "No access token stored for this business"}, status_code=400)
 
     try:
+        page_info = get_page_and_instagram_account(access_token)
+        page_id = page_info.get("page_id")
+        page_access_token = page_info.get("page_access_token")
+
+        if not page_id:
+            return {
+                "instagram_business_id": instagram_business_id,
+                "business_name": business.get("business_name"),
+                "linked_facebook_page": None,
+                "error": (
+                    "No linked Facebook Page found. "
+                    "This account was likely connected with the old Instagram OAuth. "
+                    "Ask the user to reconnect via /connect-instagram."
+                ),
+            }
+
         res = requests.get(
-            f"https://graph.instagram.com/{GRAPH_VERSION}/me/subscribed_apps",
-            params={"access_token": access_token},
+            f"https://graph.facebook.com/{GRAPH_VERSION}/{page_id}/subscribed_apps",
+            params={"access_token": page_access_token or access_token},
             timeout=30,
         )
         return {
             "instagram_business_id": instagram_business_id,
             "business_name": business.get("business_name"),
+            "linked_facebook_page_id": page_id,
+            "linked_facebook_page_name": page_info.get("page_name"),
             "subscription_check_status": res.status_code,
             "subscription_data": res.json(),
         }
@@ -809,8 +761,10 @@ async def debug_check_subscription(instagram_business_id: str = ""):
 @app.get("/debug/resubscribe")
 async def debug_resubscribe(instagram_business_id: str = ""):
     """
-    Manually re-trigger the webhook subscription for an existing OAuth account.
-    Use this to fix accounts that connected before the subscription fix was deployed.
+    Manually re-trigger the Facebook Page webhook subscription.
+    Only works for accounts that reconnected via the new /connect-instagram
+    (which uses Facebook Login OAuth and stores a proper FB User token).
+    Old accounts with Instagram-scoped tokens must reconnect first.
     """
     if not instagram_business_id:
         return JSONResponse({"error": "instagram_business_id is required"}, status_code=400)
@@ -823,16 +777,50 @@ async def debug_resubscribe(instagram_business_id: str = ""):
     if not access_token:
         return JSONResponse({"error": "No access token stored for this business"}, status_code=400)
 
-    sub_result = subscribe_to_instagram_webhooks(access_token)
+    page_info = get_page_and_instagram_account(access_token)
+    page_id = page_info.get("page_id")
+    page_access_token = page_info.get("page_access_token")
+
+    if not page_id:
+        return {
+            "instagram_business_id": instagram_business_id,
+            "error": (
+                "No linked Facebook Page found. "
+                "The stored token is likely an old Instagram-scoped token. "
+                "User must reconnect via /connect-instagram to get a Facebook User token."
+            ),
+        }
+
+    sub_result = subscribe_page_to_webhooks(page_id, page_access_token or access_token)
     return {
         "instagram_business_id": instagram_business_id,
         "business_name": business.get("business_name"),
+        "facebook_page_id": page_id,
+        "facebook_page_name": page_info.get("page_name"),
         "subscription_result": sub_result,
     }
 
 
 @app.get("/connect-instagram")
 async def connect_instagram():
+    """
+    Redirect the user to Facebook Login OAuth.
+
+    WHY Facebook Login instead of Instagram OAuth:
+    - Instagram OAuth (api.instagram.com) gives an Instagram-scoped token that
+      ONLY works on graph.instagram.com. It cannot call graph.facebook.com at all.
+    - Facebook Login (facebook.com/dialog/oauth) gives a Facebook User token that:
+        * Works on graph.facebook.com for all Page operations
+        * Can be exchanged for a long-lived token correctly
+        * Can list managed Pages via /me/accounts
+        * Can subscribe Pages to Instagram messaging webhook events
+
+    Required permissions:
+      instagram_basic, instagram_manage_messages, instagram_manage_comments
+        → read/send Instagram content
+      pages_show_list, pages_manage_metadata, pages_messaging
+        → list Pages and subscribe them to receive DM webhook events
+    """
     if not META_APP_ID:
         return PlainTextResponse("Missing META_APP_ID", status_code=500)
 
@@ -840,14 +828,17 @@ async def connect_instagram():
         "client_id": META_APP_ID,
         "redirect_uri": REDIRECT_URI,
         "scope": ",".join([
-            "instagram_business_basic",
-            "instagram_business_manage_messages",
-            "instagram_business_manage_comments",
+            "instagram_basic",
+            "instagram_manage_messages",
+            "instagram_manage_comments",
+            "pages_show_list",
+            "pages_manage_metadata",
+            "pages_messaging",
         ]),
         "response_type": "code",
         "state": secrets.token_urlsafe(16),
     }
-    auth_url = "https://www.instagram.com/oauth/authorize?" + urlencode(params)
+    auth_url = "https://www.facebook.com/dialog/oauth?" + urlencode(params)
     return RedirectResponse(auth_url)
 
 
@@ -859,12 +850,12 @@ async def auth_callback(request: Request):
 
     if error:
         return PlainTextResponse(
-            f"Instagram connection failed: {error} - {error_description}",
+            f"Connection failed: {error} - {error_description}",
             status_code=400,
         )
 
     if not code:
-        return PlainTextResponse("Missing code from Instagram", status_code=400)
+        return PlainTextResponse("Missing authorization code", status_code=400)
 
     if not META_APP_ID or not META_APP_SECRET:
         return PlainTextResponse(
@@ -873,47 +864,93 @@ async def auth_callback(request: Request):
         )
 
     try:
-        # Step 1: Exchange authorization code for short-lived token
-        token_data = exchange_code_for_token(code)
+        # Step 1: Exchange code for short-lived Facebook User token
+        token_data = exchange_code_for_fb_token(code)
+        short_lived_fb_token = token_data.get("access_token")
 
-        short_lived_token = token_data.get("access_token")
-        token_user_id = normalize_id(token_data.get("user_id"))
-
-        if not short_lived_token:
+        if not short_lived_fb_token:
             return PlainTextResponse(
-                f"No access token returned: {token_data}",
+                f"No access token returned from Facebook: {token_data}",
                 status_code=500,
             )
 
-        if not token_user_id:
+        print("Received short-lived FB User token:", safe_token(short_lived_fb_token))
+
+        # Step 2: Exchange for long-lived Facebook User token (~60 days)
+        fb_user_token = exchange_for_long_lived_fb_token(short_lived_fb_token)
+        print("Long-lived FB User token obtained:", safe_token(fb_user_token))
+
+        # Step 3: Find Facebook Page linked to an Instagram Business Account
+        page_info = get_page_and_instagram_account(fb_user_token)
+
+        if not page_info:
             return PlainTextResponse(
-                f"No user_id returned from Instagram token response: {token_data}",
-                status_code=500,
+                "No Facebook Page with a linked Instagram Business Account was found.\n\n"
+                "Please ensure:\n"
+                "1. Your Instagram account is a Business or Creator account.\n"
+                "2. It is connected to a Facebook Page.\n"
+                "3. You granted all requested permissions during login.",
+                status_code=400,
             )
 
-        print("Received short-lived Instagram token:", safe_token(short_lived_token))
-        print("Instagram OAuth token user_id:", token_user_id)
+        instagram_business_id = page_info["instagram_business_id"]
+        instagram_username = page_info["instagram_username"]
+        page_id = page_info["page_id"]
+        page_name = page_info["page_name"]
+        page_access_token = page_info["page_access_token"]
 
-        # Step 2: Exchange for long-lived token (60 days instead of ~1 hour)
-        access_token = exchange_for_long_lived_token(short_lived_token)
-        print("Using access token:", safe_token(access_token))
+        print("Instagram Business ID:", instagram_business_id)
+        print("Instagram Username:", instagram_username)
+        print("Facebook Page:", page_id, page_name)
 
-        # Step 3: Fetch Instagram profile
-        profile = get_instagram_profile(access_token, token_user_id)
-        print("Final profile used:", profile)
+        # Step 4: Save business to Supabase
+        # Store the Facebook User token — it works on graph.facebook.com for
+        # Page lookups and on graph.instagram.com for sending DMs/comment replies.
+        existing = get_business(instagram_business_id)
 
-        # Step 4: Save to Supabase
-        stored = upsert_connected_business(profile, access_token)
-        print("Stored business result:", stored)
+        update_data = {
+            "instagram_business_id": instagram_business_id,
+            "access_token": fb_user_token,
+            "bot_enabled": True,
+            "business_name": instagram_username,
+            "business_type": "Instagram Business",
+        }
 
-        # Step 5: Subscribe to Instagram webhook events
-        # This is the critical fix: without this call, Meta never delivers
-        # DM or comment webhook events to this server for OAuth-connected accounts.
-        sub_result = subscribe_to_instagram_webhooks(access_token)
-        print("Webhook subscription result:", sub_result)
+        if existing:
+            print("Updating existing business:", existing.get("id"))
+            supabase.table("businesses").update(update_data).eq("id", existing["id"]).execute()
+        else:
+            print("Creating new business for:", instagram_business_id)
+            insert_data = {
+                **update_data,
+                "language": "uz",
+                "tone": "friendly, polite, sales-focused",
+                "knowledge": "",
+                "products": "",
+                "prices": "",
+                "delivery_info": "",
+                "working_hours": "",
+                "faq": "",
+                "catalog_link": "",
+                "sales_phone": "",
+                "telegram_single": "",
+                "telegram_package": "",
+                "telegram_bag": "",
+            }
+            supabase.table("businesses").upsert(
+                insert_data, on_conflict="instagram_business_id"
+            ).execute()
+
+        print("Business saved to Supabase successfully.")
+
+        # Step 5: Subscribe the Facebook Page to receive Instagram DM webhook events
+        # This is the critical activation step — without it Meta will not deliver
+        # any messaging events to our webhook URL for this account.
+        sub_result = subscribe_page_to_webhooks(page_id, page_access_token)
+        print("Page webhook subscription result:", sub_result)
 
         return RedirectResponse(
-            f"{DASHBOARD_URL}?connected=success&ig_id={profile.get('user_id')}"
+            f"{DASHBOARD_URL}?connected=success&ig_id={instagram_business_id}"
         )
 
     except requests.HTTPError as e:
