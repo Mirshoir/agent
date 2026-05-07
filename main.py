@@ -192,7 +192,11 @@ def get_facebook_pages(user_access_token: str):
     res = requests.get(
         f"{GRAPH_BASE}/me/accounts",
         params={
-            "fields": "id,name,access_token,instagram_business_account{id,username,name}",
+            "fields": (
+                "id,name,access_token,"
+                "connected_instagram_account,"
+                "instagram_business_account{id,username,name}"
+            ),
             "access_token": user_access_token,
         },
         timeout=30,
@@ -201,6 +205,19 @@ def get_facebook_pages(user_access_token: str):
     print("Pages response:", res.text)
     res.raise_for_status()
     return res.json().get("data", [])
+
+
+def get_page_instagram_account(page: dict) -> dict:
+    ig = (
+        page.get("instagram_business_account")
+        or page.get("connected_instagram_account")
+        or {}
+    )
+
+    if ig:
+        print("Instagram account detected from page:", ig)
+
+    return ig
 
 
 def subscribe_page_to_webhooks(page_id: str, page_access_token: str) -> dict:
@@ -226,9 +243,15 @@ def upsert_connected_business_from_page(page: dict):
     page_name = page.get("name") or f"page_{page_id}"
     page_token = page.get("access_token")
 
-    ig = page.get("instagram_business_account") or {}
+    ig = get_page_instagram_account(page)
+
     instagram_business_id = normalize_id(ig.get("id"))
-    instagram_username = ig.get("username") or ig.get("name") or page_name
+    instagram_username = (
+        ig.get("username")
+        or ig.get("name")
+        or (f"instagram_{instagram_business_id}" if instagram_business_id else "")
+        or page_name
+    )
 
     if not page_id:
         raise ValueError("Facebook Page ID missing")
@@ -436,7 +459,7 @@ Strict business rules:
         if not res.ok:
             return (
                 "Xabaringiz qabul qilindi. "
-                "Hozir avtomatik javobда texник муаммо бор, тез орада жавоб берамиз."
+                "Hozir avtomatik javobda texnik muammo bor, tez orada javob beramiz."
             )
 
         return res.json()["choices"][0]["message"]["content"]
@@ -654,7 +677,7 @@ async def process_message_change_event(entry_id: str, change: dict):
 async def home():
     return {
         "status": "ok",
-        "version": "facebook_page_oauth_instagram_bot",
+        "version": "facebook_page_oauth_instagram_bot_connected_instagram_fix",
         "connect_facebook": "/connect-facebook",
         "connect_instagram_alias": "/connect-instagram",
         "webhook": "/webhook",
@@ -722,14 +745,15 @@ async def facebook_callback(request: Request):
         print("Facebook user token:", safe_token(user_token))
 
         pages = get_facebook_pages(user_token)
+        print("Fetched pages:", pages)
 
         connected = []
 
         for page in pages:
-            ig = page.get("instagram_business_account")
+            ig = get_page_instagram_account(page)
 
-            if not ig:
-                print("Skipping Page without connected Instagram:", page.get("name"))
+            if not ig or not ig.get("id"):
+                print("Skipping Page without connected Instagram:", page.get("name"), page)
                 continue
 
             stored = upsert_connected_business_from_page(page)
@@ -742,15 +766,17 @@ async def facebook_callback(request: Request):
                 "page_id": page.get("id"),
                 "page_name": page.get("name"),
                 "instagram_business_id": ig.get("id"),
-                "instagram_username": ig.get("username"),
+                "instagram_username": ig.get("username") or ig.get("name"),
                 "stored": stored,
                 "subscription": sub_result,
             })
 
         if not connected:
             return PlainTextResponse(
-                "No connected Instagram Business account found. "
-                "Please connect your Instagram account to your Facebook Page first.",
+                "No connected Instagram account found from Meta API. "
+                "The Page may be linked visually, but Graph API did not return "
+                "instagram_business_account or connected_instagram_account. "
+                "Go to Facebook Business Integrations, remove this app, then reconnect and enable all Page + Instagram permissions.",
                 status_code=400,
             )
 
