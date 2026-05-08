@@ -4,123 +4,220 @@ import hmac
 import streamlit as st
 from supabase import create_client
 from dotenv import load_dotenv
+import time
 
 load_dotenv()
 
-# Page configuration must be the first Streamlit command
+# ---------- Page Config (MUST be first) ----------
 st.set_page_config(
     page_title="Instagram Bot Dashboard",
     page_icon="🤖",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
-# ---------- Custom CSS for enhanced UI ----------
+# ---------- Custom CSS for Modern UI + Dark Mode Support ----------
 st.markdown("""
 <style>
-    /* Main container styling */
-    .main .block-container {
-        padding-top: 2rem;
-        padding-bottom: 2rem;
-        max-width: 1200px;
+    /* CSS Variables for Light/Dark mode (adapts to Streamlit theme) */
+    :root {
+        --bg-primary: #ffffff;
+        --bg-secondary: #f8f9fa;
+        --text-primary: #1e293b;
+        --text-secondary: #475569;
+        --border-color: #e2e8f0;
+        --card-shadow: 0 10px 15px -3px rgba(0,0,0,0.05), 0 4px 6px -2px rgba(0,0,0,0.025);
+        --accent: #6366f1;
+        --accent-hover: #4f46e5;
+        --success: #10b981;
+        --danger: #ef4444;
+        --warning: #f59e0b;
     }
-    
-    /* Card styling for various containers */
-    .custom-card {
-        background-color: #ffffff;
-        border-radius: 16px;
+
+    /* Dark mode override (when Streamlit theme is dark) */
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --text-primary: #f1f5f9;
+            --text-secondary: #cbd5e1;
+            --border-color: #334155;
+            --card-shadow: 0 10px 15px -3px rgba(0,0,0,0.3);
+        }
+    }
+
+    /* Force dark mode if Streamlit's theme is dark via data attribute */
+    [data-theme="dark"] {
+        --bg-primary: #0f172a;
+        --bg-secondary: #1e293b;
+        --text-primary: #f1f5f9;
+        --text-secondary: #cbd5e1;
+        --border-color: #334155;
+        --card-shadow: 0 10px 15px -3px rgba(0,0,0,0.3);
+    }
+
+    /* Global styles */
+    .stApp {
+        background-color: var(--bg-primary);
+        transition: background-color 0.3s ease;
+    }
+
+    /* Smooth card animations */
+    .modern-card {
+        background-color: var(--bg-secondary);
+        border-radius: 1.5rem;
         padding: 1.5rem;
         margin-bottom: 1.5rem;
-        box-shadow: 0 2px 10px rgba(0,0,0,0.05);
-        border: 1px solid #eef2f6;
+        border: 1px solid var(--border-color);
+        box-shadow: var(--card-shadow);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
     }
-    
-    /* Header styling */
-    .dashboard-header {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1rem 2rem;
-        border-radius: 20px;
-        color: white;
+    .modern-card:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.02);
+    }
+
+    /* Animated gradient header */
+    .gradient-header {
+        background: linear-gradient(135deg, #6366f1, #a855f7, #ec4899);
+        background-size: 200% 200%;
+        animation: gradientShift 6s ease infinite;
+        border-radius: 2rem;
+        padding: 1.2rem 2rem;
         margin-bottom: 2rem;
+        color: white;
         display: flex;
         justify-content: space-between;
         align-items: center;
     }
-    
-    /* Login card */
-    .login-card {
-        background-color: white;
-        border-radius: 24px;
-        padding: 2rem;
-        box-shadow: 0 10px 40px rgba(0,0,0,0.1);
-        max-width: 450px;
-        margin: 3rem auto;
-        text-align: center;
+    @keyframes gradientShift {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
     }
-    
-    /* Section titles */
-    .section-title {
-        font-size: 1.4rem;
-        font-weight: 600;
-        margin-bottom: 1rem;
-        padding-bottom: 0.5rem;
-        border-bottom: 3px solid #667eea;
-        display: inline-block;
-    }
-    
-    /* Metric cards */
-    .metric-card {
-        background: #f8f9fc;
-        border-radius: 16px;
-        padding: 1rem;
-        text-align: center;
-        border: 1px solid #e9ecef;
-    }
-    
-    /* Button improvements */
+
+    /* Button animations */
     .stButton button {
         border-radius: 40px;
         font-weight: 500;
-        transition: all 0.2s ease;
-    }
-    .stButton button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-    }
-    
-    /* Tabs styling */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        background-color: #f8f9fa;
-        border-radius: 40px;
-        padding: 6px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 40px;
-        padding: 6px 20px;
-        background-color: transparent;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #667eea;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        border: none;
+        background-color: var(--accent);
         color: white;
     }
-    
-    /* Dataframe styling */
-    .dataframe-container {
-        border-radius: 16px;
-        overflow: hidden;
-        border: 1px solid #eef2f6;
+    .stButton button:hover {
+        transform: scale(1.02);
+        background-color: var(--accent-hover);
+        box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
     }
-    
-    /* Success/error messages */
+
+    /* Sidebar styling */
+    [data-testid="stSidebar"] {
+        background-color: var(--bg-secondary);
+        border-right: 1px solid var(--border-color);
+        transition: background-color 0.3s ease;
+    }
+
+    /* Tabs animation */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 0.5rem;
+        background-color: var(--bg-secondary);
+        border-radius: 3rem;
+        padding: 0.25rem;
+    }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 2rem;
+        transition: all 0.2s;
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: var(--accent);
+        color: white;
+        transform: scale(1.02);
+    }
+
+    /* Success/error toast-like animations */
     .stAlert {
-        border-radius: 12px;
-        border-left-width: 5px;
+        border-radius: 1rem;
+        animation: slideIn 0.3s ease-out;
+    }
+    @keyframes slideIn {
+        from {
+            opacity: 0;
+            transform: translateY(-20px);
+        }
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    /* Metric cards */
+    .metric-card {
+        background: var(--bg-secondary);
+        border-radius: 1.25rem;
+        padding: 1.25rem;
+        text-align: center;
+        border: 1px solid var(--border-color);
+        transition: all 0.2s;
+    }
+    .metric-card:hover {
+        transform: translateY(-2px);
+        box-shadow: var(--card-shadow);
+    }
+    .metric-value {
+        font-size: 2rem;
+        font-weight: 700;
+        color: var(--accent);
+    }
+    .metric-label {
+        font-size: 0.85rem;
+        color: var(--text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+
+    /* Loading spinner animation */
+    @keyframes spin {
+        to { transform: rotate(360deg); }
+    }
+    .custom-spinner {
+        display: inline-block;
+        width: 1.5rem;
+        height: 1.5rem;
+        border: 3px solid var(--border-color);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+    }
+
+    /* Input fields dark mode friendly */
+    .stTextInput > div > div > input, .stTextArea textarea, .stSelectbox > div > div {
+        background-color: var(--bg-primary);
+        color: var(--text-primary);
+        border-color: var(--border-color);
+        border-radius: 0.75rem;
+    }
+
+    hr {
+        border-color: var(--border-color);
     }
 </style>
+
+<script>
+    // Detect Streamlit theme and set data-theme attribute for CSS
+    const observer = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => {
+            if (mutation.attributeName === 'data-theme') {
+                const theme = document.documentElement.getAttribute('data-theme');
+                document.documentElement.setAttribute('data-theme', theme);
+            }
+        });
+    });
+    observer.observe(document.documentElement, { attributes: true });
+</script>
 """, unsafe_allow_html=True)
 
-# ---------- Helper functions (unchanged) ----------
+# ---------- Helper Functions (unchanged logic, but with loading toasts) ----------
 def get_secret(key: str, default=None):
     try:
         return st.secrets[key]
@@ -134,7 +231,7 @@ ADMIN_EMAIL = get_secret("ADMIN_EMAIL", "")
 DASHBOARD_SECRET = get_secret("DASHBOARD_SECRET")
 
 if not all([SUPABASE_URL, SUPABASE_SERVICE_KEY, ADMIN_EMAIL, DASHBOARD_SECRET]):
-    st.error("Missing required environment variables. Please check your configuration.")
+    st.error("Missing required environment variables. Please check .env or Streamlit secrets.")
     st.stop()
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -207,330 +304,308 @@ def create_business(data: dict):
     return supabase.table("businesses").insert(data).execute()
 
 def logout():
-    st.session_state.clear()
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
     st.rerun()
 
-# ---------- Login Screen ----------
+# ---------- Login Screen (animated) ----------
 if "user" not in st.session_state:
     st.markdown("""
-    <div class="login-card">
-        <h1>🤖 Instagram Bot Dashboard</h1>
-        <p style="color: #666; margin-bottom: 2rem;">Sign in to manage your businesses</p>
+    <div style="display: flex; justify-content: center; align-items: center; min-height: 80vh;">
+        <div class="modern-card" style="width: 100%; max-width: 450px; text-align: center;">
+            <h1 style="font-size: 2.5rem;">🤖</h1>
+            <h2>Instagram Bot Dashboard</h2>
+            <p style="color: var(--text-secondary); margin-bottom: 2rem;">Sign in to manage your businesses</p>
+        </div>
     </div>
     """, unsafe_allow_html=True)
     
     with st.container():
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            email = st.text_input("Email", placeholder="your@email.com", label_visibility="collapsed")
-            password = st.text_input("Password", type="password", placeholder="Password", label_visibility="collapsed")
+            email = st.text_input("Email", placeholder="admin@example.com", label_visibility="collapsed")
+            password = st.text_input("Password", type="password", placeholder="••••••••", label_visibility="collapsed")
             if st.button("Login", type="primary", use_container_width=True):
-                user = login_user(email, password)
+                with st.spinner("Authenticating..."):
+                    time.sleep(0.5)  # subtle delay for animation
+                    user = login_user(email, password)
                 if user:
                     st.session_state["user"] = user
+                    st.toast("Welcome back! 🎉", icon="✅")
                     st.rerun()
                 else:
                     st.error("Invalid email or password.")
     st.stop()
 
-# ---------- Main Dashboard ----------
+# ---------- Authenticated User ----------
 user = st.session_state["user"]
 user_email = normalize_email(user.get("email"))
 is_admin = user_email == normalize_email(ADMIN_EMAIL)
 
-# Header with user info and logout
-st.markdown(f"""
-<div class="dashboard-header">
-    <div>
-        <span style="font-size: 1.6rem;">🤖</span>
-        <span style="font-weight: 600; margin-left: 0.5rem;">Instagram Bot Dashboard</span>
-        <span style="font-size: 0.85rem; background: rgba(255,255,255,0.2); padding: 0.2rem 0.8rem; border-radius: 40px; margin-left: 1rem;">
-            {user_email}
-        </span>
-        {"⭐ Admin" if is_admin else "👤 Business Owner"}
+# ---------- Sidebar Navigation (Enhanced) ----------
+with st.sidebar:
+    st.markdown(f"""
+    <div style="text-align: center; margin-bottom: 2rem;">
+        <div style="font-size: 3rem;">🤖</div>
+        <h3>Bot Manager</h3>
+        <p style="color: var(--text-secondary); font-size: 0.85rem;">{user_email}</p>
+        <div style="background: var(--accent); border-radius: 40px; padding: 0.2rem 0.8rem; display: inline-block;">
+            {"⭐ Admin" if is_admin else "👤 Business Owner"}
+        </div>
     </div>
-</div>
-""", unsafe_allow_html=True)
-
-if st.button("🚪 Logout", key="logout_btn", help="Sign out from dashboard"):
-    logout()
-
-# Check for success message from Instagram connection
-if st.query_params.get("connected") == "success":
-    st.success("✅ Instagram connected successfully!", icon="🔗")
-    st.query_params.clear()
-
-# ---------- Tab Layout ----------
-if is_admin:
-    tabs = st.tabs(["📋 Edit Businesses", "➕ Add Business", "👤 Users", "🔗 Assign Business"])
-else:
-    tabs = st.tabs(["📋 Edit Business"])
-
-# ---------- Tab 0: Edit Business(es) ----------
-with tabs[0]:
-    businesses = get_all_businesses() if is_admin else get_user_businesses(user_email)
+    """, unsafe_allow_html=True)
     
-    if not businesses:
-        st.warning("No business assigned to your account. Please contact an administrator.")
-        st.stop()
-    
-    # Business selection
-    if len(businesses) == 1:
-        business = businesses[0]
-        st.info(f"✏️ Editing: **{business.get('business_name', 'Unnamed')}**")
+    # Navigation options
+    if is_admin:
+        nav_option = st.radio(
+            "Navigation",
+            ["📊 Dashboard", "📋 Businesses", "➕ Add Business", "👥 Users", "🔗 Assignments"],
+            index=0,
+            label_visibility="collapsed"
+        )
     else:
-        business_options = {
-            f"{b.get('business_name', 'Unnamed')} — {b.get('instagram_business_id', 'No IG ID')}": b
-            for b in businesses
-        }
-        selected_label = st.selectbox("Select business to edit", list(business_options.keys()))
-        business = business_options[selected_label]
+        nav_option = st.radio("Navigation", ["📊 Dashboard", "📋 My Business"], label_visibility="collapsed")
     
-    # Edit form with expanders
-    with st.form(key=f"edit_business_{business['id']}"):
-        # Business Info expander
-        with st.expander("🏢 Business Info", expanded=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                business_name = st.text_input("Business name", value=business.get("business_name") or "")
-                business_type = st.text_input("Business type", value=business.get("business_type") or "")
-            with col2:
-                current_language = business.get("language") or "uz"
-                if current_language not in ["uz", "ru", "en"]:
-                    current_language = "uz"
-                language = st.selectbox("Default language", ["uz", "ru", "en"], index=["uz", "ru", "en"].index(current_language))
-                tone = st.text_input("Tone", value=business.get("tone") or "friendly, polite, sales-focused")
-            bot_enabled = st.toggle("🤖 Bot enabled", value=bool(business.get("bot_enabled", True)))
-        
-        # Instagram Connection expander (read-only for non-admin)
-        with st.expander("🔌 Instagram Connection"):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.text_input("Instagram Business ID", value=business.get("instagram_business_id") or "", disabled=True)
-                st.text_input("Facebook Page ID", value=business.get("facebook_page_id") or "", disabled=True)
-            with col2:
-                st.text_input("OAuth provider", value=business.get("oauth_provider") or "", disabled=True)
-                token_status = "Connected ✅" if (business.get("access_token") or business.get("page_access_token")) else "Not connected ❌"
-                st.text_input("Access token status", value=token_status, disabled=True)
-            
-            if is_admin:
-                col_reconnect1, col_reconnect2 = st.columns(2)
-                with col_reconnect1:
-                    st.link_button("Reconnect Instagram", f"{BACKEND_URL}/connect-instagram", use_container_width=True)
-                with col_reconnect2:
-                    st.link_button("Connect Facebook Page", f"{BACKEND_URL}/connect-facebook", use_container_width=True)
-        
-        # Business Knowledge expander
-        with st.expander("📦 Business Knowledge"):
-            products = st.text_area("Products / Services", value=business.get("products") or "", height=100, help="List your main products or services")
-            prices = st.text_area("Prices", value=business.get("prices") or "", height=80, help="Pricing information for your products")
-            delivery_info = st.text_area("Delivery info", value=business.get("delivery_info") or "", height=80)
-            working_hours = st.text_area("Working hours", value=business.get("working_hours") or "", height=80)
-            faq = st.text_area("FAQ", value=business.get("faq") or "", height=120, help="Frequently asked questions and answers")
-            catalog_link = st.text_input("Catalog link", value=business.get("catalog_link") or "", help="Link to your full catalog or website")
-            sales_phone = st.text_input("Sales phone", value=business.get("sales_phone") or "")
-        
-        # Telegram Links expander
-        with st.expander("📱 Telegram Links"):
-            col_tg1, col_tg2 = st.columns(2)
-            with col_tg1:
-                telegram_single = st.text_input("Single product Telegram link", value=business.get("telegram_single") or "")
-                telegram_package = st.text_input("Package Telegram link", value=business.get("telegram_package") or "")
-            with col_tg2:
-                telegram_bag = st.text_input("Bag / Meshok Telegram link", value=business.get("telegram_bag") or "")
-        
-        # Main Knowledge Prompt expander
-        with st.expander("🧠 Main Knowledge Prompt (AI Instructions)"):
-            knowledge = st.text_area("General business knowledge", value=business.get("knowledge") or "", height=280, 
-                                    help="This prompt will be used by the AI to generate responses. Include your brand voice, key selling points, etc.")
-        
-        # Save button
-        col_save1, col_save2, col_save3 = st.columns([1, 2, 1])
-        with col_save2:
-            submitted = st.form_submit_button("💾 Save Business", type="primary", use_container_width=True)
-        
-        if submitted:
-            if not business_name.strip():
-                st.error("Business name is required.")
-            else:
-                update_data = {
-                    "business_name": business_name.strip(),
-                    "business_type": business_type.strip(),
-                    "language": language,
-                    "tone": tone.strip(),
-                    "bot_enabled": bot_enabled,
-                    "products": products.strip(),
-                    "prices": prices.strip(),
-                    "delivery_info": delivery_info.strip(),
-                    "working_hours": working_hours.strip(),
-                    "faq": faq.strip(),
-                    "catalog_link": catalog_link.strip(),
-                    "sales_phone": sales_phone.strip(),
-                    "telegram_single": telegram_single.strip(),
-                    "telegram_package": telegram_package.strip(),
-                    "telegram_bag": telegram_bag.strip(),
-                    "knowledge": knowledge.strip(),
-                }
-                try:
-                    update_business(business["id"], update_data)
-                    st.success("✅ Business updated successfully!", icon="🎉")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Failed to update business: {e}")
+    st.divider()
+    if st.button("🚪 Sign Out", use_container_width=True):
+        logout()
 
-# ---------- Admin Tabs (only visible for admin) ----------
-if is_admin:
-    # Tab 1: Add Business
-    with tabs[1]:
-        st.markdown('<p class="section-title">➕ Add New Business Profile</p>', unsafe_allow_html=True)
-        with st.form("add_business_form"):
-            col1, col2 = st.columns(2)
-            with col1:
-                new_business_name = st.text_input("Business name *", key="new_name")
-                new_instagram_business_id = st.text_input("Instagram Business ID *", key="new_ig_id")
-                new_facebook_page_id = st.text_input("Facebook Page ID", key="new_fb_id")
-            with col2:
-                new_business_type = st.text_input("Business type", key="new_type")
-                new_language = st.selectbox("Default language", ["uz", "ru", "en"], key="new_lang")
-                new_tone = st.text_input("Tone", value="friendly, polite, sales-focused", key="new_tone")
+# ---------- Helper: Show metrics card ----------
+def show_metrics():
+    businesses = get_all_businesses() if is_admin else get_user_businesses(user_email)
+    total_businesses = len(businesses)
+    active_bots = sum(1 for b in businesses if b.get("bot_enabled", False))
+    connected_ig = sum(1 for b in businesses if b.get("access_token") or b.get("page_access_token"))
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value">{total_businesses}</div>
+            <div class="metric-label">Total Businesses</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col2:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value">{active_bots}</div>
+            <div class="metric-label">Active Bots</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with col3:
+        st.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-value">{connected_ig}</div>
+            <div class="metric-label">Instagram Connected</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+# ---------- Main Content based on Navigation ----------
+st.markdown('<div class="gradient-header"><div><span style="font-size:1.8rem;">🤖</span> <strong>Instagram Bot Dashboard</strong></div><div>✨ AI-Powered Engagement</div></div>', unsafe_allow_html=True)
+
+if nav_option == "📊 Dashboard":
+    st.markdown("## Welcome back, " + user_email.split('@')[0] + "!")
+    show_metrics()
+    
+    with st.expander("📈 Recent Activity", expanded=True):
+        st.info("Coming soon: Real-time bot activity logs and analytics.")
+        # You can later add a table of recent messages or bot actions
+
+elif nav_option == "📋 Businesses" or nav_option == "📋 My Business":
+    # Edit businesses section
+    businesses = get_all_businesses() if is_admin else get_user_businesses(user_email)
+    if not businesses:
+        st.warning("No businesses found. Contact admin or add a business.")
+    else:
+        if len(businesses) == 1:
+            business = businesses[0]
+        else:
+            business_options = {f"{b['business_name']} ({b.get('instagram_business_id','No ID')})": b for b in businesses}
+            selected = st.selectbox("Select Business", list(business_options.keys()))
+            business = business_options[selected]
+        
+        # Edit form using expanders (same as before but with modern styling)
+        with st.form(key=f"edit_{business['id']}"):
+            with st.expander("🏢 Business Info", expanded=True):
+                col1, col2 = st.columns(2)
+                with col1:
+                    business_name = st.text_input("Business Name", value=business.get("business_name",""))
+                with col2:
+                    business_type = st.text_input("Business Type", value=business.get("business_type",""))
+                language = st.selectbox("Language", ["uz","ru","en"], index=["uz","ru","en"].index(business.get("language","uz")))
+                tone = st.text_input("Tone", value=business.get("tone","friendly, polite"))
+                bot_enabled = st.toggle("Bot Enabled", value=business.get("bot_enabled", True))
             
-            submitted = st.form_submit_button("Create Business Profile", type="primary", use_container_width=True)
-            if submitted:
-                if not new_business_name.strip():
-                    st.error("Business name is required.")
-                elif not new_instagram_business_id.strip():
-                    st.error("Instagram Business ID is required.")
+            with st.expander("🔌 Instagram Connection"):
+                st.text_input("Instagram Business ID", value=business.get("instagram_business_id",""), disabled=True)
+                st.text_input("Facebook Page ID", value=business.get("facebook_page_id",""), disabled=True)
+                if business.get("access_token") or business.get("page_access_token"):
+                    st.success("✅ Connected")
                 else:
-                    data = {
-                        "business_name": new_business_name.strip(),
-                        "instagram_business_id": new_instagram_business_id.strip(),
-                        "facebook_page_id": new_facebook_page_id.strip(),
-                        "business_type": new_business_type.strip(),
-                        "language": new_language,
-                        "tone": new_tone.strip(),
-                        "bot_enabled": False,
-                        "knowledge": "",
-                        "access_token": "",
-                        "page_access_token": "",
-                        "oauth_provider": "",
-                        "facebook_page_name": "",
-                        "products": "",
-                        "prices": "",
-                        "delivery_info": "",
-                        "working_hours": "",
-                        "faq": "",
-                        "catalog_link": "",
-                        "sales_phone": "",
-                        "telegram_single": "",
-                        "telegram_package": "",
-                        "telegram_bag": "",
+                    st.error("❌ Not connected")
+                if is_admin:
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        st.link_button("Reconnect Instagram", f"{BACKEND_URL}/connect-instagram", use_container_width=True)
+                    with col_b:
+                        st.link_button("Connect FB Page", f"{BACKEND_URL}/connect-facebook", use_container_width=True)
+            
+            with st.expander("📦 Business Knowledge"):
+                products = st.text_area("Products/Services", value=business.get("products",""), height=100)
+                prices = st.text_area("Prices", value=business.get("prices",""), height=80)
+                delivery = st.text_area("Delivery Info", value=business.get("delivery_info",""), height=80)
+                hours = st.text_area("Working Hours", value=business.get("working_hours",""), height=80)
+                faq = st.text_area("FAQ", value=business.get("faq",""), height=120)
+                catalog = st.text_input("Catalog Link", value=business.get("catalog_link",""))
+                phone = st.text_input("Sales Phone", value=business.get("sales_phone",""))
+            
+            with st.expander("📱 Telegram Links"):
+                tg_single = st.text_input("Single Product Link", value=business.get("telegram_single",""))
+                tg_package = st.text_input("Package Link", value=business.get("telegram_package",""))
+                tg_bag = st.text_input("Bag/Meshok Link", value=business.get("telegram_bag",""))
+            
+            with st.expander("🧠 AI Knowledge Prompt"):
+                knowledge = st.text_area("Main Knowledge", value=business.get("knowledge",""), height=250)
+            
+            if st.form_submit_button("💾 Save Changes", type="primary", use_container_width=True):
+                if not business_name.strip():
+                    st.error("Business name is required.")
+                else:
+                    update_data = {
+                        "business_name": business_name.strip(),
+                        "business_type": business_type.strip(),
+                        "language": language,
+                        "tone": tone.strip(),
+                        "bot_enabled": bot_enabled,
+                        "products": products.strip(),
+                        "prices": prices.strip(),
+                        "delivery_info": delivery.strip(),
+                        "working_hours": hours.strip(),
+                        "faq": faq.strip(),
+                        "catalog_link": catalog.strip(),
+                        "sales_phone": phone.strip(),
+                        "telegram_single": tg_single.strip(),
+                        "telegram_package": tg_package.strip(),
+                        "telegram_bag": tg_bag.strip(),
+                        "knowledge": knowledge.strip(),
                     }
                     try:
-                        create_business(data)
-                        st.success("✅ Business profile created successfully!", icon="🎉")
+                        update_business(business["id"], update_data)
+                        st.success("✅ Business updated successfully!")
+                        st.balloons()
+                        time.sleep(0.5)
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Could not create business: {e}")
-    
-    # Tab 2: Users management
-    with tabs[2]:
-        st.markdown('<p class="section-title">👤 Manage Dashboard Users</p>', unsafe_allow_html=True)
-        
-        # Create/Update user
-        with st.expander("Create or Reset User Password", expanded=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                new_user_email = st.text_input("User email", key="user_email_input")
-            with col2:
-                new_user_password = st.text_input("Temporary/New password", type="password", key="user_pass_input")
-            if st.button("Create / Reset Password", type="primary"):
-                if not new_user_email.strip():
-                    st.error("Email is required.")
-                elif not new_user_password.strip():
-                    st.error("Password is required.")
-                else:
-                    try:
-                        create_or_update_dashboard_user(new_user_email, new_user_password)
-                        st.success("✅ User created or password reset successfully.")
-                    except Exception as e:
-                        st.error(f"Could not save user: {e}")
-        
-        # Activate/Deactivate user
-        with st.expander("Activate / Deactivate User"):
-            status_email = st.text_input("User email for status change", key="status_email")
-            col_act, col_deact = st.columns(2)
-            with col_act:
-                if st.button("✅ Activate User", use_container_width=True):
-                    if status_email.strip():
-                        set_user_active_status(status_email, True)
-                        st.success("User activated.")
-                        st.rerun()
-                    else:
-                        st.error("Email is required.")
-            with col_deact:
-                if st.button("⛔ Deactivate User", use_container_width=True):
-                    if status_email.strip():
-                        set_user_active_status(status_email, False)
-                        st.success("User deactivated.")
-                        st.rerun()
-                    else:
-                        st.error("Email is required.")
-        
-        # List existing users
-        st.markdown("### Existing Dashboard Users")
-        users_list = get_all_dashboard_users()
-        if users_list:
-            st.dataframe(users_list, use_container_width=True, column_config={
-                "id": "User ID",
-                "email": "Email",
-                "is_active": "Active",
-                "created_at": "Created At"
-            })
-        else:
-            st.info("No dashboard users found.")
-    
-    # Tab 3: Assign Business to User
-    with tabs[3]:
-        st.markdown('<p class="section-title">🔗 Assign Business to User</p>', unsafe_allow_html=True)
-        
-        all_businesses = get_all_businesses()
-        if not all_businesses:
-            st.warning("No businesses found. Please create a business first.")
-        else:
-            col1, col2 = st.columns(2)
-            with col1:
-                assign_email = st.text_input("User email to assign", key="assign_email")
-                business_map = {
-                    f"{b.get('business_name', 'Unnamed')} — {b.get('instagram_business_id', 'No IG ID')}": b["id"]
-                    for b in all_businesses
+                        st.error(f"Error: {e}")
+
+elif nav_option == "➕ Add Business" and is_admin:
+    st.markdown("## ➕ Add New Business")
+    with st.form("add_business"):
+        col1, col2 = st.columns(2)
+        with col1:
+            name = st.text_input("Business Name *")
+            ig_id = st.text_input("Instagram Business ID *")
+            fb_id = st.text_input("Facebook Page ID")
+        with col2:
+            biz_type = st.text_input("Business Type")
+            lang = st.selectbox("Language", ["uz","ru","en"])
+            tone_val = st.text_input("Tone", value="friendly, polite")
+        if st.form_submit_button("Create Business", type="primary"):
+            if not name.strip() or not ig_id.strip():
+                st.error("Business Name and Instagram ID are required.")
+            else:
+                data = {
+                    "business_name": name.strip(),
+                    "instagram_business_id": ig_id.strip(),
+                    "facebook_page_id": fb_id.strip(),
+                    "business_type": biz_type.strip(),
+                    "language": lang,
+                    "tone": tone_val.strip(),
+                    "bot_enabled": False,
+                    "knowledge": "",
+                    "access_token": "",
+                    "page_access_token": "",
+                    "oauth_provider": "",
+                    "facebook_page_name": "",
+                    "products": "", "prices": "", "delivery_info": "", "working_hours": "",
+                    "faq": "", "catalog_link": "", "sales_phone": "",
+                    "telegram_single": "", "telegram_package": "", "telegram_bag": "",
                 }
-                selected_label = st.selectbox("Select Business", list(business_map.keys()), key="assign_business")
-                role = st.selectbox("Role", ["owner", "editor"], key="assign_role")
-            with col2:
-                if st.button("➕ Assign Business", type="primary", use_container_width=True):
-                    if not assign_email.strip():
-                        st.error("User email is required.")
-                    else:
-                        assign_business_to_user(assign_email, business_map[selected_label], role)
-                        st.success("✅ Business assigned successfully.")
-                        st.rerun()
-                if st.button("❌ Remove Assignment", use_container_width=True):
-                    if not assign_email.strip():
-                        st.error("User email is required.")
-                    else:
-                        remove_business_assignment(assign_email, business_map[selected_label])
-                        st.success("Assignment removed.")
-                        st.rerun()
-        
-        st.divider()
-        st.markdown("### Current Business Assignments")
-        assignments = get_business_assignments()
-        if assignments:
-            st.dataframe(assignments, use_container_width=True, column_config={
-                "user_email": "User Email",
-                "business_id": "Business ID",
-                "role": "Role",
-                "created_at": "Assigned On"
-            })
-        else:
-            st.info("No assignments found.")
+                try:
+                    create_business(data)
+                    st.success("Business created!")
+                    st.balloons()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Creation failed: {e}")
+
+elif nav_option == "👥 Users" and is_admin:
+    st.markdown("## 👥 Manage Dashboard Users")
+    with st.expander("Create / Reset User"):
+        email_u = st.text_input("User Email")
+        pwd_u = st.text_input("Password", type="password")
+        if st.button("Create/Reset"):
+            if email_u and pwd_u:
+                create_or_update_dashboard_user(email_u, pwd_u)
+                st.success("User saved.")
+                st.rerun()
+            else:
+                st.error("Email and password required.")
+    with st.expander("Activate / Deactivate User"):
+        email_status = st.text_input("Email for status change")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("Activate"):
+                if email_status:
+                    set_user_active_status(email_status, True)
+                    st.success("Activated")
+                else:
+                    st.error("Email required")
+        with col_b:
+            if st.button("Deactivate"):
+                if email_status:
+                    set_user_active_status(email_status, False)
+                    st.success("Deactivated")
+                else:
+                    st.error("Email required")
+    st.subheader("Existing Users")
+    users_list = get_all_dashboard_users()
+    if users_list:
+        st.dataframe(users_list, use_container_width=True)
+    else:
+        st.info("No users.")
+
+elif nav_option == "🔗 Assignments" and is_admin:
+    st.markdown("## 🔗 Assign Business to User")
+    all_biz = get_all_businesses()
+    if not all_biz:
+        st.warning("No businesses exist.")
+    else:
+        biz_map = {f"{b['business_name']} ({b['id'][:8]})": b['id'] for b in all_biz}
+        email_assign = st.text_input("User Email")
+        selected_biz = st.selectbox("Business", list(biz_map.keys()))
+        role = st.selectbox("Role", ["owner", "editor"])
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Assign", use_container_width=True):
+                if email_assign:
+                    assign_business_to_user(email_assign, biz_map[selected_biz], role)
+                    st.success("Assigned!")
+                    st.rerun()
+                else:
+                    st.error("Email required")
+        with col2:
+            if st.button("Remove Assignment", use_container_width=True):
+                if email_assign:
+                    remove_business_assignment(email_assign, biz_map[selected_biz])
+                    st.success("Removed")
+                    st.rerun()
+                else:
+                    st.error("Email required")
+    st.divider()
+    st.subheader("Current Assignments")
+    assignments = get_business_assignments()
+    if assignments:
+        st.dataframe(assignments, use_container_width=True)
+    else:
+        st.info("No assignments.")
