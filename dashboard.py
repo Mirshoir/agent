@@ -10,7 +10,7 @@ load_dotenv()
 st.set_page_config(
     page_title="Instagram Bot Dashboard",
     page_icon="🤖",
-    layout="wide"
+    layout="wide",
 )
 
 
@@ -25,7 +25,7 @@ SUPABASE_URL = get_secret("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = get_secret("SUPABASE_SERVICE_KEY")
 BACKEND_URL = get_secret("BACKEND_URL", "https://agent-1-xi6h.onrender.com")
 ADMIN_EMAIL = get_secret("ADMIN_EMAIL", "")
-DASHBOARD_SECRET = get_secret("DASHBOARD_SECRET", "change-this-secret")
+DASHBOARD_SECRET = get_secret("DASHBOARD_SECRET")
 
 if not SUPABASE_URL:
     st.error("Missing SUPABASE_URL")
@@ -35,7 +35,19 @@ if not SUPABASE_SERVICE_KEY:
     st.error("Missing SUPABASE_SERVICE_KEY")
     st.stop()
 
+if not ADMIN_EMAIL:
+    st.error("Missing ADMIN_EMAIL")
+    st.stop()
+
+if not DASHBOARD_SECRET:
+    st.error("Missing DASHBOARD_SECRET")
+    st.stop()
+
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
+
+def normalize_email(email: str) -> str:
+    return str(email or "").strip().lower()
 
 
 def hash_password(password: str) -> str:
@@ -43,11 +55,13 @@ def hash_password(password: str) -> str:
 
 
 def verify_password(password: str, password_hash: str) -> bool:
+    if not password or not password_hash:
+        return False
     return hmac.compare_digest(hash_password(password), password_hash)
 
 
 def login_user(email: str, password: str):
-    email = email.strip().lower()
+    email = normalize_email(email)
 
     result = (
         supabase.table("dashboard_users")
@@ -75,7 +89,7 @@ def get_user_businesses(user_email: str):
     result = (
         supabase.table("business_users")
         .select("business_id, role")
-        .eq("user_email", user_email.strip().lower())
+        .eq("user_email", normalize_email(user_email))
         .execute()
     )
 
@@ -142,27 +156,51 @@ def update_business(business_id: str, data: dict):
     )
 
 
-def create_dashboard_user(email: str, password: str):
+def create_or_update_dashboard_user(email: str, password: str):
     data = {
-        "email": email.strip().lower(),
+        "email": normalize_email(email),
         "password_hash": hash_password(password),
         "is_active": True,
     }
 
-    return supabase.table("dashboard_users").insert(data).execute()
+    return (
+        supabase.table("dashboard_users")
+        .upsert(data, on_conflict="email")
+        .execute()
+    )
+
+
+def set_user_active_status(email: str, is_active: bool):
+    return (
+        supabase.table("dashboard_users")
+        .update({"is_active": is_active})
+        .eq("email", normalize_email(email))
+        .execute()
+    )
 
 
 def assign_business_to_user(email: str, business_id: str, role: str):
     data = {
-        "user_email": email.strip().lower(),
+        "user_email": normalize_email(email),
         "business_id": business_id,
         "role": role,
     }
 
-    return supabase.table("business_users").upsert(
-        data,
-        on_conflict="user_email,business_id"
-    ).execute()
+    return (
+        supabase.table("business_users")
+        .upsert(data, on_conflict="user_email,business_id")
+        .execute()
+    )
+
+
+def remove_business_assignment(email: str, business_id: str):
+    return (
+        supabase.table("business_users")
+        .delete()
+        .eq("user_email", normalize_email(email))
+        .eq("business_id", business_id)
+        .execute()
+    )
 
 
 def create_business(data: dict):
@@ -193,8 +231,8 @@ if "user" not in st.session_state:
 
 
 user = st.session_state["user"]
-user_email = user["email"].strip().lower()
-is_admin = user_email == ADMIN_EMAIL.strip().lower()
+user_email = normalize_email(user.get("email"))
+is_admin = user_email == normalize_email(ADMIN_EMAIL)
 
 st.title("🤖 Instagram Bot Business Dashboard")
 
@@ -202,6 +240,7 @@ col1, col2 = st.columns([3, 1])
 
 with col1:
     st.write(f"Logged in as: **{user_email}**")
+    st.caption("Admin mode enabled." if is_admin else "Business owner mode enabled.")
 
 with col2:
     if st.button("Logout"):
@@ -224,11 +263,9 @@ if is_admin:
 else:
     tabs = st.tabs(["📋 Edit Business"])
 
+
 with tabs[0]:
-    if is_admin:
-        businesses = get_all_businesses()
-    else:
-        businesses = get_user_businesses(user_email)
+    businesses = get_all_businesses() if is_admin else get_user_businesses(user_email)
 
     if not businesses:
         st.warning("No business assigned to your account.")
@@ -244,8 +281,8 @@ with tabs[0]:
         }
 
         selected_business = st.selectbox(
-            "Select your assigned business",
-            list(business_options.keys())
+            "Select business" if is_admin else "Select your assigned business",
+            list(business_options.keys()),
         )
 
         business = business_options[selected_business]
@@ -259,12 +296,12 @@ with tabs[0]:
 
         business_name = st.text_input(
             "Business name",
-            value=business.get("business_name") or ""
+            value=business.get("business_name") or "",
         )
 
         business_type = st.text_input(
             "Business type",
-            value=business.get("business_type") or ""
+            value=business.get("business_type") or "",
         )
 
         current_language = business.get("language") or "uz"
@@ -275,17 +312,17 @@ with tabs[0]:
         language = st.selectbox(
             "Default language",
             ["uz", "ru", "en"],
-            index=["uz", "ru", "en"].index(current_language)
+            index=["uz", "ru", "en"].index(current_language),
         )
 
         tone = st.text_input(
             "Tone",
-            value=business.get("tone") or "friendly, polite, sales-focused"
+            value=business.get("tone") or "friendly, polite, sales-focused",
         )
 
         bot_enabled = st.toggle(
             "Bot enabled",
-            value=bool(business.get("bot_enabled", True))
+            value=bool(business.get("bot_enabled", True)),
         )
 
     with right:
@@ -294,13 +331,19 @@ with tabs[0]:
         st.text_input(
             "Instagram Business ID",
             value=business.get("instagram_business_id") or "",
-            disabled=True
+            disabled=True,
         )
 
         st.text_input(
             "Facebook Page ID",
             value=business.get("facebook_page_id") or "",
-            disabled=True
+            disabled=True,
+        )
+
+        st.text_input(
+            "OAuth provider",
+            value=business.get("oauth_provider") or "",
+            disabled=True,
         )
 
         st.write("Access token status:")
@@ -313,12 +356,12 @@ with tabs[0]:
         if is_admin:
             st.link_button(
                 "Reconnect Instagram",
-                f"{BACKEND_URL}/connect-instagram"
+                f"{BACKEND_URL}/connect-instagram",
             )
 
             st.link_button(
                 "Connect Facebook Page",
-                f"{BACKEND_URL}/connect-facebook"
+                f"{BACKEND_URL}/connect-facebook",
             )
 
     st.divider()
@@ -328,41 +371,41 @@ with tabs[0]:
     products = st.text_area(
         "Products / Services",
         value=business.get("products") or "",
-        height=120
+        height=120,
     )
 
     prices = st.text_area(
         "Prices",
         value=business.get("prices") or "",
-        height=100
+        height=100,
     )
 
     delivery_info = st.text_area(
         "Delivery info",
         value=business.get("delivery_info") or "",
-        height=100
+        height=100,
     )
 
     working_hours = st.text_area(
         "Working hours",
         value=business.get("working_hours") or "",
-        height=80
+        height=80,
     )
 
     faq = st.text_area(
         "FAQ",
         value=business.get("faq") or "",
-        height=150
+        height=150,
     )
 
     catalog_link = st.text_input(
         "Catalog link",
-        value=business.get("catalog_link") or ""
+        value=business.get("catalog_link") or "",
     )
 
     sales_phone = st.text_input(
         "Sales phone",
-        value=business.get("sales_phone") or ""
+        value=business.get("sales_phone") or "",
     )
 
     st.divider()
@@ -371,17 +414,17 @@ with tabs[0]:
 
     telegram_single = st.text_input(
         "Single product Telegram link",
-        value=business.get("telegram_single") or ""
+        value=business.get("telegram_single") or "",
     )
 
     telegram_package = st.text_input(
         "Package Telegram link",
-        value=business.get("telegram_package") or ""
+        value=business.get("telegram_package") or "",
     )
 
     telegram_bag = st.text_input(
         "Bag / Meshok Telegram link",
-        value=business.get("telegram_bag") or ""
+        value=business.get("telegram_bag") or "",
     )
 
     st.divider()
@@ -391,7 +434,7 @@ with tabs[0]:
     knowledge = st.text_area(
         "General business knowledge",
         value=business.get("knowledge") or "",
-        height=280
+        height=280,
     )
 
     if st.button("💾 Save Business", type="primary"):
@@ -434,7 +477,7 @@ if is_admin:
         new_tone = st.text_input(
             "Tone",
             value="friendly, polite, sales-focused",
-            key="new_tone"
+            key="new_tone",
         )
 
         if st.button("Create Business Profile", type="primary"):
@@ -468,27 +511,56 @@ if is_admin:
                     "telegram_bag": "",
                 }
 
-                create_business(data)
-                st.success("Business profile created.")
-                st.rerun()
+                try:
+                    create_business(data)
+                    st.success("Business profile created.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Could not create business: {e}")
 
     with tabs[2]:
-        st.subheader("👤 Create Dashboard User")
+        st.subheader("👤 Create / Update Dashboard User")
 
-        new_user_email = st.text_input("New user email")
-        new_user_password = st.text_input("Temporary password", type="password")
+        new_user_email = st.text_input("User email")
+        new_user_password = st.text_input("Temporary / New password", type="password")
 
-        if st.button("Create User", type="primary"):
+        if st.button("Create or Reset Password", type="primary"):
             if not new_user_email.strip():
                 st.error("Email is required.")
             elif not new_user_password.strip():
                 st.error("Password is required.")
             else:
                 try:
-                    create_dashboard_user(new_user_email, new_user_password)
-                    st.success("User created successfully.")
+                    create_or_update_dashboard_user(new_user_email, new_user_password)
+                    st.success("User created or password reset successfully.")
                 except Exception as e:
-                    st.error(f"Could not create user: {e}")
+                    st.error(f"Could not save user: {e}")
+
+        st.divider()
+
+        st.subheader("Activate / Deactivate User")
+
+        status_email = st.text_input("User email for status change")
+
+        col_active, col_inactive = st.columns(2)
+
+        with col_active:
+            if st.button("Activate User"):
+                if status_email.strip():
+                    set_user_active_status(status_email, True)
+                    st.success("User activated.")
+                    st.rerun()
+                else:
+                    st.error("Email is required.")
+
+        with col_inactive:
+            if st.button("Deactivate User"):
+                if status_email.strip():
+                    set_user_active_status(status_email, False)
+                    st.success("User deactivated.")
+                    st.rerun()
+                else:
+                    st.error("Email is required.")
 
         st.divider()
 
@@ -516,7 +588,7 @@ if is_admin:
 
             selected_label = st.selectbox(
                 "Business",
-                list(business_map.keys())
+                list(business_map.keys()),
             )
 
             role = st.selectbox("Role", ["owner", "editor"])
@@ -528,9 +600,20 @@ if is_admin:
                     assign_business_to_user(
                         assign_email,
                         business_map[selected_label],
-                        role
+                        role,
                     )
                     st.success("Business assigned successfully.")
+                    st.rerun()
+
+            if st.button("Remove Assignment"):
+                if not assign_email.strip():
+                    st.error("User email is required.")
+                else:
+                    remove_business_assignment(
+                        assign_email,
+                        business_map[selected_label],
+                    )
+                    st.success("Assignment removed.")
                     st.rerun()
         else:
             st.warning("No businesses found.")
