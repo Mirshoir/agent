@@ -11,29 +11,15 @@ from supabase import create_client
 
 app = FastAPI()
 
-# ─────────────────────────────────────────────
-# Environment variables
-# ─────────────────────────────────────────────
-
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
-
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-
 META_APP_ID = os.getenv("META_APP_ID")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
 
-REDIRECT_URI = os.getenv(
-    "REDIRECT_URI",
-    "https://agent-1-xi6h.onrender.com/auth/callback",
-)
-
-DASHBOARD_URL = os.getenv(
-    "DASHBOARD_URL",
-    "https://instaagent.streamlit.app",
-)
+REDIRECT_URI = os.getenv("REDIRECT_URI", "https://agent-1-xi6h.onrender.com/auth/callback")
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://instaagent.streamlit.app")
 
 GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v21.0")
 GRAPH_BASE = f"https://graph.facebook.com/{GRAPH_VERSION}"
@@ -46,22 +32,22 @@ if not SUPABASE_SERVICE_KEY:
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-
-# ─────────────────────────────────────────────
-# Dedup cache
-# ─────────────────────────────────────────────
-
 processed_comment_ids = {}
 processed_message_ids = {}
+processing_message_ids = set()
+processing_comment_ids = set()
 DEDUP_TTL_SECONDS = 60 * 60
 
 
-# ─────────────────────────────────────────────
-# Utilities
-# ─────────────────────────────────────────────
-
 def normalize_id(value) -> str:
     return str(value or "").strip()
+
+
+def safe_json(res):
+    try:
+        return res.json()
+    except Exception:
+        return res.text
 
 
 def safe_token(token: str) -> str:
@@ -84,36 +70,30 @@ def cleanup_dedup_cache():
             cache.pop(key, None)
 
 
-def already_processed(cache: dict, event_id: str) -> bool:
+def mark_processed(cache: dict, event_id: str):
+    if event_id:
+        cleanup_dedup_cache()
+        cache[event_id] = time.time()
+
+
+def is_processed(cache: dict, event_id: str) -> bool:
     if not event_id:
         return False
-
     cleanup_dedup_cache()
-
-    if event_id in cache:
-        return True
-
-    cache[event_id] = time.time()
-    return False
+    return event_id in cache
 
 
 def sanitize_business_row(row: dict):
     if not row:
         return None
-
     clean = dict(row)
     clean["access_token"] = safe_token(clean.get("access_token", ""))
     clean["page_access_token"] = safe_token(clean.get("page_access_token", ""))
     return clean
 
 
-# ─────────────────────────────────────────────
-# Supabase helpers
-# ─────────────────────────────────────────────
-
 def get_business(instagram_business_id: str):
     instagram_business_id = normalize_id(instagram_business_id)
-
     if not instagram_business_id:
         return None
 
@@ -124,13 +104,11 @@ def get_business(instagram_business_id: str):
         .limit(1)
         .execute()
     )
-
     return result.data[0] if result.data else None
 
 
 def get_business_by_page_id(page_id: str):
     page_id = normalize_id(page_id)
-
     if not page_id:
         return None
 
@@ -141,7 +119,6 @@ def get_business_by_page_id(page_id: str):
         .limit(1)
         .execute()
     )
-
     return result.data[0] if result.data else None
 
 
@@ -149,30 +126,19 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
     entry_id = normalize_id(entry_id)
     recipient_id = normalize_id(recipient_id)
 
-    print("Finding business:", {
-        "entry_id": entry_id,
-        "recipient_id": recipient_id,
-    })
+    print("Finding business:", {"entry_id": entry_id, "recipient_id": recipient_id})
 
-    business = get_business(entry_id)
-    if business:
-        print("Matched by Instagram business ID:", entry_id)
-        return business
+    for lookup_id in [entry_id, recipient_id]:
+        business = get_business(lookup_id)
+        if business:
+            print("Matched by Instagram business ID:", lookup_id)
+            return business
 
-    business = get_business(recipient_id)
-    if business:
-        print("Matched by recipient Instagram business ID:", recipient_id)
-        return business
-
-    business = get_business_by_page_id(entry_id)
-    if business:
-        print("Matched by Facebook Page ID:", entry_id)
-        return business
-
-    business = get_business_by_page_id(recipient_id)
-    if business:
-        print("Matched by recipient Facebook Page ID:", recipient_id)
-        return business
+    for lookup_id in [entry_id, recipient_id]:
+        business = get_business_by_page_id(lookup_id)
+        if business:
+            print("Matched by Facebook Page ID:", lookup_id)
+            return business
 
     print("No business matched.")
     return None
@@ -180,7 +146,6 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
 
 def upsert_connected_business(data: dict):
     instagram_business_id = normalize_id(data.get("instagram_business_id"))
-
     if not instagram_business_id:
         raise ValueError("Missing instagram_business_id")
 
@@ -228,13 +193,8 @@ def upsert_connected_business(data: dict):
         .upsert(insert_data, on_conflict="instagram_business_id")
         .execute()
     )
-
     return result.data
 
-
-# ─────────────────────────────────────────────
-# Facebook OAuth
-# ─────────────────────────────────────────────
 
 def exchange_code_for_user_token(code: str) -> str:
     res = requests.get(
@@ -247,15 +207,12 @@ def exchange_code_for_user_token(code: str) -> str:
         },
         timeout=30,
     )
-
     print("User token exchange:", res.status_code, res.text)
     res.raise_for_status()
 
     token = res.json().get("access_token")
-
     if not token:
         raise RuntimeError(f"No user access token returned: {res.text}")
-
     return token
 
 
@@ -270,7 +227,6 @@ def exchange_for_long_lived_user_token(short_token: str) -> str:
         },
         timeout=30,
     )
-
     print("Long-lived user token:", res.status_code, res.text)
 
     if not res.ok:
@@ -283,15 +239,13 @@ def get_pages(user_access_token: str) -> list:
     res = requests.get(
         f"{GRAPH_BASE}/me/accounts",
         params={
-            "fields": "id,name,access_token,tasks",
+            "fields": "id,name,access_token,tasks,instagram_business_account{id,username,name}",
             "access_token": user_access_token,
         },
         timeout=30,
     )
-
     print("Pages response:", res.status_code, res.text)
     res.raise_for_status()
-
     return res.json().get("data", [])
 
 
@@ -304,12 +258,9 @@ def get_instagram_account_for_page(page_id: str, page_access_token: str):
         },
         timeout=30,
     )
-
     print("IG linked account response:", res.status_code, res.text)
     res.raise_for_status()
-
-    data = res.json()
-    return data.get("instagram_business_account")
+    return res.json().get("instagram_business_account")
 
 
 def subscribe_page_to_webhooks(page_id: str, page_access_token: str):
@@ -321,55 +272,26 @@ def subscribe_page_to_webhooks(page_id: str, page_access_token: str):
         },
         timeout=30,
     )
-
     print("Page subscription:", res.status_code, res.text)
-    return {
-        "status": res.status_code,
-        "ok": res.ok,
-        "response": safe_json(res),
-    }
+    return {"status": res.status_code, "ok": res.ok, "response": safe_json(res)}
 
-
-def safe_json(res):
-    try:
-        return res.json()
-    except Exception:
-        return res.text
-
-
-# ─────────────────────────────────────────────
-# Business logic
-# ─────────────────────────────────────────────
 
 def is_catalog_request(text: str) -> bool:
     text = (text or "").lower()
-
     keywords = [
-        "catalog",
-        "katalog",
-        "каталог",
-        "price",
-        "narx",
-        "narxi",
-        "цена",
-        "прайс",
-        "cost",
-        "how much",
-        "qancha",
-        "сколько",
+        "catalog", "katalog", "каталог",
+        "price", "narx", "narxi", "цена", "прайс",
+        "cost", "how much", "qancha", "сколько",
     ]
-
     return any(keyword in text for keyword in keywords)
 
 
 def get_catalog_link(business: dict) -> str:
     catalog_link = business.get("catalog_link")
-
     if catalog_link:
         return catalog_link
 
     knowledge = business.get("knowledge", "")
-
     if "https://bitly.cx/eIbT0" in knowledge:
         return "https://bitly.cx/eIbT0"
 
@@ -378,12 +300,8 @@ def get_catalog_link(business: dict) -> str:
 
 def build_catalog_dm(business: dict) -> str:
     catalog_link = get_catalog_link(business)
-
     if not catalog_link:
-        return (
-            "Katalog havolasi hozircha mavjud emas. "
-            "Tezroq ma'lumot olish uchun sales manager bilan bog'lanishingiz mumkin."
-        )
+        return "Katalog havolasi hozircha mavjud emas. Tezroq ma'lumot olish uchun sales manager bilan bog'lanishingiz mumkin."
 
     return (
         f"Katalogni shu havola orqali ko'rishingiz mumkin:\n{catalog_link}\n\n"
@@ -439,10 +357,7 @@ General knowledge:
 
 def get_ai_reply(user_text: str, business: dict) -> str:
     if not MISTRAL_API_KEY:
-        return (
-            "Xabaringiz qabul qilindi. "
-            "Hozir avtomatik javobda texnik muammo bor, tez orada javob beramiz."
-        )
+        return "Xabaringiz qabul qilindi. Hozir avtomatik javobda texnik muammo bor, tez orada javob beramiz."
 
     language = business.get("language", "uz")
     business_context = build_business_context(business)
@@ -495,24 +410,14 @@ Strict business rules:
         print("Mistral:", res.status_code, res.text)
 
         if not res.ok:
-            return (
-                "Xabaringiz qabul qilindi. "
-                "Hozir avtomatik javobда texnik muammo bor, tez orada javob beramiz."
-            )
+            return "Xabaringiz qabul qilindi. Hozir avtomatik javobda texnik muammo bor, tez orada javob beramiz."
 
         return res.json()["choices"][0]["message"]["content"]
 
     except Exception as e:
         print("Mistral error:", str(e))
-        return (
-            "Xabaringiz qabul qilindi. "
-            "Hozir avtomatik javobda texnik muammo bor, tez orada javob beramiz."
-        )
+        return "Xabaringiz qabul qilindi. Hozir avtomatik javobda texnik muammo bor, tez orada javob beramiz."
 
-
-# ─────────────────────────────────────────────
-# Instagram senders through Facebook Graph API
-# ─────────────────────────────────────────────
 
 def send_dm(page_access_token: str, recipient_id: str, text: str):
     recipient_id = normalize_id(recipient_id)
@@ -531,7 +436,7 @@ def send_dm(page_access_token: str, recipient_id: str, text: str):
         timeout=30,
     )
 
-    print("DM send:", res.status_code, res.text)
+    print("DM send result:", res.status_code, res.text)
     return res
 
 
@@ -551,13 +456,9 @@ def reply_to_comment(page_access_token: str, comment_id: str, text: str):
         timeout=30,
     )
 
-    print("Comment reply:", res.status_code, res.text)
+    print("Comment reply result:", res.status_code, res.text)
     return res
 
-
-# ─────────────────────────────────────────────
-# Webhook processors
-# ─────────────────────────────────────────────
 
 async def process_messaging_event(entry_id: str, messaging: dict):
     print("Raw messaging event:", messaging)
@@ -571,7 +472,6 @@ async def process_messaging_event(entry_id: str, messaging: dict):
         return
 
     message = messaging.get("message") or {}
-
     if not message:
         print("Ignored event without message")
         return
@@ -579,7 +479,7 @@ async def process_messaging_event(entry_id: str, messaging: dict):
     sender_id = normalize_id(messaging.get("sender", {}).get("id"))
     recipient_id = normalize_id(messaging.get("recipient", {}).get("id"))
     message_text = message.get("text")
-    message_id = message.get("mid")
+    message_id = normalize_id(message.get("mid"))
     is_echo = bool(message.get("is_echo"))
 
     print("Message IDs:", {
@@ -598,37 +498,53 @@ async def process_messaging_event(entry_id: str, messaging: dict):
         print("Skipped DM: missing sender, recipient, or text")
         return
 
-    if already_processed(processed_message_ids, message_id):
-        print("Ignored duplicate DM:", message_id)
+    if is_processed(processed_message_ids, message_id):
+        print("Ignored already processed DM:", message_id)
         return
 
-    business = find_business_for_webhook(entry_id, recipient_id)
-
-    if not business:
-        print("Skipped DM: no business found")
+    if message_id in processing_message_ids:
+        print("Ignored currently processing DM:", message_id)
         return
 
-    if not business.get("bot_enabled", True):
-        print("Bot disabled")
-        return
-
-    page_access_token = business.get("page_access_token") or business.get("access_token")
-
-    if not page_access_token:
-        print("Missing Page Access Token")
-        return
+    processing_message_ids.add(message_id)
 
     try:
+        business = find_business_for_webhook(entry_id, recipient_id)
+
+        if not business:
+            print("Skipped DM: no business found")
+            return
+
+        if not business.get("bot_enabled", True):
+            print("Bot disabled")
+            return
+
+        page_access_token = business.get("page_access_token") or business.get("access_token")
+
+        if not page_access_token:
+            print("Missing Page Access Token")
+            return
+
         if is_catalog_request(message_text):
             reply_text = build_catalog_dm(business)
         else:
             reply_text = get_ai_reply(message_text, business)
 
         print("Reply:", reply_text)
-        send_dm(page_access_token, sender_id, reply_text)
+
+        send_result = send_dm(page_access_token, sender_id, reply_text)
+
+        if send_result is not None and send_result.ok:
+            print("DM reply sent successfully. Marking processed:", message_id)
+            mark_processed(processed_message_ids, message_id)
+        else:
+            print("DM reply failed. Not marking processed:", message_id)
 
     except Exception as e:
         print("DM processing error:", str(e))
+
+    finally:
+        processing_message_ids.discard(message_id)
 
 
 async def process_comment_event(entry_id: str, change: dict):
@@ -636,10 +552,7 @@ async def process_comment_event(entry_id: str, change: dict):
 
     comment_id = normalize_id(value.get("comment_id") or value.get("id"))
     comment_text = value.get("message") or value.get("text")
-    from_id = normalize_id(
-        value.get("from", {}).get("id")
-        or value.get("sender_id")
-    )
+    from_id = normalize_id(value.get("from", {}).get("id") or value.get("sender_id"))
 
     print("Comment event:", {
         "entry_id": entry_id,
@@ -652,61 +565,71 @@ async def process_comment_event(entry_id: str, change: dict):
         print("Skipped comment: missing comment_id or text")
         return
 
-    if already_processed(processed_comment_ids, comment_id):
-        print("Ignored duplicate comment:", comment_id)
+    if is_processed(processed_comment_ids, comment_id):
+        print("Ignored already processed comment:", comment_id)
         return
 
-    business = find_business_for_webhook(entry_id, "")
-
-    if not business:
-        print("Skipped comment: no business found")
+    if comment_id in processing_comment_ids:
+        print("Ignored currently processing comment:", comment_id)
         return
 
-    if not business.get("bot_enabled", True):
-        print("Bot disabled")
-        return
-
-    page_access_token = business.get("page_access_token") or business.get("access_token")
-
-    if not page_access_token:
-        print("Missing Page Access Token")
-        return
+    processing_comment_ids.add(comment_id)
 
     try:
+        business = find_business_for_webhook(entry_id, "")
+
+        if not business:
+            print("Skipped comment: no business found")
+            return
+
+        if not business.get("bot_enabled", True):
+            print("Bot disabled")
+            return
+
+        page_access_token = business.get("page_access_token") or business.get("access_token")
+
+        if not page_access_token:
+            print("Missing Page Access Token")
+            return
+
+        success = False
+
         if is_catalog_request(comment_text):
             if from_id:
-                send_dm(page_access_token, from_id, build_catalog_dm(business))
+                dm_result = send_dm(page_access_token, from_id, build_catalog_dm(business))
+                print("Catalog DM result:", dm_result.status_code if dm_result else None)
 
-            reply_to_comment(
+            comment_result = reply_to_comment(
                 page_access_token,
                 comment_id,
                 "Katalog va narxlar haqida ma'lumotni DM orqali yubordik 😊",
             )
+            success = comment_result is not None and comment_result.ok
         else:
             ai_reply = get_ai_reply(comment_text, business)
-            reply_to_comment(page_access_token, comment_id, ai_reply)
+            comment_result = reply_to_comment(page_access_token, comment_id, ai_reply)
+            success = comment_result is not None and comment_result.ok
+
+        if success:
+            print("Comment reply sent successfully. Marking processed:", comment_id)
+            mark_processed(processed_comment_ids, comment_id)
+        else:
+            print("Comment reply failed. Not marking processed:", comment_id)
 
     except Exception as e:
         print("Comment processing error:", str(e))
 
+    finally:
+        processing_comment_ids.discard(comment_id)
 
-# ─────────────────────────────────────────────
-# Routes
-# ─────────────────────────────────────────────
 
 @app.get("/")
 async def home():
     return {
         "status": "ok",
-        "version": "facebook_login_page_token_instagram_messaging",
+        "version": "fixed_dedup_after_successful_send",
         "connect_instagram": "/connect-instagram",
         "webhook": "/webhook",
-        "debug": {
-            "business_ids": "/debug/business-ids",
-            "businesses": "/debug/businesses",
-            "find_business": "/debug/find-business?entry_id=&recipient_id=",
-            "resubscribe": "/debug/resubscribe?instagram_business_id=",
-        },
     }
 
 
@@ -722,6 +645,7 @@ async def connect_instagram():
             "pages_show_list",
             "pages_manage_metadata",
             "pages_read_engagement",
+            "pages_messaging",
             "instagram_basic",
             "instagram_manage_messages",
         ]),
@@ -740,10 +664,7 @@ async def auth_callback(request: Request):
     error_description = request.query_params.get("error_description")
 
     if error:
-        return PlainTextResponse(
-            f"Facebook connection failed: {error} - {error_description}",
-            status_code=400,
-        )
+        return PlainTextResponse(f"Facebook connection failed: {error} - {error_description}", status_code=400)
 
     if not code:
         return PlainTextResponse("Missing authorization code", status_code=400)
@@ -754,7 +675,6 @@ async def auth_callback(request: Request):
     try:
         short_user_token = exchange_code_for_user_token(code)
         user_token = exchange_for_long_lived_user_token(short_user_token)
-
         pages = get_pages(user_token)
 
         if not pages:
@@ -773,7 +693,7 @@ async def auth_callback(request: Request):
             if not page_id or not page_access_token:
                 continue
 
-            ig_account = get_instagram_account_for_page(page_id, page_access_token)
+            ig_account = page.get("instagram_business_account") or get_instagram_account_for_page(page_id, page_access_token)
 
             if not ig_account:
                 print(f"No Instagram account linked to page {page_name}")
@@ -811,10 +731,7 @@ async def auth_callback(request: Request):
             )
 
         first_ig_id = connected_accounts[0]["instagram_business_id"]
-
-        return RedirectResponse(
-            f"{DASHBOARD_URL}?connected=success&ig_id={first_ig_id}"
-        )
+        return RedirectResponse(f"{DASHBOARD_URL}?connected=success&ig_id={first_ig_id}")
 
     except requests.HTTPError as e:
         response_text = e.response.text if e.response else str(e)
@@ -845,9 +762,7 @@ async def receive_webhook(request: Request):
     try:
         data = await request.json()
         print("Received webhook:", data)
-
-        object_type = data.get("object")
-        print("Webhook object:", object_type)
+        print("Webhook object:", data.get("object"))
 
         for entry in data.get("entry", []):
             entry_id = normalize_id(entry.get("id"))
@@ -883,29 +798,19 @@ async def receive_webhook(request: Request):
 
     except Exception as e:
         print("Webhook error:", str(e))
-        return JSONResponse(
-            {"status": "error", "message": str(e)},
-            status_code=500,
-        )
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
-
-# ─────────────────────────────────────────────
-# Debug routes
-# ─────────────────────────────────────────────
 
 @app.get("/debug/business-ids")
 async def debug_business_ids():
     result = (
         supabase.table("businesses")
-        .select(
-            "id,business_name,instagram_business_id,facebook_page_id,facebook_page_name,bot_enabled,access_token,page_access_token,catalog_link,created_at"
-        )
+        .select("id,business_name,instagram_business_id,facebook_page_id,facebook_page_name,bot_enabled,access_token,page_access_token,catalog_link,created_at")
         .order("created_at", desc=True)
         .execute()
     )
 
     rows = []
-
     for row in result.data or []:
         rows.append({
             "id": row.get("id"),
@@ -933,12 +838,9 @@ async def debug_businesses():
         .order("created_at", desc=True)
         .execute()
     )
-
-    rows = [sanitize_business_row(row) for row in result.data or []]
-
     return {
-        "count": len(rows),
-        "businesses": rows,
+        "count": len(result.data or []),
+        "businesses": [sanitize_business_row(row) for row in result.data or []],
     }
 
 
@@ -957,33 +859,21 @@ async def debug_find_business(entry_id: str = "", recipient_id: str = ""):
 @app.get("/debug/resubscribe")
 async def debug_resubscribe(instagram_business_id: str = ""):
     if not instagram_business_id:
-        return JSONResponse(
-            {"error": "instagram_business_id is required"},
-            status_code=400,
-        )
+        return JSONResponse({"error": "instagram_business_id is required"}, status_code=400)
 
     business = get_business(instagram_business_id)
 
     if not business:
-        return JSONResponse(
-            {"error": "Business not found"},
-            status_code=404,
-        )
+        return JSONResponse({"error": "Business not found"}, status_code=404)
 
     page_id = business.get("facebook_page_id")
     page_access_token = business.get("page_access_token") or business.get("access_token")
 
     if not page_id:
-        return JSONResponse(
-            {"error": "Missing facebook_page_id"},
-            status_code=400,
-        )
+        return JSONResponse({"error": "Missing facebook_page_id"}, status_code=400)
 
     if not page_access_token:
-        return JSONResponse(
-            {"error": "Missing page_access_token"},
-            status_code=400,
-        )
+        return JSONResponse({"error": "Missing page_access_token"}, status_code=400)
 
     result = subscribe_page_to_webhooks(page_id, page_access_token)
 
