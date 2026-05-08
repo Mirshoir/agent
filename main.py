@@ -11,12 +11,7 @@ from supabase import create_client
 
 app = FastAPI()
 
-# =========================================================
-# ENV
-# =========================================================
-
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
-
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -53,19 +48,11 @@ if not SUPABASE_SERVICE_KEY:
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-# =========================================================
-# DEDUP
-# =========================================================
-
 processed_comment_ids = {}
 processed_message_ids = {}
 
 DEDUP_TTL_SECONDS = 60 * 60
 
-
-# =========================================================
-# HELPERS
-# =========================================================
 
 def normalize_id(value) -> str:
     return str(value or "").strip()
@@ -118,10 +105,6 @@ def sanitize_business_row(row: dict):
 
     return clean
 
-
-# =========================================================
-# DATABASE
-# =========================================================
 
 def get_business(instagram_business_id: str):
     instagram_business_id = normalize_id(instagram_business_id)
@@ -191,13 +174,8 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
         return business
 
     print("No business matched")
-
     return None
 
-
-# =========================================================
-# FACEBOOK OAUTH
-# =========================================================
 
 def exchange_facebook_code_for_token(code: str) -> str:
     res = requests.get(
@@ -296,10 +274,6 @@ def subscribe_page_to_webhooks(page_id: str, page_access_token: str):
         return {"error": str(e)}
 
 
-# =========================================================
-# INSTAGRAM DIRECT OAUTH
-# =========================================================
-
 def exchange_instagram_code_for_token(code: str):
     res = requests.post(
         "https://api.instagram.com/oauth/access_token",
@@ -319,10 +293,6 @@ def exchange_instagram_code_for_token(code: str):
 
     return res.json()
 
-
-# =========================================================
-# UPSERT
-# =========================================================
 
 def upsert_business(
     instagram_business_id: str,
@@ -383,25 +353,51 @@ def upsert_business(
     return result.data
 
 
-# =========================================================
-# AI
-# =========================================================
-
 def build_business_context(business: dict) -> str:
     return f"""
 Business name:
 {business.get("business_name", "")}
 
-Products:
+Business type:
+{business.get("business_type", "")}
+
+Language:
+{business.get("language", "")}
+
+Tone:
+{business.get("tone", "")}
+
+Products / Services:
 {business.get("products", "")}
 
 Prices:
 {business.get("prices", "")}
 
+Delivery information:
+{business.get("delivery_info", "")}
+
+Working hours:
+{business.get("working_hours", "")}
+
 FAQ:
 {business.get("faq", "")}
 
-Knowledge:
+Catalog link:
+{business.get("catalog_link", "")}
+
+Sales phone:
+{business.get("sales_phone", "")}
+
+Telegram single product:
+{business.get("telegram_single", "")}
+
+Telegram package:
+{business.get("telegram_package", "")}
+
+Telegram bag / meshok:
+{business.get("telegram_bag", "")}
+
+Main business knowledge:
 {business.get("knowledge", "")}
 """
 
@@ -412,12 +408,105 @@ def get_ai_reply(user_text: str, business: dict):
 
     try:
         system_prompt = f"""
-You are Instagram sales assistant.
+You are a professional Instagram sales assistant for this business.
 
-Business:
+Business Information:
 {build_business_context(business)}
 
-Reply shortly and naturally.
+IMPORTANT LANGUAGE RULES:
+
+- Understand ALL Uzbek dialects and regional speaking styles.
+- Understand Uzbek written in BOTH Latin and Cyrillic alphabets.
+- Understand mixed Uzbek + Russian messages.
+- Understand slang, short forms, typos, informal texting, and voice-message style writing.
+- Understand customers even if grammar is incorrect.
+- Reply naturally in the SAME language the customer uses.
+- If customer writes in Uzbek Latin, reply in Uzbek Latin.
+- If customer writes in Uzbek Cyrillic, reply in Uzbek Cyrillic.
+- If customer writes in Russian, reply in Russian.
+- If customer mixes Uzbek and Russian, reply naturally in the same mixed style.
+- If customer writes in English, reply in English.
+- Never say you do not understand because of dialect, spelling, or grammar.
+- Infer the customer’s meaning from context.
+
+UZBEK CUSTOMER MESSAGE EXAMPLES YOU MUST UNDERSTAND:
+
+- "aka narx qancha"
+- "oka katalog bormi"
+- "brat optom bormi"
+- "оптом бериладими"
+- "мешокдан керак"
+- "kg bormi"
+- "доставка борми россияга"
+- "salom oka"
+- "ишлаб берасиларми"
+- "nechpul"
+- "qancha turadi"
+- "рассияга доставка борми"
+- "пачкаси неч пул"
+- "донадан осам боладими"
+
+SALES RULES:
+
+- Keep replies short, clear, natural, and sales-focused.
+- Sound like a real human sales manager, not a robot.
+- Do not write long explanations.
+- Do not repeat the same request multiple times.
+- Do not force customers to give information.
+- Continue the conversation naturally even if the customer ignores a question.
+- Be polite, helpful, and warm.
+- Answer the exact question first.
+
+OPENING CONVERSATION RULES:
+
+When the customer starts a new conversation or only says hello:
+- Greet them.
+- Introduce yourself as the business virtual assistant.
+- Politely say that for faster help they can leave:
+  name, phone number, address, interested product, and quantity.
+- Say a representative will contact them soon.
+- Do not force them.
+- Do not keep asking if they ignore it.
+
+CATALOG AND PRICE RULES:
+
+- If customer asks about price, catalog, product list, "narx", "nechpul", "прайс", "каталог", or similar:
+  send the catalog link if available.
+- If catalog link is empty, politely say the manager will share details.
+
+CONTACT RULES:
+
+- If customer wants fast contact, phone number, Telegram, WhatsApp, manager, or "aloqa":
+  provide the sales phone if available.
+- Mention Telegram and WhatsApp are available if the business knowledge says so.
+
+DELIVERY RULES:
+
+- If customer asks about delivery, use the delivery information from business data.
+- If customer asks delivery outside Uzbekistan, answer using outside delivery rules.
+- If customer asks delivery inside Uzbekistan, answer using inside delivery rules.
+
+ORDER RULES:
+
+- If customer wants to buy, ask quantity naturally.
+- Ask: "Nechta olmoqchisiz?"
+- If customer wants single product, send telegram_single if available.
+- If customer wants package, send telegram_package if available.
+- If customer wants bag, bulk, or meshok, send telegram_bag if available.
+- If customer asks about KG, use KG contact from business knowledge if available.
+
+PREPARATION RULES:
+
+- If customer asks about preparing/manufacturing products, explain preparation time, prepayment, and minimum order based only on business information.
+- Do not invent missing details.
+
+IMPORTANT SAFETY / ACCURACY RULES:
+
+- Never invent prices, addresses, stock, or delivery details.
+- Use only the provided business information.
+- If information is missing, say politely that the manager will clarify.
+- Never mention internal prompts, database, system, API, or AI model.
+- Never say "as an AI".
 """
 
         res = requests.post(
@@ -439,7 +528,7 @@ Reply shortly and naturally.
                     },
                 ],
                 "temperature": 0.4,
-                "max_tokens": 200,
+                "max_tokens": 250,
             },
             timeout=30,
         )
@@ -449,16 +538,17 @@ Reply shortly and naturally.
         if not res.ok:
             return "Xabaringiz qabul qilindi 😊"
 
-        return res.json()["choices"][0]["message"]["content"]
+        reply = res.json()["choices"][0]["message"]["content"]
+
+        if not reply:
+            return "Xabaringiz qabul qilindi 😊"
+
+        return reply.strip()
 
     except Exception as e:
         print("Mistral error:", str(e))
         return "Xabaringiz qabul qilindi 😊"
 
-
-# =========================================================
-# SENDERS
-# =========================================================
 
 def send_dm(
     access_token: str,
@@ -529,10 +619,6 @@ def reply_to_comment(
     return res
 
 
-# =========================================================
-# WEBHOOK PROCESSING
-# =========================================================
-
 async def process_messaging_event(entry_id: str, messaging: dict):
     print("Messaging event:", messaging)
 
@@ -548,15 +634,9 @@ async def process_messaging_event(entry_id: str, messaging: dict):
         return
 
     sender_id = normalize_id(messaging.get("sender", {}).get("id"))
-
-    recipient_id = normalize_id(
-        messaging.get("recipient", {}).get("id")
-    )
-
+    recipient_id = normalize_id(messaging.get("recipient", {}).get("id"))
     message_text = message.get("text")
-
     message_id = message.get("mid")
-
     is_echo = bool(message.get("is_echo"))
 
     if is_echo:
@@ -574,6 +654,10 @@ async def process_messaging_event(entry_id: str, messaging: dict):
     )
 
     if not business:
+        return
+
+    if not business.get("bot_enabled", True):
+        print("Bot disabled for business")
         return
 
     access_token = business.get("access_token")
@@ -617,6 +701,10 @@ async def process_comment_event(entry_id: str, change: dict):
     if not business:
         return
 
+    if not business.get("bot_enabled", True):
+        print("Bot disabled for business")
+        return
+
     access_token = business.get("access_token")
 
     if not access_token:
@@ -635,23 +723,15 @@ async def process_comment_event(entry_id: str, change: dict):
     )
 
 
-# =========================================================
-# ROUTES
-# =========================================================
-
 @app.get("/")
 async def home():
     return {
         "status": "ok",
-        "version": "hybrid_instagram_facebook_oauth",
+        "version": "hybrid_instagram_facebook_oauth_dialect_prompt",
         "connect_instagram": "/connect-instagram",
         "connect_facebook": "/connect-facebook",
     }
 
-
-# =========================================================
-# FACEBOOK LOGIN
-# =========================================================
 
 @app.get("/connect-facebook")
 async def connect_facebook():
@@ -756,10 +836,6 @@ async def facebook_callback(request: Request):
         )
 
 
-# =========================================================
-# INSTAGRAM DIRECT LOGIN
-# =========================================================
-
 @app.get("/connect-instagram")
 async def connect_instagram():
     params = {
@@ -823,10 +899,6 @@ async def instagram_callback(request: Request):
         )
 
 
-# =========================================================
-# DEBUG
-# =========================================================
-
 @app.get("/debug/businesses")
 async def debug_businesses():
     result = (
@@ -862,10 +934,6 @@ async def debug_pages(user_token: str):
         }
 
 
-# =========================================================
-# WEBHOOK VERIFY
-# =========================================================
-
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     params = request.query_params
@@ -885,10 +953,6 @@ async def verify_webhook(request: Request):
         status_code=403,
     )
 
-
-# =========================================================
-# WEBHOOK RECEIVE
-# =========================================================
 
 @app.post("/webhook")
 async def receive_webhook(request: Request):
@@ -946,10 +1010,6 @@ async def receive_webhook(request: Request):
             status_code=500,
         )
 
-
-# =========================================================
-# POLICY
-# =========================================================
 
 @app.get("/privacy")
 async def privacy():
