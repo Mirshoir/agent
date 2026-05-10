@@ -3,6 +3,7 @@ import time
 import secrets
 import requests
 from urllib.parse import urlencode
+from typing import Optional, List, Dict
 
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, JSONResponse, RedirectResponse
@@ -12,7 +13,8 @@ from supabase import create_client
 app = FastAPI()
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+DEFAULT_MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
@@ -21,7 +23,6 @@ META_APP_ID = os.getenv("META_APP_ID")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
 
 GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v21.0")
-
 GRAPH_FACEBOOK = f"https://graph.facebook.com/{GRAPH_VERSION}"
 GRAPH_INSTAGRAM = f"https://graph.instagram.com/{GRAPH_VERSION}"
 
@@ -40,6 +41,9 @@ DASHBOARD_URL = os.getenv(
     "https://instaagent.streamlit.app",
 )
 
+DEDUP_TTL_SECONDS = 60 * 60
+MAX_MEMORY_MESSAGES = 12
+
 if not SUPABASE_URL:
     raise RuntimeError("Missing SUPABASE_URL")
 
@@ -50,8 +54,6 @@ supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 processed_comment_ids = {}
 processed_message_ids = {}
-
-DEDUP_TTL_SECONDS = 60 * 60
 
 
 def normalize_id(value) -> str:
@@ -101,7 +103,15 @@ def sanitize_business_row(row: dict):
         return None
 
     clean = dict(row)
-    clean["access_token"] = safe_token(clean.get("access_token", ""))
+
+    for key in [
+        "access_token",
+        "mistral_api_key",
+        "openai_api_key",
+        "gemini_api_key",
+        "anthropic_api_key",
+    ]:
+        clean[key] = safe_token(clean.get(key, ""))
 
     return clean
 
@@ -177,6 +187,105 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
     return None
 
 
+def get_business_model(business: dict) -> tuple[str, str, str]:
+    provider = (business.get("ai_provider") or "mistral").strip().lower()
+    model = (business.get("ai_model") or "").strip()
+
+    if provider == "openai":
+        api_key = (business.get("openai_api_key") or DEFAULT_OPENAI_API_KEY or "").strip()
+        return "openai", model or "gpt-4o-mini", api_key
+
+    if provider == "mistral":
+        api_key = (business.get("mistral_api_key") or DEFAULT_MISTRAL_API_KEY or "").strip()
+        return "mistral", model or "mistral-small-latest", api_key
+
+    api_key = (business.get("mistral_api_key") or DEFAULT_MISTRAL_API_KEY or "").strip()
+    return "mistral", "mistral-small-latest", api_key
+
+
+def get_memory_enabled(business: dict) -> bool:
+    value = business.get("memory_enabled")
+
+    if value is None:
+        return True
+
+    return bool(value)
+
+
+def get_memory_limit(business: dict) -> int:
+    try:
+        value = int(business.get("memory_limit") or MAX_MEMORY_MESSAGES)
+        return max(2, min(value, 30))
+    except Exception:
+        return MAX_MEMORY_MESSAGES
+
+
+def get_chat_memory(
+    business_id: str,
+    customer_id: str,
+    channel: str,
+    limit: int,
+) -> List[Dict[str, str]]:
+    if not business_id or not customer_id:
+        return []
+
+    try:
+        result = (
+            supabase.table("chat_memory")
+            .select("role, content, created_at")
+            .eq("business_id", business_id)
+            .eq("customer_id", customer_id)
+            .eq("channel", channel)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+
+        rows = result.data or []
+        rows.reverse()
+
+        memory = []
+
+        for row in rows:
+            role = row.get("role")
+            content = row.get("content")
+
+            if role in ["user", "assistant"] and content:
+                memory.append({
+                    "role": role,
+                    "content": str(content),
+                })
+
+        return memory
+
+    except Exception as e:
+        print("Chat memory read error:", str(e))
+        return []
+
+
+def save_chat_message(
+    business_id: str,
+    customer_id: str,
+    channel: str,
+    role: str,
+    content: str,
+):
+    if not business_id or not customer_id or role not in ["user", "assistant"] or not content:
+        return
+
+    try:
+        supabase.table("chat_memory").insert({
+            "business_id": business_id,
+            "customer_id": customer_id,
+            "channel": channel,
+            "role": role,
+            "content": content[:4000],
+        }).execute()
+
+    except Exception as e:
+        print("Chat memory save error:", str(e))
+
+
 def exchange_facebook_code_for_token(code: str) -> str:
     res = requests.get(
         f"{GRAPH_FACEBOOK}/oauth/access_token",
@@ -190,7 +299,6 @@ def exchange_facebook_code_for_token(code: str) -> str:
     )
 
     print("Facebook token exchange:", res.status_code, res.text)
-
     res.raise_for_status()
 
     return res.json()["access_token"]
@@ -236,7 +344,6 @@ def get_facebook_pages(user_access_token: str):
 
     print("Pages API:", res.status_code)
     print("Pages API response:", res.text)
-
     res.raise_for_status()
 
     return res.json().get("data", [])
@@ -250,7 +357,6 @@ def get_page_instagram_account(page: dict) -> dict:
     )
 
     print("Instagram object:", ig)
-
     return ig
 
 
@@ -266,7 +372,6 @@ def subscribe_page_to_webhooks(page_id: str, page_access_token: str):
         )
 
         print("Subscribe page:", res.status_code, res.text)
-
         return res.json()
 
     except Exception as e:
@@ -288,7 +393,6 @@ def exchange_instagram_code_for_token(code: str):
     )
 
     print("Instagram token:", res.status_code, res.text)
-
     res.raise_for_status()
 
     return res.json()
@@ -303,7 +407,6 @@ def upsert_business(
     facebook_page_name: str = "",
 ):
     instagram_business_id = normalize_id(instagram_business_id)
-
     existing = get_business(instagram_business_id)
 
     update_data = {
@@ -342,6 +445,12 @@ def upsert_business(
         "telegram_single": "",
         "telegram_package": "",
         "telegram_bag": "",
+        "ai_provider": "mistral",
+        "ai_model": "mistral-small-latest",
+        "mistral_api_key": "",
+        "openai_api_key": "",
+        "memory_enabled": True,
+        "memory_limit": MAX_MEMORY_MESSAGES,
     }
 
     result = (
@@ -402,12 +511,8 @@ Main business knowledge:
 """
 
 
-def get_ai_reply(user_text: str, business: dict):
-    if not MISTRAL_API_KEY:
-        return "Xabaringiz qabul qilindi 😊"
-
-    try:
-        system_prompt = f"""
+def build_system_prompt(business: dict) -> str:
+    return f"""
 You are a professional Instagram sales assistant for this business.
 
 Business Information:
@@ -429,23 +534,6 @@ IMPORTANT LANGUAGE RULES:
 - Never say you do not understand because of dialect, spelling, or grammar.
 - Infer the customer’s meaning from context.
 
-UZBEK CUSTOMER MESSAGE EXAMPLES YOU MUST UNDERSTAND:
-
-- "aka narx qancha"
-- "oka katalog bormi"
-- "brat optom bormi"
-- "оптом бериладими"
-- "мешокдан керак"
-- "kg bormi"
-- "доставка борми россияга"
-- "salom oka"
-- "ишлаб берасиларми"
-- "nechpul"
-- "qancha turadi"
-- "рассияга доставка борми"
-- "пачкаси неч пул"
-- "донадан осам боладими"
-
 SALES RULES:
 
 - Keep replies short, clear, natural, and sales-focused.
@@ -453,7 +541,7 @@ SALES RULES:
 - Do not write long explanations.
 - Do not repeat the same request multiple times.
 - Do not force customers to give information.
-- Continue the conversation naturally even if the customer ignores a question.
+- Continue the conversation naturally using the previous conversation memory.
 - Be polite, helpful, and warm.
 - Answer the exact question first.
 
@@ -500,6 +588,12 @@ PREPARATION RULES:
 - If customer asks about preparing/manufacturing products, explain preparation time, prepayment, and minimum order based only on business information.
 - Do not invent missing details.
 
+MEMORY RULES:
+
+- Use previous messages only for this same business and same customer.
+- Do not mention that you have memory.
+- Never mix one customer's conversation with another customer's conversation.
+
 IMPORTANT SAFETY / ACCURACY RULES:
 
 - Never invent prices, addresses, stock, or delivery details.
@@ -509,44 +603,125 @@ IMPORTANT SAFETY / ACCURACY RULES:
 - Never say "as an AI".
 """
 
-        res = requests.post(
-            "https://api.mistral.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {MISTRAL_API_KEY}",
-                "Content-Type": "application/json",
+
+def call_mistral(api_key: str, model: str, messages: list):
+    res = requests.post(
+        "https://api.mistral.ai/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": messages,
+            "temperature": 0.4,
+            "max_tokens": 250,
+        },
+        timeout=30,
+    )
+
+    print("Mistral:", res.status_code, res.text)
+
+    if not res.ok:
+        return None
+
+    return res.json()["choices"][0]["message"]["content"]
+
+
+def call_openai(api_key: str, model: str, messages: list):
+    res = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model,
+            "messages": messages,
+            "temperature": 0.4,
+            "max_tokens": 250,
+        },
+        timeout=30,
+    )
+
+    print("OpenAI:", res.status_code, res.text)
+
+    if not res.ok:
+        return None
+
+    return res.json()["choices"][0]["message"]["content"]
+
+
+def get_ai_reply(
+    user_text: str,
+    business: dict,
+    customer_id: str = "",
+    channel: str = "dm",
+):
+    provider, model, api_key = get_business_model(business)
+
+    if not api_key:
+        print("Missing company API key:", {
+            "business_id": business.get("id"),
+            "provider": provider,
+        })
+        return "Xabaringiz qabul qilindi 😊"
+
+    try:
+        system_prompt = build_system_prompt(business)
+
+        memory = []
+
+        if get_memory_enabled(business):
+            memory = get_chat_memory(
+                business_id=business.get("id"),
+                customer_id=customer_id,
+                channel=channel,
+                limit=get_memory_limit(business),
+            )
+
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt,
             },
-            json={
-                "model": "mistral-small-latest",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": system_prompt,
-                    },
-                    {
-                        "role": "user",
-                        "content": user_text,
-                    },
-                ],
-                "temperature": 0.4,
-                "max_tokens": 250,
+            *memory,
+            {
+                "role": "user",
+                "content": user_text,
             },
-            timeout=30,
-        )
+        ]
 
-        print("Mistral:", res.status_code, res.text)
-
-        if not res.ok:
-            return "Xabaringiz qabul qilindi 😊"
-
-        reply = res.json()["choices"][0]["message"]["content"]
+        if provider == "openai":
+            reply = call_openai(api_key, model, messages)
+        else:
+            reply = call_mistral(api_key, model, messages)
 
         if not reply:
             return "Xabaringiz qabul qilindi 😊"
 
-        return reply.strip()
+        reply = reply.strip()
+
+        if get_memory_enabled(business) and customer_id:
+            save_chat_message(
+                business_id=business.get("id"),
+                customer_id=customer_id,
+                channel=channel,
+                role="user",
+                content=user_text,
+            )
+            save_chat_message(
+                business_id=business.get("id"),
+                customer_id=customer_id,
+                channel=channel,
+                role="assistant",
+                content=reply,
+            )
+
+        return reply
 
     except Exception as e:
-        print("Mistral error:", str(e))
+        print("AI reply error:", str(e))
         return "Xabaringiz qabul qilindi 😊"
 
 
@@ -666,8 +841,10 @@ async def process_messaging_event(entry_id: str, messaging: dict):
         return
 
     reply_text = get_ai_reply(
-        message_text,
-        business,
+        user_text=message_text,
+        business=business,
+        customer_id=sender_id,
+        channel="dm",
     )
 
     send_dm(
@@ -688,6 +865,13 @@ async def process_comment_event(entry_id: str, change: dict):
     comment_text = (
         value.get("message")
         or value.get("text")
+    )
+
+    commenter_id = normalize_id(
+        value.get("from", {}).get("id")
+        or value.get("sender", {}).get("id")
+        or value.get("user_id")
+        or comment_id
     )
 
     if not comment_id or not comment_text:
@@ -711,8 +895,10 @@ async def process_comment_event(entry_id: str, change: dict):
         return
 
     reply_text = get_ai_reply(
-        comment_text,
-        business,
+        user_text=comment_text,
+        business=business,
+        customer_id=commenter_id,
+        channel="comment",
     )
 
     reply_to_comment(
@@ -727,7 +913,7 @@ async def process_comment_event(entry_id: str, change: dict):
 async def home():
     return {
         "status": "ok",
-        "version": "hybrid_instagram_facebook_oauth_dialect_prompt",
+        "version": "chat_memory_company_keys_model_select",
         "connect_instagram": "/connect-instagram",
         "connect_facebook": "/connect-facebook",
     }
@@ -771,11 +957,7 @@ async def facebook_callback(request: Request):
 
     try:
         short_token = exchange_facebook_code_for_token(code)
-
-        user_token = exchange_for_long_lived_facebook_token(
-            short_token
-        )
-
+        user_token = exchange_for_long_lived_facebook_token(short_token)
         pages = get_facebook_pages(user_token)
 
         print("PAGES:", pages)
@@ -872,11 +1054,7 @@ async def instagram_callback(request: Request):
         token_data = exchange_instagram_code_for_token(code)
 
         access_token = token_data.get("access_token")
-
-        user_id = normalize_id(
-            token_data.get("user_id")
-        )
-
+        user_id = normalize_id(token_data.get("user_id"))
         username = f"instagram_{user_id}"
 
         upsert_business(
@@ -932,6 +1110,42 @@ async def debug_pages(user_token: str):
         return {
             "error": str(e),
         }
+
+
+@app.get("/debug/memory")
+async def debug_memory(business_id: str, customer_id: str, channel: str = "dm"):
+    result = (
+        supabase.table("chat_memory")
+        .select("*")
+        .eq("business_id", business_id)
+        .eq("customer_id", customer_id)
+        .eq("channel", channel)
+        .order("created_at", desc=True)
+        .limit(30)
+        .execute()
+    )
+
+    return {
+        "count": len(result.data or []),
+        "memory": result.data or [],
+    }
+
+
+@app.delete("/debug/memory")
+async def clear_memory(business_id: str, customer_id: str, channel: str = "dm"):
+    result = (
+        supabase.table("chat_memory")
+        .delete()
+        .eq("business_id", business_id)
+        .eq("customer_id", customer_id)
+        .eq("channel", channel)
+        .execute()
+    )
+
+    return {
+        "status": "deleted",
+        "data": result.data,
+    }
 
 
 @app.get("/webhook")
