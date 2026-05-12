@@ -3,18 +3,18 @@ import time
 import secrets
 import requests
 from urllib.parse import urlencode
-
-from fastapi import FastAPI, Request
+from pydantic import BaseModel
+from fastapi import FastAPI, Request, Header
 from fastapi.responses import PlainTextResponse, JSONResponse, RedirectResponse
 from supabase import create_client
 from telegram_bot import telegram_router
-
 
 app = FastAPI()
 app.include_router(telegram_router)
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
@@ -52,6 +52,12 @@ supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 processed_message_ids = {}
 processed_comment_ids = {}
 DEDUP_TTL_SECONDS = 60 * 60
+
+
+class ManualInstagramReply(BaseModel):
+    business_id: str
+    customer_id: str
+    text: str
 
 
 def log(title, data=None):
@@ -128,6 +134,23 @@ def get_business(instagram_business_id: str):
     return result.data[0] if result.data else None
 
 
+def get_business_by_id(business_id: str):
+    business_id = normalize_id(business_id)
+
+    if not business_id:
+        return None
+
+    result = (
+        supabase.table("businesses")
+        .select("*")
+        .eq("id", business_id)
+        .limit(1)
+        .execute()
+    )
+
+    return result.data[0] if result.data else None
+
+
 def get_business_by_page_id(page_id: str):
     page_id = normalize_id(page_id)
 
@@ -191,7 +214,6 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
 
 
 def exchange_instagram_code_for_token(code: str):
-    """Exchange authorization code for a short-lived token."""
     res = requests.post(
         "https://api.instagram.com/oauth/access_token",
         data={
@@ -214,10 +236,6 @@ def exchange_instagram_code_for_token(code: str):
 
 
 def exchange_for_long_lived_token(short_lived_token: str) -> str:
-    """
-    Exchange a short-lived Instagram token (~1 hour) for a long-lived token (~60 days).
-    See: https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/business-login
-    """
     res = requests.get(
         "https://graph.instagram.com/access_token",
         params={
@@ -234,30 +252,13 @@ def exchange_for_long_lived_token(short_lived_token: str) -> str:
     })
 
     if not res.ok:
-        log("Long-lived token exchange failed, falling back to short-lived token", res.text)
         return short_lived_token
 
     data = res.json()
-    long_lived_token = data.get("access_token")
-
-    if not long_lived_token:
-        log("No access_token in long-lived exchange response, falling back", data)
-        return short_lived_token
-
-    log("Long-lived token obtained", {
-        "token_preview": safe_token(long_lived_token),
-        "expires_in": data.get("expires_in"),
-        "token_type": data.get("token_type"),
-    })
-
-    return long_lived_token
+    return data.get("access_token") or short_lived_token
 
 
 def refresh_long_lived_token(existing_long_lived_token: str) -> str:
-    """
-    Refresh a long-lived token before it expires (valid within the last ~60 days window).
-    The token must be at least 24 hours old but not yet expired.
-    """
     res = requests.get(
         "https://graph.instagram.com/refresh_access_token",
         params={
@@ -273,22 +274,10 @@ def refresh_long_lived_token(existing_long_lived_token: str) -> str:
     })
 
     if not res.ok:
-        log("Token refresh failed", res.text)
         return existing_long_lived_token
 
     data = res.json()
-    refreshed_token = data.get("access_token")
-
-    if not refreshed_token:
-        log("No access_token in refresh response", data)
-        return existing_long_lived_token
-
-    log("Token refreshed successfully", {
-        "token_preview": safe_token(refreshed_token),
-        "expires_in": data.get("expires_in"),
-    })
-
-    return refreshed_token
+    return data.get("access_token") or existing_long_lived_token
 
 
 def get_instagram_user(access_token: str):
@@ -306,10 +295,7 @@ def get_instagram_user(access_token: str):
         "body": res.text,
     })
 
-    if res.ok:
-        return res.json()
-
-    return {}
+    return res.json() if res.ok else {}
 
 
 def upsert_business(
@@ -434,17 +420,31 @@ def get_ai_reply(user_text: str, business: dict):
             return "Xabaringiz qabul qilindi 😊"
 
         model = business.get("ai_model") or "mistral-small-latest"
+        temperature = float(business.get("ai_temperature", 0.5) or 0.5)
+        max_tokens = int(business.get("ai_max_tokens", 130) or 130)
+
+        extra_rules = business.get("ai_reply_rules") or """
+- Keep answers short and comfortable.
+- Usually 1-3 short sentences.
+- Do not send catalog automatically.
+- Send catalog only if customer asks for catalog, prices, models, collection, or photos.
+- If customer only greets, greet back and ask what they need.
+- Do not overload customer with too much information.
+- Sound natural like a real sales manager.
+"""
 
         system_prompt = f"""
-You are a professional Instagram sales assistant for this business.
+You are a real Instagram sales manager for this business.
 
 Business Information:
 {build_business_context(business)}
 
 Rules:
+{extra_rules}
+
+Extra safety rules:
 - Reply in the same language as the customer.
 - Understand Uzbek Latin, Uzbek Cyrillic, Russian, English, slang, typos, and mixed messages.
-- Keep replies short, natural, polite, and sales-focused.
 - Answer the exact question first.
 - Never invent prices, delivery, stock, addresses, or discounts.
 - Use only the business information.
@@ -466,8 +466,8 @@ Rules:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_text},
                 ],
-                "temperature": 0.4,
-                "max_tokens": 250,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
             },
             timeout=30,
         )
@@ -489,11 +489,7 @@ Rules:
 
 
 def get_business_access_token(business: dict):
-    return (
-        business.get("access_token")
-        or business.get("page_access_token")
-        or ""
-    )
+    return business.get("page_access_token") or business.get("access_token") or ""
 
 
 def send_dm(access_token: str, recipient_id: str, text: str, business: dict = None):
@@ -507,24 +503,35 @@ def send_dm(access_token: str, recipient_id: str, text: str, business: dict = No
         })
         return None
 
-    oauth_provider = (business or {}).get("oauth_provider", "")
+    business = business or {}
+    oauth_provider = business.get("oauth_provider", "")
+    page_id = business.get("facebook_page_id") or business.get("page_id")
 
-    if oauth_provider == "facebook_page":
+    if oauth_provider == "facebook_page" and page_id:
+        url = f"{GRAPH_FACEBOOK}/{page_id}/messages"
+        payload = {
+            "recipient": {"id": recipient_id},
+            "message": {"text": text[:1000]},
+            "messaging_type": "RESPONSE",
+        }
+    elif oauth_provider == "facebook_page":
         url = f"{GRAPH_FACEBOOK}/me/messages"
+        payload = {
+            "recipient": {"id": recipient_id},
+            "message": {"text": text[:1000]},
+            "messaging_type": "RESPONSE",
+        }
     else:
         url = f"{GRAPH_INSTAGRAM}/me/messages"
+        payload = {
+            "recipient": {"id": recipient_id},
+            "message": {"text": text[:1000]},
+        }
 
     res = requests.post(
         url,
         params={"access_token": access_token},
-        json={
-            "recipient": {
-                "id": recipient_id,
-            },
-            "message": {
-                "text": text[:1000],
-            },
-        },
+        json=payload,
         timeout=30,
     )
 
@@ -581,6 +588,8 @@ def save_inbox_message(
     direction: str,
     platform_message_id: str = "",
     raw_payload: dict = None,
+    customer_name: str = "",
+    is_read: bool = False,
 ):
     try:
         customer_id = sender_id if direction == "inbound" else recipient_id
@@ -589,16 +598,24 @@ def save_inbox_message(
             "business_id": business.get("id"),
             "instagram_business_id": business.get("instagram_business_id"),
             "platform": "instagram",
-            "customer_id": customer_id,
+            "customer_id": normalize_id(customer_id),
+            "customer_name": customer_name or normalize_id(customer_id),
             "channel": "dm",
             "direction": direction,
             "role": "user" if direction == "inbound" else "assistant",
             "content": message_text,
             "external_message_id": platform_message_id,
             "raw_payload": raw_payload or {},
+            "is_read": is_read if direction == "inbound" else True,
         }
 
-        supabase.table("inbox_messages").insert(data).execute()
+        try:
+            supabase.table("inbox_messages").insert(data).execute()
+        except Exception:
+            data.pop("customer_name", None)
+            data.pop("is_read", None)
+            supabase.table("inbox_messages").insert(data).execute()
+
         log("Inbox message saved", data)
 
     except Exception as e:
@@ -646,20 +663,6 @@ async def process_messaging_event(entry_id: str, messaging: dict):
         log("No business found for messaging event")
         return
 
-    if not business.get("bot_enabled", True):
-        log("Bot disabled for business")
-        return
-
-    if business.get("auto_reply_dms") is False:
-        log("Auto reply DMs disabled")
-        return
-
-    access_token = get_business_access_token(business)
-
-    if not access_token:
-        log("Business has no access token")
-        return
-
     save_inbox_message(
         business=business,
         sender_id=sender_id,
@@ -668,16 +671,38 @@ async def process_messaging_event(entry_id: str, messaging: dict):
         direction="inbound",
         platform_message_id=message_id,
         raw_payload=messaging,
+        is_read=False,
     )
+
+    if not business.get("bot_enabled", True):
+        log("Bot disabled for business. Inbox saved only.")
+        return
+
+    if business.get("auto_reply_dms") is False:
+        log("Auto reply DMs disabled. Inbox saved only.")
+        return
+
+    access_token = get_business_access_token(business)
+
+    if not access_token:
+        log("Business has no access token")
+        return
 
     reply_text = get_ai_reply(message_text, business)
 
-    send_dm(
+    send_result = send_dm(
         access_token=access_token,
         recipient_id=sender_id,
         text=reply_text,
         business=business,
     )
+
+    raw_result = {}
+    if send_result is not None:
+        try:
+            raw_result = send_result.json()
+        except Exception:
+            raw_result = {"text": send_result.text}
 
     save_inbox_message(
         business=business,
@@ -686,7 +711,8 @@ async def process_messaging_event(entry_id: str, messaging: dict):
         message_text=reply_text,
         direction="outbound",
         platform_message_id="",
-        raw_payload={},
+        raw_payload=raw_result,
+        is_read=True,
     )
 
 
@@ -695,16 +721,8 @@ async def process_comment_event(entry_id: str, change: dict):
 
     value = change.get("value", {})
 
-    comment_id = normalize_id(
-        value.get("comment_id")
-        or value.get("id")
-    )
-
-    comment_text = (
-        value.get("message")
-        or value.get("text")
-        or ""
-    )
+    comment_id = normalize_id(value.get("comment_id") or value.get("id"))
+    comment_text = value.get("message") or value.get("text") or ""
 
     if not comment_id or not comment_text:
         log("Missing comment data", value)
@@ -748,12 +766,12 @@ async def process_comment_event(entry_id: str, change: dict):
 async def home():
     return {
         "status": "ok",
-        "version": "instagram_direct_plus_telegram_router",
+        "version": "instagram_inbox_manual_reply_backend",
         "webhook": "/webhook",
         "connect": "/connect-instagram",
         "connect_instagram": "/connect-instagram",
         "connect_facebook": "/connect-facebook",
-        "recommended_connection": "/connect-instagram",
+        "dashboard_send_dm": "/dashboard/send-instagram-dm",
         "verify_token_set": bool(VERIFY_TOKEN),
         "meta_app_id_set": bool(META_APP_ID),
         "instagram_redirect_uri": INSTAGRAM_REDIRECT_URI,
@@ -797,23 +815,18 @@ async def instagram_callback(request: Request):
         return PlainTextResponse("Missing Instagram code", status_code=400)
 
     try:
-        # Step 1: Exchange auth code for short-lived token (~1 hour)
         token_data = exchange_instagram_code_for_token(code)
-
         short_lived_token = token_data.get("access_token")
         user_id = normalize_id(token_data.get("user_id"))
 
         if not short_lived_token or not user_id:
             raise ValueError(f"Missing access_token or user_id in response: {token_data}")
 
-        # Step 2: Exchange short-lived token for long-lived token (~60 days)
         access_token = exchange_for_long_lived_token(short_lived_token)
 
-        # Step 3: Fetch Instagram user info
         user_info = get_instagram_user(access_token)
         username = user_info.get("username") or f"instagram_{user_id}"
 
-        # Step 4: Save to database
         upsert_business(
             instagram_business_id=user_id,
             username=username,
@@ -836,11 +849,6 @@ async def instagram_callback(request: Request):
 
 @app.get("/refresh-token/{instagram_business_id}")
 async def refresh_token(instagram_business_id: str):
-    """
-    Manually refresh the long-lived token for a business.
-    Call this endpoint periodically (e.g. every 30 days) to keep the token alive.
-    Long-lived tokens expire after 60 days if not refreshed.
-    """
     instagram_business_id = normalize_id(instagram_business_id)
     business = get_business(instagram_business_id)
 
@@ -861,30 +869,15 @@ async def refresh_token(instagram_business_id: str):
     try:
         new_token = refresh_long_lived_token(existing_token)
 
-        if new_token == existing_token:
-            return JSONResponse(
-                content={
-                    "status": "unchanged",
-                    "message": "Token refresh returned same token or failed — token may still be valid",
-                    "token_preview": safe_token(new_token),
-                },
-            )
-
-        # Save the refreshed token
         supabase.table("businesses").update({
             "access_token": new_token,
             "token_preview": safe_token(new_token),
         }).eq("instagram_business_id", instagram_business_id).execute()
 
-        log("Token refreshed and saved", {
-            "instagram_business_id": instagram_business_id,
-            "token_preview": safe_token(new_token),
-        })
-
         return JSONResponse(
             content={
                 "status": "ok",
-                "message": "Token refreshed successfully",
+                "message": "Token refreshed",
                 "token_preview": safe_token(new_token),
             }
         )
@@ -923,6 +916,86 @@ async def connect_facebook():
 async def facebook_callback(request: Request):
     return PlainTextResponse(
         "Facebook callback is available, but this project is currently using Instagram Direct primary mode.",
+        status_code=200,
+    )
+
+
+@app.post("/dashboard/send-instagram-dm")
+async def dashboard_send_instagram_dm(
+    payload: ManualInstagramReply,
+    x_dashboard_secret: str = Header(default=""),
+):
+    if DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET:
+        return JSONResponse(
+            content={"status": "error", "message": "Unauthorized"},
+            status_code=401,
+        )
+
+    business = get_business_by_id(payload.business_id)
+
+    if not business:
+        return JSONResponse(
+            content={"status": "error", "message": "Business not found"},
+            status_code=404,
+        )
+
+    text = payload.text.strip()
+    customer_id = normalize_id(payload.customer_id)
+
+    if not text or not customer_id:
+        return JSONResponse(
+            content={"status": "error", "message": "Missing customer_id or text"},
+            status_code=400,
+        )
+
+    access_token = get_business_access_token(business)
+
+    if not access_token:
+        return JSONResponse(
+            content={"status": "error", "message": "Business has no access token"},
+            status_code=400,
+        )
+
+    res = send_dm(
+        access_token=access_token,
+        recipient_id=customer_id,
+        text=text,
+        business=business,
+    )
+
+    if res is None:
+        return JSONResponse(
+            content={"status": "error", "message": "Send failed"},
+            status_code=500,
+        )
+
+    try:
+        result = res.json()
+    except Exception:
+        result = {"text": res.text}
+
+    if not res.ok:
+        return JSONResponse(
+            content={"status": "error", "meta": result},
+            status_code=res.status_code,
+        )
+
+    save_inbox_message(
+        business=business,
+        sender_id=business.get("instagram_business_id") or business.get("facebook_page_id") or "",
+        recipient_id=customer_id,
+        message_text=text,
+        direction="outbound",
+        platform_message_id=result.get("message_id", ""),
+        raw_payload=result,
+        is_read=True,
+    )
+
+    return JSONResponse(
+        content={
+            "status": "ok",
+            "meta": result,
+        },
         status_code=200,
     )
 
@@ -1035,12 +1108,12 @@ async def receive_webhook(request: Request):
 @app.get("/privacy")
 async def privacy():
     return PlainTextResponse(
-        "Privacy Policy: This app collects Instagram messages and comments to provide automated AI replies."
+        "Privacy Policy: This app collects Instagram messages and comments to provide automated AI replies and dashboard inbox functionality."
     )
 
 
 @app.get("/terms")
 async def terms():
     return PlainTextResponse(
-        "Terms of Service: This app provides automated Instagram replies using AI."
+        "Terms of Service: This app provides automated and manual Instagram replies using AI-assisted tools."
     )
