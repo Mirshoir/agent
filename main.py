@@ -21,7 +21,6 @@ META_APP_ID = os.getenv("META_APP_ID")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
 
 GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v21.0")
-
 GRAPH_FACEBOOK = f"https://graph.facebook.com/{GRAPH_VERSION}"
 GRAPH_INSTAGRAM = f"https://graph.instagram.com/{GRAPH_VERSION}"
 
@@ -54,6 +53,14 @@ processed_message_ids = {}
 DEDUP_TTL_SECONDS = 60 * 60
 
 
+def log(title, data=None):
+    print("\n" + "=" * 80)
+    print(title)
+    if data is not None:
+        print(data)
+    print("=" * 80 + "\n")
+
+
 def normalize_id(value) -> str:
     return str(value or "").strip()
 
@@ -61,24 +68,16 @@ def normalize_id(value) -> str:
 def safe_token(token: str) -> str:
     if not token:
         return ""
-
     token = str(token)
-
     if len(token) <= 18:
         return token[:4] + "..."
-
     return token[:10] + "..." + token[-6:]
 
 
 def cleanup_dedup_cache():
     now = time.time()
-
     for cache in (processed_comment_ids, processed_message_ids):
-        expired = [
-            k for k, v in cache.items()
-            if now - v > DEDUP_TTL_SECONDS
-        ]
-
+        expired = [k for k, v in cache.items() if now - v > DEDUP_TTL_SECONDS]
         for key in expired:
             cache.pop(key, None)
 
@@ -86,12 +85,9 @@ def cleanup_dedup_cache():
 def already_processed(cache: dict, event_id: str) -> bool:
     if not event_id:
         return False
-
     cleanup_dedup_cache()
-
     if event_id in cache:
         return True
-
     cache[event_id] = time.time()
     return False
 
@@ -99,16 +95,14 @@ def already_processed(cache: dict, event_id: str) -> bool:
 def sanitize_business_row(row: dict):
     if not row:
         return None
-
     clean = dict(row)
     clean["access_token"] = safe_token(clean.get("access_token", ""))
-
+    clean["page_access_token"] = safe_token(clean.get("page_access_token", ""))
     return clean
 
 
 def get_business(instagram_business_id: str):
     instagram_business_id = normalize_id(instagram_business_id)
-
     if not instagram_business_id:
         return None
 
@@ -119,13 +113,11 @@ def get_business(instagram_business_id: str):
         .limit(1)
         .execute()
     )
-
     return result.data[0] if result.data else None
 
 
 def get_business_by_page_id(page_id: str):
     page_id = normalize_id(page_id)
-
     if not page_id:
         return None
 
@@ -136,7 +128,6 @@ def get_business_by_page_id(page_id: str):
         .limit(1)
         .execute()
     )
-
     return result.data[0] if result.data else None
 
 
@@ -144,36 +135,25 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
     entry_id = normalize_id(entry_id)
     recipient_id = normalize_id(recipient_id)
 
-    print("Finding business:", {
+    log("Finding business", {
         "entry_id": entry_id,
         "recipient_id": recipient_id,
     })
 
-    business = get_business(entry_id)
+    checks = [
+        ("instagram_business_id = entry_id", lambda: get_business(entry_id)),
+        ("facebook_page_id = entry_id", lambda: get_business_by_page_id(entry_id)),
+        ("instagram_business_id = recipient_id", lambda: get_business(recipient_id)),
+        ("facebook_page_id = recipient_id", lambda: get_business_by_page_id(recipient_id)),
+    ]
 
-    if business:
-        print("Matched by instagram_business_id")
-        return business
+    for label, fn in checks:
+        business = fn()
+        if business:
+            log(f"Matched business by {label}", sanitize_business_row(business))
+            return business
 
-    business = get_business_by_page_id(entry_id)
-
-    if business:
-        print("Matched by facebook_page_id")
-        return business
-
-    business = get_business(recipient_id)
-
-    if business:
-        print("Matched by recipient instagram_business_id")
-        return business
-
-    business = get_business_by_page_id(recipient_id)
-
-    if business:
-        print("Matched by recipient facebook_page_id")
-        return business
-
-    print("No business matched")
+    log("No business matched")
     return None
 
 
@@ -188,11 +168,8 @@ def exchange_facebook_code_for_token(code: str) -> str:
         },
         timeout=30,
     )
-
-    print("Facebook token exchange:", res.status_code, res.text)
-
+    log("Facebook token exchange", {"status": res.status_code, "body": res.text})
     res.raise_for_status()
-
     return res.json()["access_token"]
 
 
@@ -208,14 +185,11 @@ def exchange_for_long_lived_facebook_token(short_token: str) -> str:
             },
             timeout=30,
         )
-
-        print("Long-lived FB token:", res.status_code, res.text)
-
+        log("Long-lived Facebook token", {"status": res.status_code, "body": res.text})
         if res.ok and res.json().get("access_token"):
             return res.json()["access_token"]
-
     except Exception as e:
-        print("Long-lived FB token error:", str(e))
+        log("Long-lived Facebook token error", str(e))
 
     return short_token
 
@@ -234,24 +208,17 @@ def get_facebook_pages(user_access_token: str):
         timeout=30,
     )
 
-    print("Pages API:", res.status_code)
-    print("Pages API response:", res.text)
-
+    log("Facebook Pages API", {"status": res.status_code, "body": res.text})
     res.raise_for_status()
-
     return res.json().get("data", [])
 
 
 def get_page_instagram_account(page: dict) -> dict:
-    ig = (
+    return (
         page.get("instagram_business_account")
         or page.get("connected_instagram_account")
         or {}
     )
-
-    print("Instagram object:", ig)
-
-    return ig
 
 
 def subscribe_page_to_webhooks(page_id: str, page_access_token: str):
@@ -265,12 +232,19 @@ def subscribe_page_to_webhooks(page_id: str, page_access_token: str):
             timeout=30,
         )
 
-        print("Subscribe page:", res.status_code, res.text)
+        log("Subscribe Page to Webhooks", {
+            "page_id": page_id,
+            "status": res.status_code,
+            "body": res.text,
+        })
 
-        return res.json()
+        try:
+            return res.json()
+        except Exception:
+            return {"raw": res.text}
 
     except Exception as e:
-        print("Subscribe error:", str(e))
+        log("Subscribe Page error", str(e))
         return {"error": str(e)}
 
 
@@ -287,10 +261,8 @@ def exchange_instagram_code_for_token(code: str):
         timeout=30,
     )
 
-    print("Instagram token:", res.status_code, res.text)
-
+    log("Instagram token exchange", {"status": res.status_code, "body": res.text})
     res.raise_for_status()
-
     return res.json()
 
 
@@ -303,17 +275,22 @@ def upsert_business(
     facebook_page_name: str = "",
 ):
     instagram_business_id = normalize_id(instagram_business_id)
+    facebook_page_id = normalize_id(facebook_page_id)
 
     existing = get_business(instagram_business_id)
 
     update_data = {
         "instagram_business_id": instagram_business_id,
-        "business_name": username,
-        "access_token": access_token,
+        "business_name": username or f"instagram_{instagram_business_id}",
+        "access_token": access_token or "",
+        "page_access_token": access_token or "",
+        "token_preview": safe_token(access_token),
         "oauth_provider": oauth_provider,
         "facebook_page_id": facebook_page_id,
-        "facebook_page_name": facebook_page_name,
+        "facebook_page_name": facebook_page_name or "",
         "bot_enabled": True,
+        "auto_reply_dms": True,
+        "auto_reply_comments": True,
     }
 
     if existing:
@@ -323,7 +300,7 @@ def upsert_business(
             .eq("id", existing["id"])
             .execute()
         )
-
+        log("Updated existing business", result.data)
         return result.data
 
     insert_data = {
@@ -350,7 +327,25 @@ def upsert_business(
         .execute()
     )
 
+    log("Inserted new business", result.data)
     return result.data
+
+
+def save_inbox_message(business: dict, sender_id: str, recipient_id: str, message_text: str, direction: str, platform_message_id: str = ""):
+    try:
+        data = {
+            "business_id": business.get("id"),
+            "instagram_business_id": business.get("instagram_business_id"),
+            "sender_id": sender_id,
+            "recipient_id": recipient_id,
+            "message_text": message_text,
+            "direction": direction,
+            "platform_message_id": platform_message_id,
+        }
+
+        supabase.table("inbox_messages").insert(data).execute()
+    except Exception as e:
+        log("Could not save inbox message", str(e))
 
 
 def build_business_context(business: dict) -> str:
@@ -413,100 +408,17 @@ You are a professional Instagram sales assistant for this business.
 Business Information:
 {build_business_context(business)}
 
-IMPORTANT LANGUAGE RULES:
-
-- Understand ALL Uzbek dialects and regional speaking styles.
-- Understand Uzbek written in BOTH Latin and Cyrillic alphabets.
-- Understand mixed Uzbek + Russian messages.
-- Understand slang, short forms, typos, informal texting, and voice-message style writing.
-- Understand customers even if grammar is incorrect.
-- Reply naturally in the SAME language the customer uses.
-- If customer writes in Uzbek Latin, reply in Uzbek Latin.
-- If customer writes in Uzbek Cyrillic, reply in Uzbek Cyrillic.
-- If customer writes in Russian, reply in Russian.
-- If customer mixes Uzbek and Russian, reply naturally in the same mixed style.
-- If customer writes in English, reply in English.
-- Never say you do not understand because of dialect, spelling, or grammar.
-- Infer the customer’s meaning from context.
-
-UZBEK CUSTOMER MESSAGE EXAMPLES YOU MUST UNDERSTAND:
-
-- "aka narx qancha"
-- "oka katalog bormi"
-- "brat optom bormi"
-- "оптом бериладими"
-- "мешокдан керак"
-- "kg bormi"
-- "доставка борми россияга"
-- "salom oka"
-- "ишлаб берасиларми"
-- "nechpul"
-- "qancha turadi"
-- "рассияга доставка борми"
-- "пачкаси неч пул"
-- "донадан осам боладими"
-
-SALES RULES:
-
-- Keep replies short, clear, natural, and sales-focused.
-- Sound like a real human sales manager, not a robot.
-- Do not write long explanations.
-- Do not repeat the same request multiple times.
-- Do not force customers to give information.
-- Continue the conversation naturally even if the customer ignores a question.
-- Be polite, helpful, and warm.
+Rules:
+- Reply in the same language as the customer.
+- Understand Uzbek Latin, Uzbek Cyrillic, Russian, English, slang, typos, and mixed messages.
+- Keep replies short, natural, polite, and sales-focused.
 - Answer the exact question first.
-
-OPENING CONVERSATION RULES:
-
-When the customer starts a new conversation or only says hello:
-- Greet them.
-- Introduce yourself as the business virtual assistant.
-- Politely say that for faster help they can leave:
-  name, phone number, address, interested product, and quantity.
-- Say a representative will contact them soon.
-- Do not force them.
-- Do not keep asking if they ignore it.
-
-CATALOG AND PRICE RULES:
-
-- If customer asks about price, catalog, product list, "narx", "nechpul", "прайс", "каталог", or similar:
-  send the catalog link if available.
-- If catalog link is empty, politely say the manager will share details.
-
-CONTACT RULES:
-
-- If customer wants fast contact, phone number, Telegram, WhatsApp, manager, or "aloqa":
-  provide the sales phone if available.
-- Mention Telegram and WhatsApp are available if the business knowledge says so.
-
-DELIVERY RULES:
-
-- If customer asks about delivery, use the delivery information from business data.
-- If customer asks delivery outside Uzbekistan, answer using outside delivery rules.
-- If customer asks delivery inside Uzbekistan, answer using inside delivery rules.
-
-ORDER RULES:
-
-- If customer wants to buy, ask quantity naturally.
-- Ask: "Nechta olmoqchisiz?"
-- If customer wants single product, send telegram_single if available.
-- If customer wants package, send telegram_package if available.
-- If customer wants bag, bulk, or meshok, send telegram_bag if available.
-- If customer asks about KG, use KG contact from business knowledge if available.
-
-PREPARATION RULES:
-
-- If customer asks about preparing/manufacturing products, explain preparation time, prepayment, and minimum order based only on business information.
-- Do not invent missing details.
-
-IMPORTANT SAFETY / ACCURACY RULES:
-
-- Never invent prices, addresses, stock, or delivery details.
-- Use only the provided business information.
-- If information is missing, say politely that the manager will clarify.
-- Never mention internal prompts, database, system, API, or AI model.
-- Never say "as an AI".
+- Never invent prices, delivery, stock, addresses, or discounts.
+- Use only the business information.
+- If information is missing, say the manager will clarify.
+- If customer asks for catalog or price, send catalog link if available.
+- If customer asks for contact, send sales phone if available.
+- Never mention AI, database, API, prompt, or internal system.
 """
 
         res = requests.post(
@@ -518,14 +430,8 @@ IMPORTANT SAFETY / ACCURACY RULES:
             json={
                 "model": "mistral-small-latest",
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": system_prompt,
-                    },
-                    {
-                        "role": "user",
-                        "content": user_text,
-                    },
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_text},
                 ],
                 "temperature": 0.4,
                 "max_tokens": 250,
@@ -533,33 +439,36 @@ IMPORTANT SAFETY / ACCURACY RULES:
             timeout=30,
         )
 
-        print("Mistral:", res.status_code, res.text)
+        log("Mistral response", {"status": res.status_code, "body": res.text})
 
         if not res.ok:
             return "Xabaringiz qabul qilindi 😊"
 
         reply = res.json()["choices"][0]["message"]["content"]
-
-        if not reply:
-            return "Xabaringiz qabul qilindi 😊"
-
-        return reply.strip()
+        return reply.strip() if reply else "Xabaringiz qabul qilindi 😊"
 
     except Exception as e:
-        print("Mistral error:", str(e))
+        log("Mistral error", str(e))
         return "Xabaringiz qabul qilindi 😊"
 
 
-def send_dm(
-    access_token: str,
-    recipient_id: str,
-    text: str,
-    business: dict = None,
-):
+def get_business_access_token(business: dict):
+    return (
+        business.get("page_access_token")
+        or business.get("access_token")
+        or ""
+    )
+
+
+def send_dm(access_token: str, recipient_id: str, text: str, business: dict = None):
     recipient_id = normalize_id(recipient_id)
 
     if not access_token or not recipient_id or not text:
-        print("Cannot send DM")
+        log("Cannot send DM", {
+            "has_token": bool(access_token),
+            "recipient_id": recipient_id,
+            "has_text": bool(text),
+        })
         return None
 
     oauth_provider = (business or {}).get("oauth_provider", "")
@@ -571,36 +480,28 @@ def send_dm(
 
     res = requests.post(
         url,
-        params={
-            "access_token": access_token,
-        },
+        params={"access_token": access_token},
         json={
-            "recipient": {
-                "id": recipient_id,
-            },
-            "message": {
-                "text": text[:1000],
-            },
+            "recipient": {"id": recipient_id},
+            "message": {"text": text[:1000]},
         },
         timeout=30,
     )
 
-    print("DM URL:", url)
-    print("DM result:", res.status_code, res.text)
+    log("Send DM result", {
+        "url": url,
+        "status": res.status_code,
+        "body": res.text,
+    })
 
     return res
 
 
-def reply_to_comment(
-    access_token: str,
-    comment_id: str,
-    text: str,
-    business: dict = None,
-):
+def reply_to_comment(access_token: str, comment_id: str, text: str, business: dict = None):
     oauth_provider = (business or {}).get("oauth_provider", "")
 
     if oauth_provider == "facebook_page":
-        url = f"{GRAPH_FACEBOOK}/{comment_id}/replies"
+        url = f"{GRAPH_FACEBOOK}/{comment_id}/comments"
     else:
         url = f"{GRAPH_INSTAGRAM}/{comment_id}/replies"
 
@@ -613,62 +514,80 @@ def reply_to_comment(
         timeout=30,
     )
 
-    print("Comment URL:", url)
-    print("Comment result:", res.status_code, res.text)
+    log("Comment reply result", {
+        "url": url,
+        "status": res.status_code,
+        "body": res.text,
+    })
 
     return res
 
 
 async def process_messaging_event(entry_id: str, messaging: dict):
-    print("Messaging event:", messaging)
+    log("Processing messaging event", messaging)
 
-    if "read" in messaging:
-        return
-
-    if "delivery" in messaging:
+    if "read" in messaging or "delivery" in messaging:
+        log("Skipping read/delivery event")
         return
 
     message = messaging.get("message") or {}
 
     if not message:
+        log("Skipping empty message event")
         return
 
     sender_id = normalize_id(messaging.get("sender", {}).get("id"))
     recipient_id = normalize_id(messaging.get("recipient", {}).get("id"))
-    message_text = message.get("text")
-    message_id = message.get("mid")
+    message_text = message.get("text") or ""
+    message_id = message.get("mid") or messaging.get("timestamp") or ""
     is_echo = bool(message.get("is_echo"))
 
     if is_echo:
+        log("Skipping echo message")
         return
 
     if not sender_id or not recipient_id or not message_text:
+        log("Missing messaging data", {
+            "sender_id": sender_id,
+            "recipient_id": recipient_id,
+            "message_text": message_text,
+        })
         return
 
     if already_processed(processed_message_ids, message_id):
+        log("Duplicate message skipped", message_id)
         return
 
-    business = find_business_for_webhook(
-        entry_id,
-        recipient_id,
-    )
+    business = find_business_for_webhook(entry_id, recipient_id)
 
     if not business:
+        log("No business found for messaging event")
         return
 
     if not business.get("bot_enabled", True):
-        print("Bot disabled for business")
+        log("Bot disabled for business")
         return
 
-    access_token = business.get("access_token")
+    if business.get("auto_reply_dms") is False:
+        log("Auto reply DMs disabled")
+        return
+
+    access_token = get_business_access_token(business)
 
     if not access_token:
+        log("Business has no access token")
         return
 
-    reply_text = get_ai_reply(
-        message_text,
-        business,
+    save_inbox_message(
+        business=business,
+        sender_id=sender_id,
+        recipient_id=recipient_id,
+        message_text=message_text,
+        direction="inbound",
+        platform_message_id=message_id,
     )
+
+    reply_text = get_ai_reply(message_text, business)
 
     send_dm(
         access_token=access_token,
@@ -677,43 +596,61 @@ async def process_messaging_event(entry_id: str, messaging: dict):
         business=business,
     )
 
+    save_inbox_message(
+        business=business,
+        sender_id=recipient_id,
+        recipient_id=sender_id,
+        message_text=reply_text,
+        direction="outbound",
+        platform_message_id="",
+    )
+
 
 async def process_comment_event(entry_id: str, change: dict):
+    log("Processing comment event", change)
+
     value = change.get("value", {})
 
     comment_id = normalize_id(
-        value.get("comment_id") or value.get("id")
+        value.get("comment_id")
+        or value.get("id")
     )
 
     comment_text = (
         value.get("message")
         or value.get("text")
+        or ""
     )
 
     if not comment_id or not comment_text:
+        log("Missing comment data", value)
         return
 
     if already_processed(processed_comment_ids, comment_id):
+        log("Duplicate comment skipped", comment_id)
         return
 
     business = find_business_for_webhook(entry_id)
 
     if not business:
+        log("No business found for comment event")
         return
 
     if not business.get("bot_enabled", True):
-        print("Bot disabled for business")
+        log("Bot disabled for business")
         return
 
-    access_token = business.get("access_token")
+    if business.get("auto_reply_comments") is False:
+        log("Auto reply comments disabled")
+        return
+
+    access_token = get_business_access_token(business)
 
     if not access_token:
+        log("Business has no access token")
         return
 
-    reply_text = get_ai_reply(
-        comment_text,
-        business,
-    )
+    reply_text = get_ai_reply(comment_text, business)
 
     reply_to_comment(
         access_token=access_token,
@@ -727,10 +664,20 @@ async def process_comment_event(entry_id: str, change: dict):
 async def home():
     return {
         "status": "ok",
-        "version": "hybrid_instagram_facebook_oauth_dialect_prompt",
-        "connect_instagram": "/connect-instagram",
+        "version": "main_py_webhook_debug_facebook_page_safe",
+        "webhook": "/webhook",
         "connect_facebook": "/connect-facebook",
+        "connect_instagram": "/connect-instagram",
+        "verify_token_set": bool(VERIFY_TOKEN),
+        "meta_app_id_set": bool(META_APP_ID),
+        "facebook_redirect_uri": FACEBOOK_REDIRECT_URI,
+        "instagram_redirect_uri": INSTAGRAM_REDIRECT_URI,
     }
+
+
+@app.head("/")
+async def head_home():
+    return PlainTextResponse("", status_code=200)
 
 
 @app.get("/connect-facebook")
@@ -751,11 +698,7 @@ async def connect_facebook():
         "state": secrets.token_urlsafe(16),
     }
 
-    auth_url = (
-        f"https://www.facebook.com/{GRAPH_VERSION}/dialog/oauth?"
-        + urlencode(params)
-    )
-
+    auth_url = f"https://www.facebook.com/{GRAPH_VERSION}/dialog/oauth?" + urlencode(params)
     return RedirectResponse(auth_url)
 
 
@@ -764,21 +707,12 @@ async def facebook_callback(request: Request):
     code = request.query_params.get("code")
 
     if not code:
-        return PlainTextResponse(
-            "Missing Facebook code",
-            status_code=400,
-        )
+        return PlainTextResponse("Missing Facebook code", status_code=400)
 
     try:
         short_token = exchange_facebook_code_for_token(code)
-
-        user_token = exchange_for_long_lived_facebook_token(
-            short_token
-        )
-
+        user_token = exchange_for_long_lived_facebook_token(short_token)
         pages = get_facebook_pages(user_token)
-
-        print("PAGES:", pages)
 
         connected = []
 
@@ -786,7 +720,7 @@ async def facebook_callback(request: Request):
             ig = get_page_instagram_account(page)
 
             if not ig or not ig.get("id"):
-                print("Skipping page:", page)
+                log("Skipping page without Instagram account", page)
                 continue
 
             instagram_business_id = normalize_id(ig.get("id"))
@@ -812,28 +746,26 @@ async def facebook_callback(request: Request):
             )
 
             connected.append({
-                "page": page,
-                "instagram": ig,
+                "page_id": page.get("id"),
+                "page_name": page.get("name"),
+                "instagram_business_id": instagram_business_id,
+                "instagram_username": username,
                 "subscription": sub,
             })
 
         if not connected:
             return PlainTextResponse(
-                "No Instagram returned from Meta API.",
+                "No Instagram business account was returned. Make sure Instagram is connected to a Facebook Page.",
                 status_code=400,
             )
 
-        return RedirectResponse(
-            f"{DASHBOARD_URL}?connected=success"
-        )
+        log("Facebook OAuth connected accounts", connected)
+
+        return RedirectResponse(f"{DASHBOARD_URL}?connected=success")
 
     except Exception as e:
-        print("Facebook OAuth error:", str(e))
-
-        return PlainTextResponse(
-            f"Facebook OAuth error: {str(e)}",
-            status_code=500,
-        )
+        log("Facebook OAuth error", str(e))
+        return PlainTextResponse(f"Facebook OAuth error: {str(e)}", status_code=500)
 
 
 @app.get("/connect-instagram")
@@ -850,11 +782,7 @@ async def connect_instagram():
         "state": secrets.token_urlsafe(16),
     }
 
-    auth_url = (
-        "https://www.instagram.com/oauth/authorize?"
-        + urlencode(params)
-    )
-
+    auth_url = "https://www.instagram.com/oauth/authorize?" + urlencode(params)
     return RedirectResponse(auth_url)
 
 
@@ -863,19 +791,13 @@ async def instagram_callback(request: Request):
     code = request.query_params.get("code")
 
     if not code:
-        return PlainTextResponse(
-            "Missing Instagram code",
-            status_code=400,
-        )
+        return PlainTextResponse("Missing Instagram code", status_code=400)
 
     try:
         token_data = exchange_instagram_code_for_token(code)
 
         access_token = token_data.get("access_token")
-
-        user_id = normalize_id(
-            token_data.get("user_id")
-        )
+        user_id = normalize_id(token_data.get("user_id"))
 
         username = f"instagram_{user_id}"
 
@@ -886,17 +808,16 @@ async def instagram_callback(request: Request):
             oauth_provider="instagram_direct",
         )
 
-        return RedirectResponse(
-            f"{DASHBOARD_URL}?connected=success"
-        )
+        log("Instagram Direct OAuth connected", {
+            "instagram_business_id": user_id,
+            "token": safe_token(access_token),
+        })
+
+        return RedirectResponse(f"{DASHBOARD_URL}?connected=success")
 
     except Exception as e:
-        print("Instagram OAuth error:", str(e))
-
-        return PlainTextResponse(
-            f"Instagram OAuth error: {str(e)}",
-            status_code=500,
-        )
+        log("Instagram OAuth error", str(e))
+        return PlainTextResponse(f"Instagram OAuth error: {str(e)}", status_code=500)
 
 
 @app.get("/debug/businesses")
@@ -908,10 +829,7 @@ async def debug_businesses():
         .execute()
     )
 
-    rows = [
-        sanitize_business_row(r)
-        for r in (result.data or [])
-    ]
+    rows = [sanitize_business_row(r) for r in (result.data or [])]
 
     return {
         "count": len(rows),
@@ -919,39 +837,38 @@ async def debug_businesses():
     }
 
 
+@app.get("/debug/business/{instagram_business_id}")
+async def debug_business(instagram_business_id: str):
+    business = get_business(instagram_business_id)
+    return {
+        "found": bool(business),
+        "business": sanitize_business_row(business),
+    }
+
+
 @app.get("/debug/pages")
 async def debug_pages(user_token: str):
     try:
         pages = get_facebook_pages(user_token)
-
-        return {
-            "pages": pages,
-        }
-
+        return {"pages": pages}
     except Exception as e:
-        return {
-            "error": str(e),
-        }
+        return {"error": str(e)}
 
 
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     params = request.query_params
 
+    log("Webhook verification request", dict(params))
+
     if (
         params.get("hub.mode") == "subscribe"
         and params.get("hub.verify_token") == VERIFY_TOKEN
         and params.get("hub.challenge")
     ):
-        return PlainTextResponse(
-            params.get("hub.challenge"),
-            status_code=200,
-        )
+        return PlainTextResponse(params.get("hub.challenge"), status_code=200)
 
-    return PlainTextResponse(
-        "Verification failed",
-        status_code=403,
-    )
+    return PlainTextResponse("Verification failed", status_code=403)
 
 
 @app.post("/webhook")
@@ -959,25 +876,25 @@ async def receive_webhook(request: Request):
     try:
         data = await request.json()
 
-        print("Webhook received:", data)
+        log("WEBHOOK RECEIVED", data)
 
         for entry in data.get("entry", []):
             entry_id = normalize_id(entry.get("id"))
 
+            log("Webhook entry", {
+                "entry_id": entry_id,
+                "keys": list(entry.keys()),
+            })
+
             for messaging in entry.get("messaging", []):
-                await process_messaging_event(
-                    entry_id,
-                    messaging,
-                )
+                await process_messaging_event(entry_id, messaging)
 
             for change in entry.get("changes", []):
                 field = change.get("field")
+                log("Webhook change field", field)
 
                 if field in ["comments", "feed"]:
-                    await process_comment_event(
-                        entry_id,
-                        change,
-                    )
+                    await process_comment_event(entry_id, change)
 
                 elif field == "messages":
                     value = change.get("value", {})
@@ -989,19 +906,15 @@ async def receive_webhook(request: Request):
                         "message": value.get("message", {}),
                     }
 
-                    await process_messaging_event(
-                        entry_id,
-                        fake_messaging,
-                    )
+                    await process_messaging_event(entry_id, fake_messaging)
 
-        return JSONResponse(
-            content={"status": "ok"},
-            status_code=200,
-        )
+                else:
+                    log("Unhandled webhook field", change)
+
+        return JSONResponse(content={"status": "ok"}, status_code=200)
 
     except Exception as e:
-        print("Webhook error:", str(e))
-
+        log("Webhook error", str(e))
         return JSONResponse(
             content={
                 "status": "error",
@@ -1014,14 +927,12 @@ async def receive_webhook(request: Request):
 @app.get("/privacy")
 async def privacy():
     return PlainTextResponse(
-        "Privacy Policy: This app collects Instagram messages "
-        "and comments to provide automated AI replies."
+        "Privacy Policy: This app collects Instagram messages and comments to provide automated AI replies."
     )
 
 
 @app.get("/terms")
 async def terms():
     return PlainTextResponse(
-        "Terms of Service: This app provides automated "
-        "Instagram replies using AI."
+        "Terms of Service: This app provides automated Instagram replies using AI."
     )
