@@ -7,52 +7,26 @@ from supabase import create_client
 
 telegram_router = APIRouter()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
-TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://agent-1-xi6h.onrender.com")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "").lower()
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
 
-if not SUPABASE_URL:
-    raise RuntimeError("Missing SUPABASE_URL")
-
-if not SUPABASE_SERVICE_KEY:
-    raise RuntimeError("Missing SUPABASE_SERVICE_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-processed_telegram_ids = {}
-DEDUP_TTL_SECONDS = 60 * 60
+MESSAGE_BUFFER = {}
 
 
 def log(title, data=None):
     print("\n" + "=" * 80)
     print(title)
+
     if data is not None:
         print(data)
+
     print("=" * 80 + "\n")
-
-
-def normalize_id(value) -> str:
-    return str(value or "").strip()
-
-
-def cleanup_dedup_cache():
-    now = time.time()
-    expired = [k for k, v in processed_telegram_ids.items() if now - v > DEDUP_TTL_SECONDS]
-    for key in expired:
-        processed_telegram_ids.pop(key, None)
-
-
-def already_processed(event_id: str) -> bool:
-    if not event_id:
-        return False
-    cleanup_dedup_cache()
-    if event_id in processed_telegram_ids:
-        return True
-    processed_telegram_ids[event_id] = time.time()
-    return False
 
 
 def get_active_business():
@@ -63,10 +37,11 @@ def get_active_business():
         .limit(1)
         .execute()
     )
+
     return result.data[0] if result.data else None
 
 
-def build_business_context(business: dict) -> str:
+def build_business_context(business):
     return f"""
 Business name:
 {business.get("business_name", "")}
@@ -77,323 +52,349 @@ Business type:
 Language:
 {business.get("language", "")}
 
-Tone:
-{business.get("tone", "")}
-
-Products / Services:
+Products:
 {business.get("products", "")}
 
 Prices:
 {business.get("prices", "")}
 
-Delivery information:
+Delivery:
 {business.get("delivery_info", "")}
-
-Working hours:
-{business.get("working_hours", "")}
 
 FAQ:
 {business.get("faq", "")}
 
-Catalog link:
+Catalog:
 {business.get("catalog_link", "")}
 
-Sales phone:
+Phone:
 {business.get("sales_phone", "")}
 
-Telegram single product:
-{business.get("telegram_single", "")}
-
-Telegram package:
-{business.get("telegram_package", "")}
-
-Telegram bag / meshok:
-{business.get("telegram_bag", "")}
-
-Main business knowledge:
+Knowledge:
 {business.get("knowledge", "")}
 """
 
 
-def get_recent_history(customer_id: str, channel: str, limit: int = 12):
+def get_recent_chat_history(customer_id: str, limit: int = 10):
     try:
         result = (
             supabase.table("inbox_messages")
-            .select("role,content,created_at")
+            .select("role,content")
+            .eq("customer_id", str(customer_id))
             .eq("platform", "telegram")
-            .eq("customer_id", normalize_id(customer_id))
-            .eq("channel", channel)
-            .order("created_at", desc=True)
+            .order("created_at", desc=False)
             .limit(limit)
             .execute()
         )
-        rows = result.data or []
-        rows.reverse()
-        return rows
+
+        return result.data or []
+
     except Exception as e:
         log("Could not load Telegram history", str(e))
         return []
 
 
-def get_ai_reply(user_text: str, business: dict, history=None, chat_type: str = "private"):
-    try:
-        api_key = business.get("mistral_api_key") or MISTRAL_API_KEY
-        if not api_key:
-            return "Xabaringiz qabul qilindi 😊"
+def get_ai_reply(user_text, business, customer_id):
+    api_key = business.get("mistral_api_key") or os.getenv("MISTRAL_API_KEY")
 
-        model = business.get("ai_model") or "mistral-small-latest"
+    if not api_key:
+        return "Assalomu alaykum 😊"
 
-        system_prompt = f"""
-You are a professional sales assistant for Telegram.
+    history = get_recent_chat_history(customer_id)
 
-Business Information:
+    system_prompt = f"""
+You are a real human sales manager for Milana Premium.
+
+Business info:
 {build_business_context(business)}
 
-Telegram context:
-- If this is a private chat, reply directly to the customer.
-- If this is a group or supergroup, act like a helpful group admin and answer customers politely in the group.
-- Do not argue, spam, or repeat the same message.
+IMPORTANT BEHAVIOR RULES:
 
-Rules:
-- Reply in the same language as the customer.
-- Understand Uzbek Latin, Uzbek Cyrillic, Russian, English, slang, typos, and mixed messages.
-- Keep replies short, natural, polite, and sales-focused.
-- Answer the exact question first.
-- Never invent prices, delivery, stock, addresses, or discounts.
-- Use only the business information.
-- If information is missing, say the manager will clarify.
-- If customer asks for catalog or price, send catalog link if available.
-- If customer asks for contact, send sales phone if available.
-- Never mention AI, database, API, prompt, or internal system.
+- Speak naturally like a real Telegram sales manager.
+- Keep answers SHORT.
+- Usually 1-4 sentences only.
+- Never dump all business information at once.
+- Never write huge lists unless customer explicitly asks.
+- Ask follow-up questions naturally.
+- Focus on selling and continuing conversation.
+- Sound warm, confident, and human.
+- Use emojis lightly.
+- Reply in the customer's language.
+- If customer says only "hello", introduce briefly and ask what product they need.
+- If customer asks about products, answer briefly first, then ask what exactly interests them.
+- Give catalog only if relevant.
+- Never overwhelm the customer.
+- Avoid AI-style formatting.
+- Avoid long markdown sections.
+- Avoid giant bullet lists.
+- Talk like a real Uzbek sales manager.
+
+GOOD EXAMPLE:
+Customer: Hello
+Assistant:
+Assalomu alaykum 😊
+Milana Premium virtual yordamchisiman.
+Qaysi mahsulot sizni qiziqtiryapti?
+
+GOOD EXAMPLE:
+Customer: What do you sell?
+Assistant:
+Bizda premium kiyim va tekstil mahsulotlari mavjud 😊
+Wholesale, eksport va custom buyurtmalar qilamiz.
+Qaysi turdagi mahsulot kerak edi?
+
+GOOD EXAMPLE:
+Customer: Do you have catalog?
+Assistant:
+Ha albatta 😊
+Mana katalogimiz:
+https://shmirzaev.github.io/Milana-Premium-Catalog/
+
+Qaysi mahsulot sizni qiziqtirdi?
+
+BAD EXAMPLE:
+- Huge explanations
+- Huge bullet lists
+- Too much information at once
+- AI assistant behavior
 """
 
-        messages = [{"role": "system", "content": system_prompt}]
+    messages = [
+        {
+            "role": "system",
+            "content": system_prompt,
+        }
+    ]
 
-        for item in history or []:
-            role = item.get("role") or "user"
-            content = item.get("content") or ""
-            if role not in ["user", "assistant"] or not content:
-                continue
-            messages.append({"role": role, "content": content})
-
-        messages.append({"role": "user", "content": user_text})
-
-        res = requests.post(
-            "https://api.mistral.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": messages,
-                "temperature": 0.4,
-                "max_tokens": 250,
-            },
-            timeout=30,
+    for msg in history:
+        messages.append(
+            {
+                "role": msg["role"],
+                "content": msg["content"],
+            }
         )
 
-        log("Telegram Mistral response", {
+    messages.append(
+        {
+            "role": "user",
+            "content": user_text,
+        }
+    )
+
+    payload = {
+        "model": business.get("ai_model") or "mistral-small-latest",
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 180,
+    }
+
+    res = requests.post(
+        "https://api.mistral.ai/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=30,
+    )
+
+    log(
+        "Telegram Mistral response",
+        {
             "status": res.status_code,
             "body": res.text,
-        })
+        },
+    )
 
-        if not res.ok:
-            return "Xabaringiz qabul qilindi 😊"
+    if not res.ok:
+        return "Assalomu alaykum 😊"
 
-        reply = res.json()["choices"][0]["message"]["content"]
-        return reply.strip() if reply else "Xabaringiz qabul qilindi 😊"
+    try:
+        reply = (
+            res.json()
+            .get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+            .strip()
+        )
+
+        if not reply:
+            return "Assalomu alaykum 😊"
+
+        return reply[:4000]
 
     except Exception as e:
-        log("Telegram Mistral error", str(e))
-        return "Xabaringiz qabul qilindi 😊"
+        log("Telegram AI parse error", str(e))
+        return "Assalomu alaykum 😊"
 
 
-def send_telegram_message(chat_id, text: str, reply_to_message_id=None):
-    if not TELEGRAM_BOT_TOKEN:
-        log("TELEGRAM_BOT_TOKEN missing")
-        return None
-
+def send_telegram_message(chat_id, text, reply_to_message_id=None):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
     payload = {
         "chat_id": chat_id,
-        "text": text[:4000],
+        "text": text,
         "disable_web_page_preview": False,
     }
 
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
-        payload["allow_sending_without_reply"] = True
 
     res = requests.post(url, json=payload, timeout=30)
-    log("Telegram send result", {
-        "status": res.status_code,
-        "body": res.text,
-    })
+
+    log(
+        "Telegram send result",
+        {
+            "status": res.status_code,
+            "body": res.text,
+        },
+    )
+
     return res
 
 
 def save_telegram_message(
-    business: dict,
-    chat_id,
-    user_id,
-    text: str,
-    direction: str,
-    message_id=None,
-    chat_type: str = "private",
-    raw_payload: dict = None,
+    business,
+    customer_id,
+    text,
+    direction,
+    message_id="",
+    raw_payload=None,
+    channel="private",
 ):
     try:
         data = {
             "business_id": business.get("id"),
             "instagram_business_id": business.get("instagram_business_id"),
             "platform": "telegram",
-            "customer_id": normalize_id(user_id or chat_id),
-            "channel": chat_type,
+            "customer_id": str(customer_id),
+            "channel": channel,
             "direction": direction,
             "role": "user" if direction == "inbound" else "assistant",
             "content": text,
-            "external_message_id": normalize_id(message_id),
+            "external_message_id": str(message_id),
             "raw_payload": raw_payload or {},
         }
 
         supabase.table("inbox_messages").insert(data).execute()
+
         log("Telegram inbox message saved", data)
 
     except Exception as e:
         log("Could not save Telegram message", str(e))
 
 
-def should_answer_group_message(message: dict, text: str) -> bool:
-    if not text:
-        return False
-
-    if text.startswith("/"):
-        return True
-
-    if message.get("reply_to_message"):
-        reply_to = message.get("reply_to_message") or {}
-        reply_user = reply_to.get("from") or {}
-        if reply_user.get("is_bot"):
-            return True
-
-    return True
-
-
 @telegram_router.get("/webhook/telegram")
 async def telegram_webhook_check():
-    return PlainTextResponse("Telegram webhook is running")
+    return PlainTextResponse("Telegram webhook working")
 
 
 @telegram_router.get("/telegram/set-webhook")
 async def set_telegram_webhook():
-    if not TELEGRAM_BOT_TOKEN:
-        return JSONResponse(
-            content={"status": "error", "message": "Missing TELEGRAM_BOT_TOKEN"},
-            status_code=400,
-        )
+    webhook_url = f"{PUBLIC_BASE_URL}/webhook/telegram"
 
-    webhook_url = f"{PUBLIC_BASE_URL.rstrip('/')}/webhook/telegram"
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook"
+    res = requests.get(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
+        params={
+            "url": webhook_url,
+        },
+        timeout=30,
+    )
 
-    payload = {
-        "url": webhook_url,
-        "allowed_updates": ["message", "edited_message", "my_chat_member"],
-    }
-
-    if TELEGRAM_WEBHOOK_SECRET:
-        payload["secret_token"] = TELEGRAM_WEBHOOK_SECRET
-
-    res = requests.post(url, json=payload, timeout=30)
-    log("Telegram setWebhook result", {"status": res.status_code, "body": res.text})
-
-    try:
-        return JSONResponse(res.json(), status_code=res.status_code)
-    except Exception:
-        return PlainTextResponse(res.text, status_code=res.status_code)
-
-
-@telegram_router.get("/telegram/webhook-info")
-async def telegram_webhook_info():
-    if not TELEGRAM_BOT_TOKEN:
-        return JSONResponse(
-            content={"status": "error", "message": "Missing TELEGRAM_BOT_TOKEN"},
-            status_code=400,
-        )
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getWebhookInfo"
-    res = requests.get(url, timeout=30)
-
-    try:
-        return JSONResponse(res.json(), status_code=res.status_code)
-    except Exception:
-        return PlainTextResponse(res.text, status_code=res.status_code)
+    return JSONResponse(res.json())
 
 
 @telegram_router.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
     try:
-        if TELEGRAM_WEBHOOK_SECRET:
-            received_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-            if received_secret != TELEGRAM_WEBHOOK_SECRET:
-                return JSONResponse({"status": "forbidden"}, status_code=403)
-
         update = await request.json()
+
         log("TELEGRAM WEBHOOK RECEIVED", update)
 
-        update_id = normalize_id(update.get("update_id"))
-        if already_processed(update_id):
-            return JSONResponse({"status": "duplicate"})
-
-        message = update.get("message") or update.get("edited_message") or {}
+        message = (
+            update.get("message")
+            or update.get("edited_message")
+            or update.get("channel_post")
+            or {}
+        )
 
         if not message:
-            return JSONResponse({"status": "ignored_no_message"})
+            return JSONResponse({"status": "ignored"})
 
-        text = message.get("text") or message.get("caption") or ""
+        if message.get("from", {}).get("is_bot"):
+            return JSONResponse({"status": "ignored_bot"})
+
+        text = message.get("text", "").strip()
+
         if not text:
             return JSONResponse({"status": "ignored_no_text"})
 
-        sender = message.get("from") or {}
-        if sender.get("is_bot"):
-            return JSONResponse({"status": "ignored_bot_message"})
+        chat = message.get("chat", {})
+        user = message.get("from", {})
 
-        chat = message.get("chat") or {}
         chat_id = chat.get("id")
         chat_type = chat.get("type", "private")
-        user_id = sender.get("id")
+
+        customer_id = user.get("id")
         message_id = message.get("message_id")
 
-        if chat_type in ["group", "supergroup"] and not should_answer_group_message(message, text):
-            return JSONResponse({"status": "ignored_group_message"})
-
         business = get_active_business()
+
         if not business:
-            return JSONResponse({"status": "no_active_business"})
+            return JSONResponse({"status": "no_business"})
+
+        if chat_type in ["group", "supergroup"]:
+            mention = f"@{TELEGRAM_BOT_USERNAME}"
+
+            replied_to_bot = (
+                message.get("reply_to_message", {})
+                .get("from", {})
+                .get("is_bot", False)
+            )
+
+            if mention not in text.lower() and not replied_to_bot:
+                return JSONResponse({"status": "ignored_group_message"})
+
+        buffer_key = f"{chat_id}_{customer_id}"
+
+        current_time = time.time()
+
+        if buffer_key not in MESSAGE_BUFFER:
+            MESSAGE_BUFFER[buffer_key] = {
+                "texts": [],
+                "last_time": current_time,
+            }
+
+        MESSAGE_BUFFER[buffer_key]["texts"].append(text)
+        MESSAGE_BUFFER[buffer_key]["last_time"] = current_time
+
+        time.sleep(3)
+
+        latest_time = MESSAGE_BUFFER[buffer_key]["last_time"]
+
+        if time.time() - latest_time < 2:
+            return JSONResponse({"status": "waiting_more_messages"})
+
+        combined_text = "\n".join(
+            MESSAGE_BUFFER[buffer_key]["texts"]
+        ).strip()
+
+        del MESSAGE_BUFFER[buffer_key]
 
         save_telegram_message(
             business=business,
-            chat_id=chat_id,
-            user_id=user_id,
-            text=text,
+            customer_id=customer_id,
+            text=combined_text,
             direction="inbound",
             message_id=message_id,
-            chat_type=chat_type,
-            raw_payload=message,
-        )
-
-        history = get_recent_history(
-            customer_id=normalize_id(user_id or chat_id),
+            raw_payload=update,
             channel=chat_type,
-            limit=int(business.get("memory_limit") or 12),
         )
 
         reply = get_ai_reply(
-            user_text=text,
+            user_text=combined_text,
             business=business,
-            history=history,
-            chat_type=chat_type,
+            customer_id=customer_id,
         )
 
         send_telegram_message(
@@ -404,17 +405,23 @@ async def telegram_webhook(request: Request):
 
         save_telegram_message(
             business=business,
-            chat_id=chat_id,
-            user_id=user_id,
+            customer_id=customer_id,
             text=reply,
             direction="outbound",
             message_id="",
-            chat_type=chat_type,
             raw_payload={},
+            channel=chat_type,
         )
 
         return JSONResponse({"status": "ok"})
 
     except Exception as e:
         log("Telegram webhook error", str(e))
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": str(e),
+            },
+            status_code=500,
+        )
