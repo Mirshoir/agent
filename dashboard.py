@@ -255,21 +255,6 @@ def get_message_count(platform=None):
         return 0
 
 
-def get_recent_messages(platform=None, limit=30):
-    try:
-        q = (
-            supabase.table("inbox_messages")
-            .select("platform,channel,direction,role,content,customer_id,created_at")
-            .order("created_at", desc=True)
-            .limit(limit)
-        )
-        if platform:
-            q = q.eq("platform", platform)
-        return q.execute().data or []
-    except Exception:
-        return []
-
-
 def telegram_webhook_url():
     return f"{PUBLIC_BASE_URL}/webhook/telegram"
 
@@ -445,11 +430,7 @@ def business_editor(business):
         col1, col2 = st.columns(2)
 
         with col1:
-            reply_style_options = [
-                "short_comfortable",
-                "very_short",
-                "normal_sales",
-            ]
+            reply_style_options = ["short_comfortable", "very_short", "normal_sales"]
             current_reply_style = business.get("reply_style", "short_comfortable")
             reply_style_index = reply_style_options.index(current_reply_style) if current_reply_style in reply_style_options else 0
 
@@ -457,7 +438,6 @@ def business_editor(business):
                 "Reply Style",
                 reply_style_options,
                 index=reply_style_index,
-                help="short_comfortable is recommended.",
                 disabled="reply_style" not in business,
             )
 
@@ -471,11 +451,7 @@ def business_editor(business):
             )
 
         with col2:
-            catalog_policy_options = [
-                "only_when_customer_asks",
-                "offer_when_relevant",
-                "never_send",
-            ]
+            catalog_policy_options = ["only_when_customer_asks", "offer_when_relevant", "never_send"]
             current_catalog_policy = business.get("catalog_policy", "only_when_customer_asks")
             catalog_policy_index = catalog_policy_options.index(current_catalog_policy) if current_catalog_policy in catalog_policy_options else 0
 
@@ -483,7 +459,6 @@ def business_editor(business):
                 "Catalog Policy",
                 catalog_policy_options,
                 index=catalog_policy_index,
-                help="Use only_when_customer_asks to avoid automatic catalog messages.",
                 disabled="catalog_policy" not in business,
             )
 
@@ -501,12 +476,9 @@ def business_editor(business):
             value=business.get("ai_reply_rules", DEFAULT_AI_REPLY_RULES),
             height=150,
             disabled="ai_reply_rules" not in business,
-            help="These rules should be used by main.py when generating replies.",
         )
 
-        st.caption(
-            "Recommended: reply_style = short_comfortable, catalog_policy = only_when_customer_asks, max_tokens = 130, temperature = 0.5"
-        )
+        st.caption("Recommended: short_comfortable, only_when_customer_asks, max_tokens 130, temperature 0.5")
 
         st.divider()
         st.subheader("📸 Instagram")
@@ -541,7 +513,6 @@ def business_editor(business):
             "Telegram Bot Enabled for this Business",
             value=bool(business.get("telegram_bot_enabled", business.get("bot_enabled", True))),
             disabled="telegram_bot_enabled" not in business,
-            help="If this field is disabled, add telegram_bot_enabled column to businesses table.",
         )
 
         col1, col2 = st.columns(2)
@@ -655,16 +626,6 @@ if nav_option == "📊 Dashboard":
     with col2:
         st.markdown("### Telegram Messages")
         st.metric("Total Telegram Messages", get_message_count("telegram"))
-
-    st.divider()
-
-    st.markdown("### Recent Messages")
-    recent = get_recent_messages(limit=30)
-
-    if recent:
-        st.dataframe(recent, use_container_width=True)
-    else:
-        st.info("No messages found yet.")
 
 
 elif nav_option in ["📋 Businesses", "📋 My Business"]:
@@ -874,16 +835,6 @@ elif nav_option == "📲 Telegram":
             "If Telegram fields are disabled, add these columns to your businesses table: "
             "telegram_bot_enabled, telegram_bot_username, telegram_chat_id, telegram_notes."
         )
-
-    st.divider()
-
-    st.markdown("### Recent Telegram Messages")
-    messages = get_recent_messages("telegram", limit=50)
-
-    if messages:
-        st.dataframe(messages, use_container_width=True)
-    else:
-        st.info("No Telegram messages yet.")
 
 
 elif nav_option == "👥 Users" and is_admin:
