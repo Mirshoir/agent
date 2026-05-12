@@ -3,8 +3,7 @@ import time
 import secrets
 import requests
 from urllib.parse import urlencode
-from typing import List, Dict
-from datetime import datetime, timezone
+from typing import Optional, List, Dict
 
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, JSONResponse, RedirectResponse
@@ -14,8 +13,6 @@ from supabase import create_client
 app = FastAPI()
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
-DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
-
 DEFAULT_MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
@@ -109,7 +106,6 @@ def sanitize_business_row(row: dict):
 
     for key in [
         "access_token",
-        "page_access_token",
         "mistral_api_key",
         "openai_api_key",
         "gemini_api_key",
@@ -130,23 +126,6 @@ def get_business(instagram_business_id: str):
         supabase.table("businesses")
         .select("*")
         .eq("instagram_business_id", instagram_business_id)
-        .limit(1)
-        .execute()
-    )
-
-    return result.data[0] if result.data else None
-
-
-def get_business_by_id(business_id: str):
-    business_id = normalize_id(business_id)
-
-    if not business_id:
-        return None
-
-    result = (
-        supabase.table("businesses")
-        .select("*")
-        .eq("id", business_id)
         .limit(1)
         .execute()
     )
@@ -307,260 +286,6 @@ def save_chat_message(
         print("Chat memory save error:", str(e))
 
 
-def meta_get(url: str, params: dict, timeout: int = 30) -> dict:
-    try:
-        res = requests.get(url, params=params, timeout=timeout)
-        print("Meta GET:", res.url)
-        print("Meta status:", res.status_code)
-        print("Meta body:", res.text)
-
-        if not res.ok:
-            return {
-                "ok": False,
-                "status_code": res.status_code,
-                "error": res.text,
-            }
-
-        data = res.json()
-        data["ok"] = True
-        return data
-
-    except Exception as e:
-        print("Meta GET exception:", str(e))
-        return {
-            "ok": False,
-            "error": str(e),
-        }
-
-
-def extract_insight_value(insights_data: dict, metric_name: str, default: int = 0) -> int:
-    try:
-        for item in insights_data.get("data", []):
-            if item.get("name") == metric_name:
-                values = item.get("values") or []
-
-                if not values:
-                    return default
-
-                latest = values[-1].get("value", default)
-
-                if isinstance(latest, dict):
-                    total = 0
-
-                    for value in latest.values():
-                        try:
-                            total += int(value or 0)
-                        except Exception:
-                            pass
-
-                    return total
-
-                return int(latest or 0)
-    except Exception:
-        pass
-
-    return default
-
-
-def get_account_basic_metrics(ig_id: str, access_token: str) -> dict:
-    data = meta_get(
-        f"{GRAPH_FACEBOOK}/{ig_id}",
-        params={
-            "fields": "id,username,followers_count,follows_count,media_count,profile_picture_url",
-            "access_token": access_token,
-        },
-    )
-
-    if not data.get("ok"):
-        return {
-            "followers_count": 0,
-            "media_count": 0,
-            "username": "",
-            "raw": data,
-        }
-
-    return {
-        "followers_count": int(data.get("followers_count") or 0),
-        "media_count": int(data.get("media_count") or 0),
-        "username": data.get("username") or "",
-        "raw": data,
-    }
-
-
-def get_account_advanced_insights(ig_id: str, access_token: str, days: int = 30) -> dict:
-    metrics = "reach,profile_views,website_clicks"
-
-    data = meta_get(
-        f"{GRAPH_FACEBOOK}/{ig_id}/insights",
-        params={
-            "metric": metrics,
-            "period": "day",
-            "metric_type": "total_value",
-            "access_token": access_token,
-        },
-    )
-
-    if not data.get("ok"):
-        data = meta_get(
-            f"{GRAPH_FACEBOOK}/{ig_id}/insights",
-            params={
-                "metric": "reach",
-                "period": "day",
-                "access_token": access_token,
-            },
-        )
-
-    return {
-        "reach": extract_insight_value(data, "reach", 0),
-        "profile_views": extract_insight_value(data, "profile_views", 0),
-        "website_clicks": extract_insight_value(data, "website_clicks", 0),
-        "impressions": extract_insight_value(data, "impressions", 0),
-        "raw": data,
-    }
-
-
-def get_media_list(ig_id: str, access_token: str, limit: int = 25) -> dict:
-    fields = ",".join([
-        "id",
-        "caption",
-        "media_type",
-        "media_url",
-        "thumbnail_url",
-        "permalink",
-        "timestamp",
-        "like_count",
-        "comments_count",
-    ])
-
-    data = meta_get(
-        f"{GRAPH_FACEBOOK}/{ig_id}/media",
-        params={
-            "fields": fields,
-            "limit": max(1, min(int(limit or 25), 100)),
-            "access_token": access_token,
-        },
-    )
-
-    if not data.get("ok"):
-        return {
-            "posts": [],
-            "raw": data,
-        }
-
-    return {
-        "posts": data.get("data", []) or [],
-        "raw": data,
-    }
-
-
-def get_media_advanced_insights(media_id: str, access_token: str) -> dict:
-    data = meta_get(
-        f"{GRAPH_FACEBOOK}/{media_id}/insights",
-        params={
-            "metric": "reach,saved,shares,total_interactions",
-            "access_token": access_token,
-        },
-    )
-
-    if not data.get("ok"):
-        data = meta_get(
-            f"{GRAPH_FACEBOOK}/{media_id}/insights",
-            params={
-                "metric": "reach,saved",
-                "access_token": access_token,
-            },
-        )
-
-    return {
-        "reach": extract_insight_value(data, "reach", 0),
-        "saved": extract_insight_value(data, "saved", 0),
-        "shares": extract_insight_value(data, "shares", 0),
-        "total_interactions": extract_insight_value(data, "total_interactions", 0),
-        "raw": data,
-    }
-
-
-def parse_meta_timestamp(value: str):
-    if not value:
-        return None
-
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00")).isoformat()
-    except Exception:
-        return None
-
-
-def upsert_daily_insight(
-    business_id: str,
-    followers_count: int,
-    reach: int,
-    impressions: int,
-    profile_views: int,
-    website_clicks: int,
-):
-    today = datetime.now(timezone.utc).date().isoformat()
-
-    row = {
-        "business_id": business_id,
-        "insight_date": today,
-        "followers_count": int(followers_count or 0),
-        "reach": int(reach or 0),
-        "impressions": int(impressions or 0),
-        "profile_views": int(profile_views or 0),
-        "website_clicks": int(website_clicks or 0),
-    }
-
-    return (
-        supabase.table("instagram_daily_insights")
-        .upsert(row, on_conflict="business_id,insight_date")
-        .execute()
-    )
-
-
-def upsert_post_insights(
-    business_id: str,
-    post: dict,
-    followers_count: int,
-    advanced: dict,
-):
-    likes_count = int(post.get("like_count") or post.get("likes_count") or 0)
-    comments_count = int(post.get("comments_count") or 0)
-    reach = int(advanced.get("reach") or 0)
-    saved = int(advanced.get("saved") or 0)
-    shares = int(advanced.get("shares") or 0)
-
-    denominator = reach if reach > 0 else max(int(followers_count or 0), 1)
-    engagement_rate = round(((likes_count + comments_count + saved + shares) / denominator) * 100, 2)
-
-    row = {
-        "business_id": business_id,
-        "media_id": str(post.get("id") or ""),
-        "media_type": post.get("media_type") or "",
-        "caption": post.get("caption") or "",
-        "permalink": post.get("permalink") or "",
-        "media_url": post.get("media_url") or "",
-        "thumbnail_url": post.get("thumbnail_url") or "",
-        "post_timestamp": parse_meta_timestamp(post.get("timestamp") or ""),
-        "likes_count": likes_count,
-        "comments_count": comments_count,
-        "reach": reach,
-        "impressions": 0,
-        "saved": saved,
-        "shares": shares,
-        "engagement_rate": engagement_rate,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    if not row["media_id"]:
-        return None
-
-    return (
-        supabase.table("instagram_post_insights")
-        .upsert(row, on_conflict="business_id,media_id")
-        .execute()
-    )
-
-
 def exchange_facebook_code_for_token(code: str) -> str:
     res = requests.get(
         f"{GRAPH_FACEBOOK}/oauth/access_token",
@@ -708,8 +433,6 @@ def upsert_business(
         **update_data,
         "business_type": "Instagram Business",
         "language": "uz",
-        "dashboard_language": "en",
-        "bot_language_mode": "auto",
         "tone": "friendly, polite, sales-focused",
         "knowledge": "",
         "products": "",
@@ -726,11 +449,8 @@ def upsert_business(
         "ai_model": "mistral-small-latest",
         "mistral_api_key": "",
         "openai_api_key": "",
-        "gemini_api_key": "",
-        "anthropic_api_key": "",
         "memory_enabled": True,
         "memory_limit": MAX_MEMORY_MESSAGES,
-        "analytics_enabled": True,
     }
 
     result = (
@@ -743,7 +463,8 @@ def upsert_business(
 
 
 def build_business_context(business: dict) -> str:
-    return f"""Business name:
+    return f"""
+Business name:
 {business.get("business_name", "")}
 
 Business type:
@@ -751,9 +472,6 @@ Business type:
 
 Language:
 {business.get("language", "")}
-
-Bot language mode:
-{business.get("bot_language_mode", "auto")}
 
 Tone:
 {business.get("tone", "")}
@@ -789,148 +507,101 @@ Telegram bag / meshok:
 {business.get("telegram_bag", "")}
 
 Main business knowledge:
-{business.get("knowledge", "")}"""
+{business.get("knowledge", "")}
+"""
 
 
 def build_system_prompt(business: dict) -> str:
-    bot_language_mode = business.get("bot_language_mode", "auto")
-
-    language_rule = """
-
-Reply naturally in the SAME language the customer uses.
-
-If customer writes in Uzbek Latin, reply in Uzbek Latin.
-
-If customer writes in Uzbek Cyrillic, reply in Uzbek Cyrillic.
-
-If customer writes in Russian, reply in Russian.
-
-If customer writes in English, reply in English."""
-
-    if bot_language_mode in ["uz", "ru", "en"]:
-        language_rule = f"""
-
-Reply in this business selected language only: {bot_language_mode}.
-
-Keep the reply natural and suitable for Instagram DM."""
-
-    return f"""You are a professional Instagram sales assistant for this business.
+    return f"""
+You are a professional Instagram sales assistant for this business.
 
 Business Information:
 {build_business_context(business)}
 
 IMPORTANT LANGUAGE RULES:
 
-Understand ALL Uzbek dialects and regional speaking styles.
-
-Understand Uzbek written in BOTH Latin and Cyrillic alphabets.
-
-Understand mixed Uzbek + Russian messages.
-
-Understand slang, short forms, typos, informal texting, and voice-message style writing.
-
-Understand customers even if grammar is incorrect.
-{language_rule}
-
-Never say you do not understand because of dialect, spelling, or grammar.
-
-Infer the customer’s meaning from context.
+- Understand ALL Uzbek dialects and regional speaking styles.
+- Understand Uzbek written in BOTH Latin and Cyrillic alphabets.
+- Understand mixed Uzbek + Russian messages.
+- Understand slang, short forms, typos, informal texting, and voice-message style writing.
+- Understand customers even if grammar is incorrect.
+- Reply naturally in the SAME language the customer uses.
+- If customer writes in Uzbek Latin, reply in Uzbek Latin.
+- If customer writes in Uzbek Cyrillic, reply in Uzbek Cyrillic.
+- If customer writes in Russian, reply in Russian.
+- If customer mixes Uzbek and Russian, reply naturally in the same mixed style.
+- If customer writes in English, reply in English.
+- Never say you do not understand because of dialect, spelling, or grammar.
+- Infer the customer’s meaning from context.
 
 SALES RULES:
 
-Keep replies short, clear, natural, and sales-focused.
-
-Sound like a real human sales manager, not a robot.
-
-Do not write long explanations.
-
-Do not repeat the same request multiple times.
-
-Do not force customers to give information.
-
-Continue the conversation naturally using the previous conversation memory.
-
-Be polite, helpful, and warm.
-
-Answer the exact question first.
+- Keep replies short, clear, natural, and sales-focused.
+- Sound like a real human sales manager, not a robot.
+- Do not write long explanations.
+- Do not repeat the same request multiple times.
+- Do not force customers to give information.
+- Continue the conversation naturally using the previous conversation memory.
+- Be polite, helpful, and warm.
+- Answer the exact question first.
 
 OPENING CONVERSATION RULES:
 
 When the customer starts a new conversation or only says hello:
-
-Greet them.
-
-Introduce yourself as the business virtual assistant.
-
-Politely say that for faster help they can leave:name, phone number, address, interested product, and quantity.
-
-Say a representative will contact them soon.
-
-Do not force them.
-
-Do not keep asking if they ignore it.
+- Greet them.
+- Introduce yourself as the business virtual assistant.
+- Politely say that for faster help they can leave:
+  name, phone number, address, interested product, and quantity.
+- Say a representative will contact them soon.
+- Do not force them.
+- Do not keep asking if they ignore it.
 
 CATALOG AND PRICE RULES:
 
-If customer asks about price, catalog, product list, "narx", "nechpul", "прайс", "каталог", or similar:
-send the catalog link if available.
-
-If catalog link is empty, politely say the manager will share details.
+- If customer asks about price, catalog, product list, "narx", "nechpul", "прайс", "каталог", or similar:
+  send the catalog link if available.
+- If catalog link is empty, politely say the manager will share details.
 
 CONTACT RULES:
 
-If customer wants fast contact, phone number, Telegram, WhatsApp, manager, or "aloqa":
-provide the sales phone if available.
-
-Mention Telegram and WhatsApp are available if the business knowledge says so.
+- If customer wants fast contact, phone number, Telegram, WhatsApp, manager, or "aloqa":
+  provide the sales phone if available.
+- Mention Telegram and WhatsApp are available if the business knowledge says so.
 
 DELIVERY RULES:
 
-If customer asks about delivery, use the delivery information from business data.
-
-If customer asks delivery outside Uzbekistan, answer using outside delivery rules.
-
-If customer asks delivery inside Uzbekistan, answer using inside delivery rules.
+- If customer asks about delivery, use the delivery information from business data.
+- If customer asks delivery outside Uzbekistan, answer using outside delivery rules.
+- If customer asks delivery inside Uzbekistan, answer using inside delivery rules.
 
 ORDER RULES:
 
-If customer wants to buy, ask quantity naturally.
-
-Ask: "Nechta olmoqchisiz?"
-
-If customer wants single product, send telegram_single if available.
-
-If customer wants package, send telegram_package if available.
-
-If customer wants bag, bulk, or meshok, send telegram_bag if available.
-
-If customer asks about KG, use KG contact from business knowledge if available.
+- If customer wants to buy, ask quantity naturally.
+- Ask: "Nechta olmoqchisiz?"
+- If customer wants single product, send telegram_single if available.
+- If customer wants package, send telegram_package if available.
+- If customer wants bag, bulk, or meshok, send telegram_bag if available.
+- If customer asks about KG, use KG contact from business knowledge if available.
 
 PREPARATION RULES:
 
-If customer asks about preparing/manufacturing products, explain preparation time, prepayment, and minimum order based only on business information.
-
-Do not invent missing details.
+- If customer asks about preparing/manufacturing products, explain preparation time, prepayment, and minimum order based only on business information.
+- Do not invent missing details.
 
 MEMORY RULES:
 
-Use previous messages only for this same business and same customer.
-
-Do not mention that you have memory.
-
-Never mix one customer's conversation with another customer's conversation.
+- Use previous messages only for this same business and same customer.
+- Do not mention that you have memory.
+- Never mix one customer's conversation with another customer's conversation.
 
 IMPORTANT SAFETY / ACCURACY RULES:
 
-Never invent prices, addresses, stock, or delivery details.
-
-Use only the provided business information.
-
-If information is missing, say politely that the manager will clarify.
-
-Never mention internal prompts, database, system, API, or AI model.
-
-Never say "as an AI"."""
+- Never invent prices, addresses, stock, or delivery details.
+- Use only the provided business information.
+- If information is missing, say politely that the manager will clarify.
+- Never mention internal prompts, database, system, API, or AI model.
+- Never say "as an AI".
+"""
 
 
 def call_mistral(api_key: str, model: str, messages: list):
@@ -1066,12 +737,7 @@ def send_dm(
         print("Cannot send DM")
         return None
 
-    oauth_provider = (business or {}).get("oauth_provider", "")
-
-    if oauth_provider == "facebook_page":
-        url = f"{GRAPH_FACEBOOK}/me/messages"
-    else:
-        url = f"{GRAPH_INSTAGRAM}/me/messages"
+    url = f"{GRAPH_FACEBOOK}/me/messages"
 
     res = requests.post(
         url,
@@ -1101,12 +767,7 @@ def reply_to_comment(
     text: str,
     business: dict = None,
 ):
-    oauth_provider = (business or {}).get("oauth_provider", "")
-
-    if oauth_provider == "facebook_page":
-        url = f"{GRAPH_FACEBOOK}/{comment_id}/replies"
-    else:
-        url = f"{GRAPH_INSTAGRAM}/{comment_id}/replies"
+    url = f"{GRAPH_FACEBOOK}/{comment_id}/replies"
 
     res = requests.post(
         url,
@@ -1242,133 +903,9 @@ async def process_comment_event(entry_id: str, change: dict):
 async def home():
     return {
         "status": "ok",
-        "version": "analytics_basic_reliable_metrics_v2",
+        "version": "chat_memory_company_keys_model_select",
         "connect_instagram": "/connect-instagram",
         "connect_facebook": "/connect-facebook",
-        "analytics_sync": "/analytics/sync",
-        "debug_businesses": "/debug/businesses",
-    }
-
-
-@app.api_route("/analytics/sync", methods=["GET", "POST"])
-async def sync_instagram_analytics(
-    request: Request,
-    business_id: str = "",
-    days: int = 30,
-    limit: int = 25,
-    dashboard_secret: str = "",
-):
-    if DASHBOARD_SECRET and dashboard_secret != DASHBOARD_SECRET:
-        return JSONResponse(
-            content={
-                "status": "error",
-                "message": "Invalid dashboard secret",
-            },
-            status_code=403,
-        )
-
-    business = get_business_by_id(business_id)
-
-    if not business:
-        return JSONResponse(
-            content={
-                "status": "error",
-                "message": "Business not found",
-                "business_id": business_id,
-            },
-            status_code=404,
-        )
-
-    if not business.get("analytics_enabled", True):
-        return {
-            "status": "disabled",
-            "message": "Analytics disabled for this business",
-        }
-
-    ig_id = normalize_id(business.get("instagram_business_id"))
-    access_token = business.get("access_token") or business.get("page_access_token")
-
-    if not ig_id or not access_token:
-        return JSONResponse(
-            content={
-                "status": "error",
-                "message": "Missing Instagram Business ID or access token",
-                "business": sanitize_business_row(business),
-            },
-            status_code=400,
-        )
-
-    basic = get_account_basic_metrics(ig_id, access_token)
-    advanced = get_account_advanced_insights(ig_id, access_token, days=days)
-    media = get_media_list(ig_id, access_token, limit=limit)
-
-    followers_count = int(basic.get("followers_count") or 0)
-    media_count = int(basic.get("media_count") or 0)
-
-    upsert_daily_insight(
-        business_id=business["id"],
-        followers_count=followers_count,
-        reach=int(advanced.get("reach") or 0),
-        impressions=int(advanced.get("impressions") or 0),
-        profile_views=int(advanced.get("profile_views") or 0),
-        website_clicks=int(advanced.get("website_clicks") or 0),
-    )
-
-    saved_posts = 0
-    post_debug = []
-
-    for post in media.get("posts", []):
-        media_id = normalize_id(post.get("id"))
-
-        if not media_id:
-            continue
-
-        post_advanced = get_media_advanced_insights(media_id, access_token)
-
-        try:
-            upsert_post_insights(
-                business_id=business["id"],
-                post=post,
-                followers_count=followers_count,
-                advanced=post_advanced,
-            )
-            saved_posts += 1
-        except Exception as e:
-            print("Post upsert error:", str(e))
-            post_debug.append({
-                "media_id": media_id,
-                "error": str(e),
-            })
-
-    try:
-        supabase.table("businesses").update({
-            "last_analytics_sync": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", business["id"]).execute()
-    except Exception as e:
-        print("Update last analytics sync error:", str(e))
-
-    return {
-        "status": "ok",
-        "message": "Analytics synced",
-        "business_id": business["id"],
-        "instagram_business_id": ig_id,
-        "username": basic.get("username"),
-        "followers_count": followers_count,
-        "media_count": media_count,
-        "daily_insights": {
-            "reach": advanced.get("reach", 0),
-            "impressions": advanced.get("impressions", 0),
-            "profile_views": advanced.get("profile_views", 0),
-            "website_clicks": advanced.get("website_clicks", 0),
-        },
-        "posts_found": len(media.get("posts", [])),
-        "posts_saved": saved_posts,
-        "debug": {
-            "account_basic_raw": basic.get("raw"),
-            "account_advanced_raw": advanced.get("raw"),
-            "media_raw_sample": media.get("raw"),
-            "post_errors": post_debug[:5],
-        },
     }
 
 
@@ -1385,7 +922,6 @@ async def connect_facebook():
             "instagram_basic",
             "instagram_manage_messages",
             "instagram_manage_comments",
-            "instagram_manage_insights",
         ]),
         "response_type": "code",
         "state": secrets.token_urlsafe(16),
@@ -1448,10 +984,7 @@ async def facebook_callback(request: Request):
             )
 
             connected.append({
-                "page": {
-                    "id": page.get("id"),
-                    "name": page.get("name"),
-                },
+                "page": page,
                 "instagram": ig,
                 "subscription": sub,
             })
@@ -1685,12 +1218,14 @@ async def receive_webhook(request: Request):
 @app.get("/privacy")
 async def privacy():
     return PlainTextResponse(
-        "Privacy Policy: This app collects Instagram messages, comments, and analytics data to provide automated AI replies and business dashboard analytics."
+        "Privacy Policy: This app collects Instagram messages "
+        "and comments to provide automated AI replies."
     )
 
 
 @app.get("/terms")
 async def terms():
     return PlainTextResponse(
-        "Terms of Service: This app provides automated Instagram replies and analytics dashboard tools using AI."
+        "Terms of Service: This app provides automated "
+        "Instagram replies using AI."
     )
