@@ -189,6 +189,7 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
 
 
 def exchange_instagram_code_for_token(code: str):
+    """Exchange authorization code for a short-lived token."""
     res = requests.post(
         "https://api.instagram.com/oauth/access_token",
         data={
@@ -201,13 +202,91 @@ def exchange_instagram_code_for_token(code: str):
         timeout=30,
     )
 
-    log("Instagram token exchange", {
+    log("Instagram short-lived token exchange", {
         "status": res.status_code,
         "body": res.text,
     })
 
     res.raise_for_status()
     return res.json()
+
+
+def exchange_for_long_lived_token(short_lived_token: str) -> str:
+    """
+    Exchange a short-lived Instagram token (~1 hour) for a long-lived token (~60 days).
+    See: https://developers.facebook.com/docs/instagram-platform/instagram-api-with-instagram-login/business-login
+    """
+    res = requests.get(
+        "https://graph.instagram.com/access_token",
+        params={
+            "grant_type": "ig_exchange_token",
+            "client_secret": META_APP_SECRET,
+            "access_token": short_lived_token,
+        },
+        timeout=30,
+    )
+
+    log("Instagram long-lived token exchange", {
+        "status": res.status_code,
+        "body": res.text,
+    })
+
+    if not res.ok:
+        log("Long-lived token exchange failed, falling back to short-lived token", res.text)
+        return short_lived_token
+
+    data = res.json()
+    long_lived_token = data.get("access_token")
+
+    if not long_lived_token:
+        log("No access_token in long-lived exchange response, falling back", data)
+        return short_lived_token
+
+    log("Long-lived token obtained", {
+        "token_preview": safe_token(long_lived_token),
+        "expires_in": data.get("expires_in"),
+        "token_type": data.get("token_type"),
+    })
+
+    return long_lived_token
+
+
+def refresh_long_lived_token(existing_long_lived_token: str) -> str:
+    """
+    Refresh a long-lived token before it expires (valid within the last ~60 days window).
+    The token must be at least 24 hours old but not yet expired.
+    """
+    res = requests.get(
+        "https://graph.instagram.com/refresh_access_token",
+        params={
+            "grant_type": "ig_refresh_token",
+            "access_token": existing_long_lived_token,
+        },
+        timeout=30,
+    )
+
+    log("Instagram token refresh", {
+        "status": res.status_code,
+        "body": res.text,
+    })
+
+    if not res.ok:
+        log("Token refresh failed", res.text)
+        return existing_long_lived_token
+
+    data = res.json()
+    refreshed_token = data.get("access_token")
+
+    if not refreshed_token:
+        log("No access_token in refresh response", data)
+        return existing_long_lived_token
+
+    log("Token refreshed successfully", {
+        "token_preview": safe_token(refreshed_token),
+        "expires_in": data.get("expires_in"),
+    })
+
+    return refreshed_token
 
 
 def get_instagram_user(access_token: str):
@@ -667,7 +746,7 @@ async def process_comment_event(entry_id: str, change: dict):
 async def home():
     return {
         "status": "ok",
-        "version": "instagram_direct_primary_inbox_schema_fixed",
+        "version": "instagram_direct_primary_inbox_schema_fixed_long_lived_tokens",
         "webhook": "/webhook",
         "connect": "/connect-instagram",
         "connect_instagram": "/connect-instagram",
@@ -716,14 +795,23 @@ async def instagram_callback(request: Request):
         return PlainTextResponse("Missing Instagram code", status_code=400)
 
     try:
+        # Step 1: Exchange auth code for short-lived token (~1 hour)
         token_data = exchange_instagram_code_for_token(code)
 
-        access_token = token_data.get("access_token")
+        short_lived_token = token_data.get("access_token")
         user_id = normalize_id(token_data.get("user_id"))
 
+        if not short_lived_token or not user_id:
+            raise ValueError(f"Missing access_token or user_id in response: {token_data}")
+
+        # Step 2: Exchange short-lived token for long-lived token (~60 days)
+        access_token = exchange_for_long_lived_token(short_lived_token)
+
+        # Step 3: Fetch Instagram user info
         user_info = get_instagram_user(access_token)
         username = user_info.get("username") or f"instagram_{user_id}"
 
+        # Step 4: Save to database
         upsert_business(
             instagram_business_id=user_id,
             username=username,
@@ -731,7 +819,7 @@ async def instagram_callback(request: Request):
             oauth_provider="instagram_direct",
         )
 
-        log("Instagram Direct connected", {
+        log("Instagram Direct connected with long-lived token", {
             "instagram_business_id": user_id,
             "username": username,
             "token": safe_token(access_token),
@@ -742,6 +830,69 @@ async def instagram_callback(request: Request):
     except Exception as e:
         log("Instagram OAuth error", str(e))
         return PlainTextResponse(f"Instagram OAuth error: {str(e)}", status_code=500)
+
+
+@app.get("/refresh-token/{instagram_business_id}")
+async def refresh_token(instagram_business_id: str):
+    """
+    Manually refresh the long-lived token for a business.
+    Call this endpoint periodically (e.g. every 30 days) to keep the token alive.
+    Long-lived tokens expire after 60 days if not refreshed.
+    """
+    instagram_business_id = normalize_id(instagram_business_id)
+    business = get_business(instagram_business_id)
+
+    if not business:
+        return JSONResponse(
+            content={"status": "error", "message": "Business not found"},
+            status_code=404,
+        )
+
+    existing_token = business.get("access_token") or ""
+
+    if not existing_token:
+        return JSONResponse(
+            content={"status": "error", "message": "No access token found for this business"},
+            status_code=400,
+        )
+
+    try:
+        new_token = refresh_long_lived_token(existing_token)
+
+        if new_token == existing_token:
+            return JSONResponse(
+                content={
+                    "status": "unchanged",
+                    "message": "Token refresh returned same token or failed — token may still be valid",
+                    "token_preview": safe_token(new_token),
+                },
+            )
+
+        # Save the refreshed token
+        supabase.table("businesses").update({
+            "access_token": new_token,
+            "token_preview": safe_token(new_token),
+        }).eq("instagram_business_id", instagram_business_id).execute()
+
+        log("Token refreshed and saved", {
+            "instagram_business_id": instagram_business_id,
+            "token_preview": safe_token(new_token),
+        })
+
+        return JSONResponse(
+            content={
+                "status": "ok",
+                "message": "Token refreshed successfully",
+                "token_preview": safe_token(new_token),
+            }
+        )
+
+    except Exception as e:
+        log("Token refresh error", str(e))
+        return JSONResponse(
+            content={"status": "error", "message": str(e)},
+            status_code=500,
+        )
 
 
 @app.get("/connect-facebook")
