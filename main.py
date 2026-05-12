@@ -84,9 +84,12 @@ def cleanup_dedup_cache():
 def already_processed(cache: dict, event_id: str) -> bool:
     if not event_id:
         return False
+
     cleanup_dedup_cache()
+
     if event_id in cache:
         return True
+
     cache[event_id] = time.time()
     return False
 
@@ -94,14 +97,21 @@ def already_processed(cache: dict, event_id: str) -> bool:
 def sanitize_business_row(row: dict):
     if not row:
         return None
+
     clean = dict(row)
     clean["access_token"] = safe_token(clean.get("access_token", ""))
     clean["page_access_token"] = safe_token(clean.get("page_access_token", ""))
+    clean["mistral_api_key"] = safe_token(clean.get("mistral_api_key", ""))
+    clean["openai_api_key"] = safe_token(clean.get("openai_api_key", ""))
+    clean["gemini_api_key"] = safe_token(clean.get("gemini_api_key", ""))
+    clean["anthropic_api_key"] = safe_token(clean.get("anthropic_api_key", ""))
+
     return clean
 
 
 def get_business(instagram_business_id: str):
     instagram_business_id = normalize_id(instagram_business_id)
+
     if not instagram_business_id:
         return None
 
@@ -112,6 +122,24 @@ def get_business(instagram_business_id: str):
         .limit(1)
         .execute()
     )
+
+    return result.data[0] if result.data else None
+
+
+def get_business_by_page_id(page_id: str):
+    page_id = normalize_id(page_id)
+
+    if not page_id:
+        return None
+
+    result = (
+        supabase.table("businesses")
+        .select("*")
+        .eq("facebook_page_id", page_id)
+        .limit(1)
+        .execute()
+    )
+
     return result.data[0] if result.data else None
 
 
@@ -124,21 +152,7 @@ def get_active_instagram_direct_business():
         .limit(1)
         .execute()
     )
-    return result.data[0] if result.data else None
 
-
-def get_business_by_page_id(page_id: str):
-    page_id = normalize_id(page_id)
-    if not page_id:
-        return None
-
-    result = (
-        supabase.table("businesses")
-        .select("*")
-        .eq("facebook_page_id", page_id)
-        .limit(1)
-        .execute()
-    )
     return result.data[0] if result.data else None
 
 
@@ -165,6 +179,7 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
             return business
 
     fallback = get_active_instagram_direct_business()
+
     if fallback:
         log("Matched fallback active Instagram Direct business", sanitize_business_row(fallback))
         return fallback
@@ -214,27 +229,6 @@ def get_instagram_user(access_token: str):
         return res.json()
 
     return {}
-
-
-def exchange_facebook_code_for_token(code: str) -> str:
-    res = requests.get(
-        f"{GRAPH_FACEBOOK}/oauth/access_token",
-        params={
-            "client_id": META_APP_ID,
-            "client_secret": META_APP_SECRET,
-            "redirect_uri": FACEBOOK_REDIRECT_URI,
-            "code": code,
-        },
-        timeout=30,
-    )
-
-    log("Facebook token exchange", {
-        "status": res.status_code,
-        "body": res.text,
-    })
-
-    res.raise_for_status()
-    return res.json()["access_token"]
 
 
 def upsert_business(
@@ -352,11 +346,12 @@ Main business knowledge:
 
 
 def get_ai_reply(user_text: str, business: dict):
-    if not MISTRAL_API_KEY:
-        return "Xabaringiz qabul qilindi 😊"
-
     try:
         api_key = business.get("mistral_api_key") or MISTRAL_API_KEY
+
+        if not api_key:
+            return "Xabaringiz qabul qilindi 😊"
+
         model = business.get("ai_model") or "mistral-small-latest"
 
         system_prompt = f"""
@@ -442,8 +437,12 @@ def send_dm(access_token: str, recipient_id: str, text: str, business: dict = No
         url,
         params={"access_token": access_token},
         json={
-            "recipient": {"id": recipient_id},
-            "message": {"text": text[:1000]},
+            "recipient": {
+                "id": recipient_id,
+            },
+            "message": {
+                "text": text[:1000],
+            },
         },
         timeout=30,
     )
@@ -458,6 +457,16 @@ def send_dm(access_token: str, recipient_id: str, text: str, business: dict = No
 
 
 def reply_to_comment(access_token: str, comment_id: str, text: str, business: dict = None):
+    comment_id = normalize_id(comment_id)
+
+    if not access_token or not comment_id or not text:
+        log("Cannot reply to comment", {
+            "has_token": bool(access_token),
+            "comment_id": comment_id,
+            "has_text": bool(text),
+        })
+        return None
+
     oauth_provider = (business or {}).get("oauth_provider", "")
 
     if oauth_provider == "facebook_page":
@@ -490,19 +499,26 @@ def save_inbox_message(
     message_text: str,
     direction: str,
     platform_message_id: str = "",
+    raw_payload: dict = None,
 ):
     try:
+        customer_id = sender_id if direction == "inbound" else recipient_id
+
         data = {
             "business_id": business.get("id"),
             "instagram_business_id": business.get("instagram_business_id"),
-            "sender_id": sender_id,
-            "recipient_id": recipient_id,
-            "message_text": message_text,
+            "platform": "instagram",
+            "customer_id": customer_id,
+            "channel": "dm",
             "direction": direction,
-            "platform_message_id": platform_message_id,
+            "role": "user" if direction == "inbound" else "assistant",
+            "content": message_text,
+            "external_message_id": platform_message_id,
+            "raw_payload": raw_payload or {},
         }
 
         supabase.table("inbox_messages").insert(data).execute()
+        log("Inbox message saved", data)
 
     except Exception as e:
         log("Could not save inbox message", str(e))
@@ -570,6 +586,7 @@ async def process_messaging_event(entry_id: str, messaging: dict):
         message_text=message_text,
         direction="inbound",
         platform_message_id=message_id,
+        raw_payload=messaging,
     )
 
     reply_text = get_ai_reply(message_text, business)
@@ -588,6 +605,7 @@ async def process_messaging_event(entry_id: str, messaging: dict):
         message_text=reply_text,
         direction="outbound",
         platform_message_id="",
+        raw_payload={},
     )
 
 
@@ -649,7 +667,7 @@ async def process_comment_event(entry_id: str, change: dict):
 async def home():
     return {
         "status": "ok",
-        "version": "instagram_direct_primary_restored",
+        "version": "instagram_direct_primary_inbox_schema_fixed",
         "webhook": "/webhook",
         "connect": "/connect-instagram",
         "connect_instagram": "/connect-instagram",
@@ -704,10 +722,7 @@ async def instagram_callback(request: Request):
         user_id = normalize_id(token_data.get("user_id"))
 
         user_info = get_instagram_user(access_token)
-        username = (
-            user_info.get("username")
-            or f"instagram_{user_id}"
-        )
+        username = user_info.get("username") or f"instagram_{user_id}"
 
         upsert_business(
             instagram_business_id=user_id,
