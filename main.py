@@ -24,14 +24,14 @@ GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v21.0")
 GRAPH_FACEBOOK = f"https://graph.facebook.com/{GRAPH_VERSION}"
 GRAPH_INSTAGRAM = f"https://graph.instagram.com/{GRAPH_VERSION}"
 
-FACEBOOK_REDIRECT_URI = os.getenv(
-    "FACEBOOK_REDIRECT_URI",
-    "https://agent-1-xi6h.onrender.com/auth/facebook/callback",
-)
-
 INSTAGRAM_REDIRECT_URI = os.getenv(
     "INSTAGRAM_REDIRECT_URI",
     "https://agent-1-xi6h.onrender.com/auth/instagram/callback",
+)
+
+FACEBOOK_REDIRECT_URI = os.getenv(
+    "FACEBOOK_REDIRECT_URI",
+    "https://agent-1-xi6h.onrender.com/auth/facebook/callback",
 )
 
 DASHBOARD_URL = os.getenv(
@@ -47,9 +47,8 @@ if not SUPABASE_SERVICE_KEY:
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-processed_comment_ids = {}
 processed_message_ids = {}
-
+processed_comment_ids = {}
 DEDUP_TTL_SECONDS = 60 * 60
 
 
@@ -76,7 +75,7 @@ def safe_token(token: str) -> str:
 
 def cleanup_dedup_cache():
     now = time.time()
-    for cache in (processed_comment_ids, processed_message_ids):
+    for cache in (processed_message_ids, processed_comment_ids):
         expired = [k for k, v in cache.items() if now - v > DEDUP_TTL_SECONDS]
         for key in expired:
             cache.pop(key, None)
@@ -85,12 +84,9 @@ def cleanup_dedup_cache():
 def already_processed(cache: dict, event_id: str) -> bool:
     if not event_id:
         return False
-
     cleanup_dedup_cache()
-
     if event_id in cache:
         return True
-
     cache[event_id] = time.time()
     return False
 
@@ -98,7 +94,6 @@ def already_processed(cache: dict, event_id: str) -> bool:
 def sanitize_business_row(row: dict):
     if not row:
         return None
-
     clean = dict(row)
     clean["access_token"] = safe_token(clean.get("access_token", ""))
     clean["page_access_token"] = safe_token(clean.get("page_access_token", ""))
@@ -107,7 +102,6 @@ def sanitize_business_row(row: dict):
 
 def get_business(instagram_business_id: str):
     instagram_business_id = normalize_id(instagram_business_id)
-
     if not instagram_business_id:
         return None
 
@@ -118,13 +112,23 @@ def get_business(instagram_business_id: str):
         .limit(1)
         .execute()
     )
+    return result.data[0] if result.data else None
 
+
+def get_active_instagram_direct_business():
+    result = (
+        supabase.table("businesses")
+        .select("*")
+        .eq("oauth_provider", "instagram_direct")
+        .eq("bot_enabled", True)
+        .limit(1)
+        .execute()
+    )
     return result.data[0] if result.data else None
 
 
 def get_business_by_page_id(page_id: str):
     page_id = normalize_id(page_id)
-
     if not page_id:
         return None
 
@@ -135,7 +139,6 @@ def get_business_by_page_id(page_id: str):
         .limit(1)
         .execute()
     )
-
     return result.data[0] if result.data else None
 
 
@@ -149,10 +152,10 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
     })
 
     checks = [
-        ("facebook_page_id = entry_id", lambda: get_business_by_page_id(entry_id)),
         ("instagram_business_id = entry_id", lambda: get_business(entry_id)),
-        ("facebook_page_id = recipient_id", lambda: get_business_by_page_id(recipient_id)),
         ("instagram_business_id = recipient_id", lambda: get_business(recipient_id)),
+        ("facebook_page_id = entry_id", lambda: get_business_by_page_id(entry_id)),
+        ("facebook_page_id = recipient_id", lambda: get_business_by_page_id(recipient_id)),
     ]
 
     for label, fn in checks:
@@ -161,114 +164,13 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
             log(f"Matched business by {label}", sanitize_business_row(business))
             return business
 
+    fallback = get_active_instagram_direct_business()
+    if fallback:
+        log("Matched fallback active Instagram Direct business", sanitize_business_row(fallback))
+        return fallback
+
     log("No business matched")
     return None
-
-
-def exchange_facebook_code_for_token(code: str) -> str:
-    res = requests.get(
-        f"{GRAPH_FACEBOOK}/oauth/access_token",
-        params={
-            "client_id": META_APP_ID,
-            "client_secret": META_APP_SECRET,
-            "redirect_uri": FACEBOOK_REDIRECT_URI,
-            "code": code,
-        },
-        timeout=30,
-    )
-
-    log("Facebook token exchange", {
-        "status": res.status_code,
-        "body": res.text,
-    })
-
-    res.raise_for_status()
-    return res.json()["access_token"]
-
-
-def exchange_for_long_lived_facebook_token(short_token: str) -> str:
-    try:
-        res = requests.get(
-            f"{GRAPH_FACEBOOK}/oauth/access_token",
-            params={
-                "grant_type": "fb_exchange_token",
-                "client_id": META_APP_ID,
-                "client_secret": META_APP_SECRET,
-                "fb_exchange_token": short_token,
-            },
-            timeout=30,
-        )
-
-        log("Long-lived Facebook token", {
-            "status": res.status_code,
-            "body": res.text,
-        })
-
-        if res.ok and res.json().get("access_token"):
-            return res.json()["access_token"]
-
-    except Exception as e:
-        log("Long-lived Facebook token error", str(e))
-
-    return short_token
-
-
-def get_facebook_pages(user_access_token: str):
-    res = requests.get(
-        f"{GRAPH_FACEBOOK}/me/accounts",
-        params={
-            "fields": (
-                "id,name,access_token,"
-                "connected_instagram_account,"
-                "instagram_business_account{id,username,name}"
-            ),
-            "access_token": user_access_token,
-        },
-        timeout=30,
-    )
-
-    log("Facebook Pages API", {
-        "status": res.status_code,
-        "body": res.text,
-    })
-
-    res.raise_for_status()
-    return res.json().get("data", [])
-
-
-def get_page_instagram_account(page: dict) -> dict:
-    return (
-        page.get("instagram_business_account")
-        or page.get("connected_instagram_account")
-        or {}
-    )
-
-
-def subscribe_page_to_webhooks(page_id: str, page_access_token: str):
-    try:
-        res = requests.post(
-            f"{GRAPH_FACEBOOK}/{page_id}/subscribed_apps",
-            params={
-                "access_token": page_access_token,
-                "subscribed_fields": "messages,messaging_postbacks,feed",
-            },
-            timeout=30,
-        )
-
-        log("Subscribe Page to Webhooks", {
-            "page_id": page_id,
-            "status": res.status_code,
-            "body": res.text,
-        })
-
-        try:
-            return res.json()
-        except Exception:
-            return {"raw": res.text}
-
-    except Exception as e:
-        log("Subscribe Page error", str(e))
-        return {"error": str(e)}
 
 
 def exchange_instagram_code_for_token(code: str):
@@ -293,11 +195,53 @@ def exchange_instagram_code_for_token(code: str):
     return res.json()
 
 
+def get_instagram_user(access_token: str):
+    res = requests.get(
+        f"{GRAPH_INSTAGRAM}/me",
+        params={
+            "fields": "id,username,account_type",
+            "access_token": access_token,
+        },
+        timeout=30,
+    )
+
+    log("Instagram user lookup", {
+        "status": res.status_code,
+        "body": res.text,
+    })
+
+    if res.ok:
+        return res.json()
+
+    return {}
+
+
+def exchange_facebook_code_for_token(code: str) -> str:
+    res = requests.get(
+        f"{GRAPH_FACEBOOK}/oauth/access_token",
+        params={
+            "client_id": META_APP_ID,
+            "client_secret": META_APP_SECRET,
+            "redirect_uri": FACEBOOK_REDIRECT_URI,
+            "code": code,
+        },
+        timeout=30,
+    )
+
+    log("Facebook token exchange", {
+        "status": res.status_code,
+        "body": res.text,
+    })
+
+    res.raise_for_status()
+    return res.json()["access_token"]
+
+
 def upsert_business(
     instagram_business_id: str,
     username: str,
     access_token: str,
-    oauth_provider: str,
+    oauth_provider: str = "instagram_direct",
     facebook_page_id: str = "",
     facebook_page_name: str = "",
 ):
@@ -310,7 +254,7 @@ def upsert_business(
         "instagram_business_id": instagram_business_id,
         "business_name": username or f"instagram_{instagram_business_id}",
         "access_token": access_token or "",
-        "page_access_token": access_token or "",
+        "page_access_token": None,
         "token_preview": safe_token(access_token),
         "oauth_provider": oauth_provider,
         "facebook_page_id": facebook_page_id or None,
@@ -412,6 +356,9 @@ def get_ai_reply(user_text: str, business: dict):
         return "Xabaringiz qabul qilindi 😊"
 
     try:
+        api_key = business.get("mistral_api_key") or MISTRAL_API_KEY
+        model = business.get("ai_model") or "mistral-small-latest"
+
         system_prompt = f"""
 You are a professional Instagram sales assistant for this business.
 
@@ -434,11 +381,11 @@ Rules:
         res = requests.post(
             "https://api.mistral.ai/v1/chat/completions",
             headers={
-                "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json={
-                "model": "mistral-small-latest",
+                "model": model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_text},
@@ -467,8 +414,8 @@ Rules:
 
 def get_business_access_token(business: dict):
     return (
-        business.get("page_access_token")
-        or business.get("access_token")
+        business.get("access_token")
+        or business.get("page_access_token")
         or ""
     )
 
@@ -702,15 +649,16 @@ async def process_comment_event(entry_id: str, change: dict):
 async def home():
     return {
         "status": "ok",
-        "version": "facebook_page_oauth_primary_webhook_ready",
+        "version": "instagram_direct_primary_restored",
         "webhook": "/webhook",
-        "connect_facebook": "/connect-facebook",
+        "connect": "/connect-instagram",
         "connect_instagram": "/connect-instagram",
-        "recommended_connection": "/connect-facebook",
+        "connect_facebook": "/connect-facebook",
+        "recommended_connection": "/connect-instagram",
         "verify_token_set": bool(VERIFY_TOKEN),
         "meta_app_id_set": bool(META_APP_ID),
-        "facebook_redirect_uri": FACEBOOK_REDIRECT_URI,
         "instagram_redirect_uri": INSTAGRAM_REDIRECT_URI,
+        "facebook_redirect_uri": FACEBOOK_REDIRECT_URI,
     }
 
 
@@ -721,15 +669,64 @@ async def head_home():
 
 @app.get("/connect")
 async def connect():
-    return RedirectResponse("/connect-facebook")
+    return RedirectResponse("/connect-instagram")
 
 
 @app.get("/connect-instagram")
-async def connect_instagram_warning():
-    return PlainTextResponse(
-        "Instagram Direct OAuth is not recommended for this webhook automation. "
-        "Use /connect-facebook instead so the app can get the Facebook Page, connected Instagram Business account, page access token, and webhook subscription."
-    )
+async def connect_instagram():
+    params = {
+        "client_id": META_APP_ID,
+        "redirect_uri": INSTAGRAM_REDIRECT_URI,
+        "scope": ",".join([
+            "instagram_business_basic",
+            "instagram_business_manage_messages",
+            "instagram_business_manage_comments",
+        ]),
+        "response_type": "code",
+        "state": secrets.token_urlsafe(16),
+    }
+
+    auth_url = "https://www.instagram.com/oauth/authorize?" + urlencode(params)
+    return RedirectResponse(auth_url)
+
+
+@app.get("/auth/instagram/callback")
+async def instagram_callback(request: Request):
+    code = request.query_params.get("code")
+
+    if not code:
+        return PlainTextResponse("Missing Instagram code", status_code=400)
+
+    try:
+        token_data = exchange_instagram_code_for_token(code)
+
+        access_token = token_data.get("access_token")
+        user_id = normalize_id(token_data.get("user_id"))
+
+        user_info = get_instagram_user(access_token)
+        username = (
+            user_info.get("username")
+            or f"instagram_{user_id}"
+        )
+
+        upsert_business(
+            instagram_business_id=user_id,
+            username=username,
+            access_token=access_token,
+            oauth_provider="instagram_direct",
+        )
+
+        log("Instagram Direct connected", {
+            "instagram_business_id": user_id,
+            "username": username,
+            "token": safe_token(access_token),
+        })
+
+        return RedirectResponse(f"{DASHBOARD_URL}?connected=success")
+
+    except Exception as e:
+        log("Instagram OAuth error", str(e))
+        return PlainTextResponse(f"Instagram OAuth error: {str(e)}", status_code=500)
 
 
 @app.get("/connect-facebook")
@@ -756,77 +753,9 @@ async def connect_facebook():
 
 @app.get("/auth/facebook/callback")
 async def facebook_callback(request: Request):
-    code = request.query_params.get("code")
-
-    if not code:
-        return PlainTextResponse("Missing Facebook code", status_code=400)
-
-    try:
-        short_token = exchange_facebook_code_for_token(code)
-        user_token = exchange_for_long_lived_facebook_token(short_token)
-        pages = get_facebook_pages(user_token)
-
-        connected = []
-
-        for page in pages:
-            ig = get_page_instagram_account(page)
-
-            if not ig or not ig.get("id"):
-                log("Skipping page without Instagram account", page)
-                continue
-
-            instagram_business_id = normalize_id(ig.get("id"))
-
-            username = (
-                ig.get("username")
-                or ig.get("name")
-                or f"instagram_{instagram_business_id}"
-            )
-
-            upsert_business(
-                instagram_business_id=instagram_business_id,
-                username=username,
-                access_token=page.get("access_token"),
-                oauth_provider="facebook_page",
-                facebook_page_id=page.get("id"),
-                facebook_page_name=page.get("name"),
-            )
-
-            subscription = subscribe_page_to_webhooks(
-                page_id=page.get("id"),
-                page_access_token=page.get("access_token"),
-            )
-
-            connected.append({
-                "page_id": page.get("id"),
-                "page_name": page.get("name"),
-                "instagram_business_id": instagram_business_id,
-                "instagram_username": username,
-                "subscription": subscription,
-            })
-
-        if not connected:
-            return PlainTextResponse(
-                "No Instagram Business account was found. "
-                "Make sure the Instagram account is professional and connected to a Facebook Page.",
-                status_code=400,
-            )
-
-        log("Facebook OAuth connected accounts", connected)
-
-        return RedirectResponse(f"{DASHBOARD_URL}?connected=success")
-
-    except Exception as e:
-        log("Facebook OAuth error", str(e))
-        return PlainTextResponse(f"Facebook OAuth error: {str(e)}", status_code=500)
-
-
-@app.get("/auth/instagram/callback")
-async def instagram_callback_disabled(request: Request):
     return PlainTextResponse(
-        "Instagram Direct OAuth callback is disabled for webhook automation. "
-        "Please reconnect using /connect-facebook.",
-        status_code=400,
+        "Facebook callback is available, but this project is currently using Instagram Direct primary mode.",
+        status_code=200,
     )
 
 
@@ -847,6 +776,15 @@ async def debug_businesses():
     }
 
 
+@app.get("/debug/active")
+async def debug_active():
+    business = get_active_instagram_direct_business()
+    return {
+        "found": bool(business),
+        "business": sanitize_business_row(business),
+    }
+
+
 @app.get("/debug/business/{instagram_business_id}")
 async def debug_business(instagram_business_id: str):
     business = get_business(instagram_business_id)
@@ -854,24 +792,6 @@ async def debug_business(instagram_business_id: str):
         "found": bool(business),
         "business": sanitize_business_row(business),
     }
-
-
-@app.get("/debug/page/{page_id}")
-async def debug_page(page_id: str):
-    business = get_business_by_page_id(page_id)
-    return {
-        "found": bool(business),
-        "business": sanitize_business_row(business),
-    }
-
-
-@app.get("/debug/pages")
-async def debug_pages(user_token: str):
-    try:
-        pages = get_facebook_pages(user_token)
-        return {"pages": pages}
-    except Exception as e:
-        return {"error": str(e)}
 
 
 @app.get("/webhook")
