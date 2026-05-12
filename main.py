@@ -7,9 +7,11 @@ from urllib.parse import urlencode
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, JSONResponse, RedirectResponse
 from supabase import create_client
+from telegram_bot import telegram_router
 
 
 app = FastAPI()
+app.include_router(telegram_router)
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
@@ -746,7 +748,7 @@ async def process_comment_event(entry_id: str, change: dict):
 async def home():
     return {
         "status": "ok",
-        "version": "instagram_direct_primary_inbox_schema_fixed_long_lived_tokens",
+        "version": "instagram_direct_plus_telegram_router",
         "webhook": "/webhook",
         "connect": "/connect-instagram",
         "connect_instagram": "/connect-instagram",
