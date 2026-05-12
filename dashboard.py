@@ -1,6 +1,7 @@
 import os
 import hmac
 import time
+import html
 import hashlib
 import requests
 import streamlit as st
@@ -47,6 +48,33 @@ st.markdown("""
     opacity: .75;
     font-size: 13px;
 }
+.inbox-card {
+    background: rgba(120,120,120,0.08);
+    border: 1px solid rgba(120,120,120,0.16);
+    border-radius: 18px;
+    padding: 14px;
+    margin-bottom: 10px;
+}
+.inbound-msg {
+    background: rgba(99,102,241,0.13);
+    border: 1px solid rgba(99,102,241,0.20);
+    border-radius: 18px;
+    padding: 12px 14px;
+    margin: 8px 0;
+    max-width: 78%;
+}
+.outbound-msg {
+    background: rgba(34,197,94,0.13);
+    border: 1px solid rgba(34,197,94,0.20);
+    border-radius: 18px;
+    padding: 12px 14px;
+    margin: 8px 0 8px auto;
+    max-width: 78%;
+}
+.small-muted {
+    opacity: .65;
+    font-size: 12px;
+}
 .stButton button {
     border-radius: 999px;
 }
@@ -69,13 +97,13 @@ ADMIN_EMAIL = get_secret("ADMIN_EMAIL", "")
 DASHBOARD_SECRET = get_secret("DASHBOARD_SECRET")
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_BOT_USERNAME = get_secret("TELEGRAM_BOT_USERNAME", "")
+META_GRAPH_VERSION = get_secret("META_GRAPH_VERSION", "v23.0")
 
 if not all([SUPABASE_URL, SUPABASE_SERVICE_KEY, ADMIN_EMAIL, DASHBOARD_SECRET]):
     st.error("Missing SUPABASE_URL, SUPABASE_SERVICE_KEY, ADMIN_EMAIL, or DASHBOARD_SECRET.")
     st.stop()
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-
 
 DEFAULT_AI_REPLY_RULES = """- Keep answers short and comfortable.
 - Usually 1-3 short sentences.
@@ -174,10 +202,8 @@ def update_business(business_id, data):
 def safe_update_business(business, data):
     existing_keys = set(business.keys())
     filtered = {k: v for k, v in data.items() if k in existing_keys}
-
     if not filtered:
         return None
-
     return update_business(business["id"], filtered)
 
 
@@ -255,6 +281,10 @@ def get_message_count(platform=None):
         return 0
 
 
+def get_allowed_businesses():
+    return get_all_businesses() if is_admin else get_user_businesses(user_email)
+
+
 def telegram_webhook_url():
     return f"{PUBLIC_BASE_URL}/webhook/telegram"
 
@@ -283,6 +313,165 @@ def get_telegram_webhook_info():
         return response.ok, response.json()
     except Exception:
         return response.ok, {"text": response.text}
+
+
+def get_instagram_conversations(business_ids, search_text="", limit=700):
+    if not business_ids:
+        return []
+
+    try:
+        rows = (
+            supabase.table("inbox_messages")
+            .select("*")
+            .eq("platform", "instagram")
+            .in_("business_id", business_ids)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:
+        st.error(f"Could not load inbox messages: {e}")
+        return []
+
+    conversations = {}
+
+    for row in rows:
+        business_id = row.get("business_id")
+        customer_id = str(row.get("customer_id") or "").strip()
+
+        if not business_id or not customer_id:
+            continue
+
+        key = f"{business_id}::{customer_id}"
+
+        if key not in conversations:
+            conversations[key] = {
+                "business_id": business_id,
+                "customer_id": customer_id,
+                "customer_name": row.get("customer_name") or customer_id,
+                "last_message": row.get("content", ""),
+                "last_message_at": row.get("created_at", ""),
+                "unread_count": 0,
+                "total_messages": 0,
+            }
+
+        conversations[key]["total_messages"] += 1
+
+        if row.get("direction") == "inbound" and not bool(row.get("is_read", False)):
+            conversations[key]["unread_count"] += 1
+
+    results = list(conversations.values())
+
+    if search_text.strip():
+        q = search_text.lower().strip()
+        results = [
+            c for c in results
+            if q in f"{c.get('customer_id','')} {c.get('customer_name','')} {c.get('last_message','')}".lower()
+        ]
+
+    return results
+
+
+def get_conversation_messages(business_id, customer_id, limit=250):
+    try:
+        return (
+            supabase.table("inbox_messages")
+            .select("*")
+            .eq("platform", "instagram")
+            .eq("business_id", business_id)
+            .eq("customer_id", str(customer_id))
+            .order("created_at", desc=False)
+            .limit(limit)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:
+        st.error(f"Could not load conversation: {e}")
+        return []
+
+
+def mark_conversation_read(business_id, customer_id):
+    try:
+        (
+            supabase.table("inbox_messages")
+            .update({"is_read": True})
+            .eq("platform", "instagram")
+            .eq("business_id", business_id)
+            .eq("customer_id", str(customer_id))
+            .eq("direction", "inbound")
+            .execute()
+        )
+    except Exception:
+        pass
+
+
+def save_manual_outbound_message(business, customer_id, text, raw_payload=None):
+    data = {
+        "business_id": business.get("id"),
+        "instagram_business_id": business.get("instagram_business_id"),
+        "platform": "instagram",
+        "customer_id": str(customer_id),
+        "channel": "dm",
+        "direction": "outbound",
+        "role": "assistant",
+        "content": text,
+        "external_message_id": "",
+        "raw_payload": raw_payload or {},
+        "is_read": True,
+    }
+
+    try:
+        return supabase.table("inbox_messages").insert(data).execute()
+    except Exception:
+        fallback = {
+            "business_id": business.get("id"),
+            "instagram_business_id": business.get("instagram_business_id"),
+            "platform": "instagram",
+            "customer_id": str(customer_id),
+            "channel": "dm",
+            "direction": "outbound",
+            "role": "assistant",
+            "content": text,
+            "external_message_id": "",
+            "raw_payload": raw_payload or {},
+        }
+        return supabase.table("inbox_messages").insert(fallback).execute()
+
+
+def send_instagram_dm(business, recipient_id, text):
+    page_id = business.get("facebook_page_id") or business.get("page_id")
+    token = business.get("page_access_token") or business.get("access_token")
+
+    if not page_id:
+        return False, {"error": "Missing facebook_page_id for this business."}
+
+    if not token:
+        return False, {"error": "Missing page_access_token or access_token for this business."}
+
+    url = f"https://graph.facebook.com/{META_GRAPH_VERSION}/{page_id}/messages"
+
+    payload = {
+        "recipient": {"id": str(recipient_id)},
+        "message": {"text": text},
+        "messaging_type": "RESPONSE",
+    }
+
+    response = requests.post(
+        url,
+        params={"access_token": token},
+        json=payload,
+        timeout=30,
+    )
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {"text": response.text}
+
+    return response.ok, data
 
 
 if "user" not in st.session_state:
@@ -318,7 +507,7 @@ with st.sidebar:
     <div style="text-align:center;">
         <h1>🤖</h1>
         <h3>Bot Manager</h3>
-        <p>{user_email}</p>
+        <p>{html.escape(user_email)}</p>
         <b>{"Admin" if is_admin else "Business Owner"}</b>
     </div>
     """, unsafe_allow_html=True)
@@ -330,6 +519,7 @@ with st.sidebar:
             "Navigation",
             [
                 "📊 Dashboard",
+                "📥 Inbox",
                 "📋 Businesses",
                 "➕ Add Business",
                 "📲 Telegram",
@@ -342,6 +532,7 @@ with st.sidebar:
             "Navigation",
             [
                 "📊 Dashboard",
+                "📥 Inbox",
                 "📋 My Business",
                 "📲 Telegram",
             ],
@@ -356,13 +547,13 @@ with st.sidebar:
 st.markdown("""
 <div class="gradient-header">
     <h2 style="margin:0;">🤖 Instagram + Telegram Bot Dashboard</h2>
-    <p style="margin:6px 0 0 0;">Manage business knowledge, bot status, reply behavior, and messages</p>
+    <p style="margin:6px 0 0 0;">Manage business knowledge, inbox, bot status, and manual replies</p>
 </div>
 """, unsafe_allow_html=True)
 
 
 def show_metrics():
-    businesses = get_all_businesses() if is_admin else get_user_businesses(user_email)
+    businesses = get_allowed_businesses()
 
     total_businesses = len(businesses)
     active_bots = sum(1 for b in businesses if b.get("bot_enabled"))
@@ -418,7 +609,6 @@ def business_editor(business):
             language_options = ["uz", "ru", "en"]
             current_language = business.get("language", "uz")
             language_index = language_options.index(current_language) if current_language in language_options else 0
-
             language = st.selectbox("Language", language_options, index=language_index)
             tone = st.text_input("Tone", value=business.get("tone", "friendly, polite"))
 
@@ -628,8 +818,167 @@ if nav_option == "📊 Dashboard":
         st.metric("Total Telegram Messages", get_message_count("telegram"))
 
 
+elif nav_option == "📥 Inbox":
+    st.subheader("📥 Instagram Inbox")
+
+    businesses = get_allowed_businesses()
+    business_map = {b.get("id"): b for b in businesses if b.get("id")}
+    business_ids = list(business_map.keys())
+
+    if not businesses:
+        st.warning("No businesses found.")
+    else:
+        top1, top2, top3 = st.columns([1.5, 1, 1])
+
+        with top1:
+            search_text = st.text_input("Search conversations", placeholder="Customer ID, name, or message")
+
+        with top2:
+            business_filter_options = {"All businesses": None}
+            for b in businesses:
+                business_filter_options[b.get("business_name", "No name")] = b.get("id")
+
+            selected_business_filter = st.selectbox("Business", list(business_filter_options.keys()))
+
+        with top3:
+            unread_only = st.toggle("Unread only", value=False)
+
+        selected_business_id = business_filter_options[selected_business_filter]
+        filtered_business_ids = [selected_business_id] if selected_business_id else business_ids
+
+        conversations = get_instagram_conversations(filtered_business_ids, search_text=search_text)
+
+        if unread_only:
+            conversations = [c for c in conversations if c.get("unread_count", 0) > 0]
+
+        if not conversations:
+            st.info("No Instagram DM conversations yet. Send a DM from a tester/admin account to your connected Instagram business account.")
+        else:
+            left, right = st.columns([1, 2.2])
+
+            with left:
+                st.markdown("### Conversations")
+
+                options = {}
+                for c in conversations:
+                    business = business_map.get(c["business_id"], {})
+                    unread = c.get("unread_count", 0)
+                    unread_badge = f" 🔴 {unread}" if unread else ""
+                    label = f"{c.get('customer_name') or c.get('customer_id')} | {business.get('business_name', 'Business')}{unread_badge}"
+                    options[label] = c
+
+                selected_label = st.radio(
+                    "Select chat",
+                    list(options.keys()),
+                    label_visibility="collapsed",
+                )
+
+                selected_conversation = options[selected_label]
+                selected_business = business_map.get(selected_conversation["business_id"], {})
+
+                st.markdown(f"""
+                <div class="inbox-card">
+                    <b>Customer</b><br>
+                    {html.escape(str(selected_conversation.get("customer_name") or selected_conversation.get("customer_id")))}<br><br>
+                    <b>Business</b><br>
+                    {html.escape(str(selected_business.get("business_name", "")))}<br><br>
+                    <b>Platform</b><br>
+                    Instagram DM<br><br>
+                    <b>Messages</b><br>
+                    {selected_conversation.get("total_messages", 0)}
+                </div>
+                """, unsafe_allow_html=True)
+
+            with right:
+                selected_business = business_map.get(selected_conversation["business_id"])
+
+                if not selected_business:
+                    st.error("Business not found for this conversation.")
+                    st.stop()
+
+                customer_id = selected_conversation["customer_id"]
+
+                mark_conversation_read(selected_business["id"], customer_id)
+                messages = get_conversation_messages(selected_business["id"], customer_id)
+
+                header_left, header_right = st.columns([2, 1])
+
+                with header_left:
+                    st.markdown(f"### Chat with `{customer_id}`")
+                    st.caption(f"Business: {selected_business.get('business_name', '')}")
+
+                with header_right:
+                    if st.button("Refresh", use_container_width=True):
+                        st.rerun()
+
+                chat_box = st.container(height=480)
+
+                with chat_box:
+                    for msg in messages:
+                        direction = msg.get("direction")
+                        content = html.escape(str(msg.get("content", ""))).replace("\n", "<br>")
+                        created_at = html.escape(str(msg.get("created_at", "")))
+
+                        if direction == "outbound":
+                            st.markdown(
+                                f"""
+                                <div class="outbound-msg">
+                                    <b>You</b><br>
+                                    {content}
+                                    <div class="small-muted">{created_at}</div>
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(
+                                f"""
+                                <div class="inbound-msg">
+                                    <b>Customer</b><br>
+                                    {content}
+                                    <div class="small-muted">{created_at}</div>
+                                </div>
+                                """,
+                                unsafe_allow_html=True,
+                            )
+
+                with st.form("manual_instagram_reply", clear_on_submit=True):
+                    reply_text = st.text_area("Reply", placeholder="Write your reply...", height=100)
+                    send_clicked = st.form_submit_button("Send Instagram DM", type="primary", use_container_width=True)
+
+                    if send_clicked:
+                        clean_reply = reply_text.strip()
+
+                        if not clean_reply:
+                            st.error("Reply cannot be empty.")
+                        else:
+                            ok, result = send_instagram_dm(
+                                business=selected_business,
+                                recipient_id=customer_id,
+                                text=clean_reply,
+                            )
+
+                            if ok:
+                                try:
+                                    save_manual_outbound_message(
+                                        business=selected_business,
+                                        customer_id=customer_id,
+                                        text=clean_reply,
+                                        raw_payload=result,
+                                    )
+                                except Exception as e:
+                                    st.warning(f"Message sent, but database save failed: {e}")
+
+                                st.success("Reply sent.")
+                                time.sleep(0.5)
+                                st.rerun()
+                            else:
+                                st.error("Failed to send Instagram DM.")
+                                st.json(result)
+
+
 elif nav_option in ["📋 Businesses", "📋 My Business"]:
-    businesses = get_all_businesses() if is_admin else get_user_businesses(user_email)
+    businesses = get_allowed_businesses()
 
     if not businesses:
         st.warning("No businesses found.")
@@ -747,7 +1096,6 @@ elif nav_option == "📲 Telegram":
     st.divider()
 
     st.markdown("### Webhook")
-
     st.code(telegram_webhook_url())
 
     col1, col2, col3 = st.columns(3)
@@ -777,7 +1125,7 @@ elif nav_option == "📲 Telegram":
 
     st.markdown("### Telegram Business Control")
 
-    businesses = get_all_businesses() if is_admin else get_user_businesses(user_email)
+    businesses = get_allowed_businesses()
 
     if not businesses:
         st.warning("No businesses found.")
