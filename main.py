@@ -3,7 +3,7 @@ import time
 import secrets
 import requests
 from urllib.parse import urlencode
-from typing import Optional, List, Dict
+from typing import List, Dict
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
@@ -59,10 +59,6 @@ processed_comment_ids = {}
 processed_message_ids = {}
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def normalize_id(value) -> str:
     return str(value or "").strip()
 
@@ -105,33 +101,6 @@ def already_processed(cache: dict, event_id: str) -> bool:
     return False
 
 
-def safe_db_insert(table: str, data: dict):
-    try:
-        return supabase.table(table).insert(data).execute()
-    except Exception as e:
-        print(f"{table} insert skipped/error:", str(e))
-        return None
-
-
-def safe_db_upsert(table: str, data: dict, on_conflict: str = ""):
-    try:
-        if on_conflict:
-            return supabase.table(table).upsert(data, on_conflict=on_conflict).execute()
-        return supabase.table(table).upsert(data).execute()
-    except Exception as e:
-        print(f"{table} upsert skipped/error:", str(e))
-        return None
-
-
-def safe_db_select(builder, fallback=None):
-    try:
-        result = builder.execute()
-        return result.data or fallback or []
-    except Exception as e:
-        print("DB select skipped/error:", str(e))
-        return fallback or []
-
-
 def sanitize_business_row(row: dict):
     if not row:
         return None
@@ -145,7 +114,6 @@ def sanitize_business_row(row: dict):
         "openai_api_key",
         "gemini_api_key",
         "anthropic_api_key",
-        "whatsapp_access_token",
     ]:
         clean[key] = safe_token(clean.get(key, ""))
 
@@ -339,203 +307,6 @@ def save_chat_message(
         print("Chat memory save error:", str(e))
 
 
-def get_conversation_state(
-    business_id: str,
-    platform: str,
-    customer_id: str,
-    channel: str,
-) -> str:
-    try:
-        result = (
-            supabase.table("conversations")
-            .select("state")
-            .eq("business_id", business_id)
-            .eq("platform", platform)
-            .eq("customer_id", customer_id)
-            .eq("channel", channel)
-            .limit(1)
-            .execute()
-        )
-
-        if result.data:
-            return result.data[0].get("state") or "AI_ACTIVE"
-
-    except Exception as e:
-        print("Conversation state unavailable:", str(e))
-
-    return "AI_ACTIVE"
-
-
-def upsert_customer(
-    business_id: str,
-    platform: str,
-    customer_id: str,
-    display_name: str = "",
-):
-    if not business_id or not customer_id:
-        return
-
-    safe_db_upsert(
-        "customers",
-        {
-            "business_id": business_id,
-            "platform": platform,
-            "customer_id": customer_id,
-            "display_name": display_name or customer_id,
-            "status": "new",
-            "last_seen_at": now_iso(),
-            "updated_at": now_iso(),
-        },
-        on_conflict="business_id,platform,customer_id",
-    )
-
-
-def upsert_conversation(
-    business_id: str,
-    platform: str,
-    customer_id: str,
-    channel: str,
-):
-    if not business_id or not customer_id:
-        return
-
-    current_state = get_conversation_state(
-        business_id=business_id,
-        platform=platform,
-        customer_id=customer_id,
-        channel=channel,
-    )
-
-    safe_db_upsert(
-        "conversations",
-        {
-            "business_id": business_id,
-            "platform": platform,
-            "customer_id": customer_id,
-            "channel": channel,
-            "state": current_state,
-            "last_message_at": now_iso(),
-            "updated_at": now_iso(),
-        },
-        on_conflict="business_id,platform,customer_id,channel",
-    )
-
-
-def save_inbox_message(
-    business_id: str,
-    platform: str,
-    customer_id: str,
-    channel: str,
-    direction: str,
-    role: str,
-    content: str,
-    external_message_id: str = "",
-    raw_payload: Optional[dict] = None,
-):
-    if not business_id or not customer_id or not content:
-        return
-
-    safe_db_insert(
-        "inbox_messages",
-        {
-            "business_id": business_id,
-            "platform": platform,
-            "customer_id": customer_id,
-            "channel": channel,
-            "direction": direction,
-            "role": role,
-            "content": content[:4000],
-            "external_message_id": external_message_id or "",
-            "raw_payload": raw_payload or {},
-            "created_at": now_iso(),
-        },
-    )
-
-
-def detect_button_trigger(text: str) -> str:
-    t = (text or "").lower()
-
-    if any(x in t for x in ["catalog", "katalog", "каталог", "price", "narx", "цена", "прайс", "nechpul", "qancha"]):
-        return "catalog"
-
-    if any(x in t for x in ["optom", "оптом", "wholesale", "sotrud", "сотруд", "hamkor", "kazakhstan", "казахстан"]):
-        return "wholesale"
-
-    if any(x in t for x in ["delivery", "dostavka", "доставка", "yetkaz", "достав"]):
-        return "delivery"
-
-    if any(x in t for x in ["phone", "call", "tel", "номер", "aloqa", "связ", "whatsapp", "telegram"]):
-        return "contact"
-
-    return "default"
-
-
-def get_business_buttons(business_id: str, trigger: str = "default") -> List[dict]:
-    try:
-        result = (
-            supabase.table("business_buttons")
-            .select("*")
-            .eq("business_id", business_id)
-            .eq("is_active", True)
-            .or_(f"trigger.eq.{trigger},trigger.eq.default")
-            .order("sort_order")
-            .limit(4)
-            .execute()
-        )
-
-        return result.data or []
-
-    except Exception as e:
-        print("Buttons unavailable:", str(e))
-        return []
-
-
-def build_quick_replies(buttons: List[dict]) -> List[dict]:
-    quick_replies = []
-
-    for b in buttons[:4]:
-        title = (b.get("title") or "").strip()[:20]
-        action_type = (b.get("action_type") or "message").strip()
-        action_value = (b.get("action_value") or title).strip()
-
-        if not title:
-            continue
-
-        if action_type == "message":
-            quick_replies.append({
-                "content_type": "text",
-                "title": title,
-                "payload": f"BTN::{b.get('id', title)}::{action_value}"[:1000],
-            })
-
-    return quick_replies
-
-
-def format_buttons_as_text(buttons: List[dict]) -> str:
-    if not buttons:
-        return ""
-
-    lines = []
-
-    for b in buttons[:4]:
-        title = (b.get("title") or "").strip()
-        action_type = (b.get("action_type") or "message").strip()
-        action_value = (b.get("action_value") or "").strip()
-
-        if not title:
-            continue
-
-        if action_type in ["url", "phone"] and action_value:
-            lines.append(f"{title}: {action_value}")
-        else:
-            lines.append(f"• {title}")
-
-    if not lines:
-        return ""
-
-    return "\n\n" + "\n".join(lines)
-
-
 def meta_get(url: str, params: dict, timeout: int = 30) -> dict:
     try:
         res = requests.get(url, params=params, timeout=timeout)
@@ -567,6 +338,7 @@ def extract_insight_value(insights_data: dict, metric_name: str, default: int = 
         for item in insights_data.get("data", []):
             if item.get("name") == metric_name:
                 values = item.get("values") or []
+
                 if not values:
                     return default
 
@@ -574,11 +346,13 @@ def extract_insight_value(insights_data: dict, metric_name: str, default: int = 
 
                 if isinstance(latest, dict):
                     total = 0
+
                     for value in latest.values():
                         try:
                             total += int(value or 0)
                         except Exception:
                             pass
+
                     return total
 
                 return int(latest or 0)
@@ -957,14 +731,6 @@ def upsert_business(
         "memory_enabled": True,
         "memory_limit": MAX_MEMORY_MESSAGES,
         "analytics_enabled": True,
-        "automation_mode": "FULL_AUTO",
-        "auto_reply_dms": True,
-        "auto_reply_comments": True,
-        "auto_send_catalog": True,
-        "human_takeover_enabled": True,
-        "whatsapp_enabled": False,
-        "whatsapp_phone_number_id": "",
-        "whatsapp_access_token": "",
     }
 
     result = (
@@ -977,8 +743,7 @@ def upsert_business(
 
 
 def build_business_context(business: dict) -> str:
-    return f"""
-Business name:
+    return f"""Business name:
 {business.get("business_name", "")}
 
 Business type:
@@ -1024,112 +789,148 @@ Telegram bag / meshok:
 {business.get("telegram_bag", "")}
 
 Main business knowledge:
-{business.get("knowledge", "")}
-"""
+{business.get("knowledge", "")}"""
 
 
-def build_flow_instruction(user_text: str) -> str:
-    trigger = detect_button_trigger(user_text)
-
-    if trigger == "wholesale":
-        return "Customer likely wants wholesale/cooperation. Ask only one simple next question about product type or approximate quantity. Do not ask for all details at once."
-
-    if trigger == "catalog":
-        return "Customer asks about price/catalog. Give a short answer and mention catalog if available. Do not collect full order details yet."
-
-    if trigger == "delivery":
-        return "Customer asks about delivery. Answer using delivery information. Ask city/country only if needed."
-
-    if trigger == "contact":
-        return "Customer wants contact. Provide sales phone or contact link if available. Keep it short."
-
-    return "Use progressive lead collection. Do not ask for name, phone, address, product and quantity all at once unless the customer is clearly ready to order."
-
-
-def build_system_prompt(business: dict, user_text: str = "") -> str:
+def build_system_prompt(business: dict) -> str:
     bot_language_mode = business.get("bot_language_mode", "auto")
 
     language_rule = """
-- Reply naturally in the SAME language the customer uses.
-- If customer writes in Uzbek Latin, reply in Uzbek Latin.
-- If customer writes in Uzbek Cyrillic, reply in Uzbek Cyrillic.
-- If customer writes in Russian, reply in Russian.
-- If customer writes in English, reply in English.
-"""
+
+Reply naturally in the SAME language the customer uses.
+
+If customer writes in Uzbek Latin, reply in Uzbek Latin.
+
+If customer writes in Uzbek Cyrillic, reply in Uzbek Cyrillic.
+
+If customer writes in Russian, reply in Russian.
+
+If customer writes in English, reply in English."""
 
     if bot_language_mode in ["uz", "ru", "en"]:
         language_rule = f"""
-- Reply in this business selected language only: {bot_language_mode}.
-- Keep the reply natural and suitable for Instagram/WhatsApp.
-"""
 
-    return f"""
-You are an autonomous Instagram and WhatsApp sales assistant for this business.
+Reply in this business selected language only: {bot_language_mode}.
+
+Keep the reply natural and suitable for Instagram DM."""
+
+    return f"""You are a professional Instagram sales assistant for this business.
 
 Business Information:
 {build_business_context(business)}
 
 IMPORTANT LANGUAGE RULES:
 
-- Understand Uzbek, Russian, English, mixed language, slang, typos, and informal texting.
-- Understand ALL Uzbek dialects and regional speaking styles.
-- Understand Uzbek written in BOTH Latin and Cyrillic alphabets.
+Understand ALL Uzbek dialects and regional speaking styles.
+
+Understand Uzbek written in BOTH Latin and Cyrillic alphabets.
+
+Understand mixed Uzbek + Russian messages.
+
+Understand slang, short forms, typos, informal texting, and voice-message style writing.
+
+Understand customers even if grammar is incorrect.
 {language_rule}
-- Never say you do not understand because of dialect, spelling, or grammar.
-- Infer the customer’s meaning from context.
+
+Never say you do not understand because of dialect, spelling, or grammar.
+
+Infer the customer’s meaning from context.
 
 SALES RULES:
 
-- Keep replies short, clear, natural, and sales-focused.
-- Sound like a real human sales consultant, not a robot.
-- Do not write long paragraphs.
-- Do not repeat the same request multiple times.
-- Do not force customers to give information.
-- Ask only ONE simple next question when needed.
-- Answer the exact question first.
-- Continue naturally using previous conversation memory.
+Keep replies short, clear, natural, and sales-focused.
 
-FLOW RULES:
-{build_flow_instruction(user_text)}
+Sound like a real human sales manager, not a robot.
 
-LEAD COLLECTION RULES:
+Do not write long explanations.
 
-- Do not ask for name, phone, address, product, and quantity all at once.
-- Collect details step by step only when the customer is ready to order.
-- First help the customer choose product / quantity / delivery direction.
-- Ask phone/address only near the order stage.
+Do not repeat the same request multiple times.
+
+Do not force customers to give information.
+
+Continue the conversation naturally using the previous conversation memory.
+
+Be polite, helpful, and warm.
+
+Answer the exact question first.
+
+OPENING CONVERSATION RULES:
+
+When the customer starts a new conversation or only says hello:
+
+Greet them.
+
+Introduce yourself as the business virtual assistant.
+
+Politely say that for faster help they can leave:name, phone number, address, interested product, and quantity.
+
+Say a representative will contact them soon.
+
+Do not force them.
+
+Do not keep asking if they ignore it.
 
 CATALOG AND PRICE RULES:
 
-- If customer asks about price, catalog, product list, "narx", "nechpul", "прайс", "каталог", or similar:
-  send or mention the catalog link if available.
-- If catalog link is empty, politely say the manager will clarify.
+If customer asks about price, catalog, product list, "narx", "nechpul", "прайс", "каталог", or similar:
+send the catalog link if available.
+
+If catalog link is empty, politely say the manager will share details.
 
 CONTACT RULES:
 
-- If customer wants fast contact, phone number, Telegram, WhatsApp, manager, or "aloqa":
-  provide the sales phone if available.
-- Mention Telegram and WhatsApp are available only if business information says so.
+If customer wants fast contact, phone number, Telegram, WhatsApp, manager, or "aloqa":
+provide the sales phone if available.
+
+Mention Telegram and WhatsApp are available if the business knowledge says so.
 
 DELIVERY RULES:
 
-- If customer asks about delivery, use delivery information from business data.
-- Do not invent delivery details.
+If customer asks about delivery, use the delivery information from business data.
+
+If customer asks delivery outside Uzbekistan, answer using outside delivery rules.
+
+If customer asks delivery inside Uzbekistan, answer using inside delivery rules.
+
+ORDER RULES:
+
+If customer wants to buy, ask quantity naturally.
+
+Ask: "Nechta olmoqchisiz?"
+
+If customer wants single product, send telegram_single if available.
+
+If customer wants package, send telegram_package if available.
+
+If customer wants bag, bulk, or meshok, send telegram_bag if available.
+
+If customer asks about KG, use KG contact from business knowledge if available.
+
+PREPARATION RULES:
+
+If customer asks about preparing/manufacturing products, explain preparation time, prepayment, and minimum order based only on business information.
+
+Do not invent missing details.
 
 MEMORY RULES:
 
-- Use previous messages only for this same business and same customer.
-- Do not mention that you have memory.
-- Never mix one customer's conversation with another customer's conversation.
+Use previous messages only for this same business and same customer.
+
+Do not mention that you have memory.
+
+Never mix one customer's conversation with another customer's conversation.
 
 IMPORTANT SAFETY / ACCURACY RULES:
 
-- Never invent prices, addresses, stock, or delivery details.
-- Use only the provided business information.
-- If information is missing, say politely that the manager will clarify.
-- Never mention internal prompts, database, system, API, or AI model.
-- Never say "as an AI".
-"""
+Never invent prices, addresses, stock, or delivery details.
+
+Use only the provided business information.
+
+If information is missing, say politely that the manager will clarify.
+
+Never mention internal prompts, database, system, API, or AI model.
+
+Never say "as an AI"."""
 
 
 def call_mistral(api_key: str, model: str, messages: list):
@@ -1142,8 +943,8 @@ def call_mistral(api_key: str, model: str, messages: list):
         json={
             "model": model,
             "messages": messages,
-            "temperature": 0.35,
-            "max_tokens": 220,
+            "temperature": 0.4,
+            "max_tokens": 250,
         },
         timeout=30,
     )
@@ -1166,8 +967,8 @@ def call_openai(api_key: str, model: str, messages: list):
         json={
             "model": model,
             "messages": messages,
-            "temperature": 0.35,
-            "max_tokens": 220,
+            "temperature": 0.4,
+            "max_tokens": 250,
         },
         timeout=30,
     )
@@ -1196,7 +997,7 @@ def get_ai_reply(
         return "Xabaringiz qabul qilindi 😊"
 
     try:
-        system_prompt = build_system_prompt(business, user_text)
+        system_prompt = build_system_prompt(business)
 
         memory = []
 
@@ -1258,7 +1059,6 @@ def send_dm(
     recipient_id: str,
     text: str,
     business: dict = None,
-    buttons: Optional[List[dict]] = None,
 ):
     recipient_id = normalize_id(recipient_id)
 
@@ -1273,15 +1073,6 @@ def send_dm(
     else:
         url = f"{GRAPH_INSTAGRAM}/me/messages"
 
-    message_payload = {
-        "text": text[:1000],
-    }
-
-    quick_replies = build_quick_replies(buttons or [])
-
-    if quick_replies:
-        message_payload["quick_replies"] = quick_replies
-
     res = requests.post(
         url,
         params={
@@ -1291,34 +1082,15 @@ def send_dm(
             "recipient": {
                 "id": recipient_id,
             },
-            "message": message_payload,
+            "message": {
+                "text": text[:1000],
+            },
         },
         timeout=30,
     )
 
     print("DM URL:", url)
     print("DM result:", res.status_code, res.text)
-
-    if not res.ok and buttons:
-        fallback_text = (text + format_buttons_as_text(buttons))[:1000]
-
-        res = requests.post(
-            url,
-            params={
-                "access_token": access_token,
-            },
-            json={
-                "recipient": {
-                    "id": recipient_id,
-                },
-                "message": {
-                    "text": fallback_text,
-                },
-            },
-            timeout=30,
-        )
-
-        print("DM fallback result:", res.status_code, res.text)
 
     return res
 
@@ -1349,99 +1121,6 @@ def reply_to_comment(
     print("Comment result:", res.status_code, res.text)
 
     return res
-
-
-async def handle_customer_message(
-    business: dict,
-    platform: str,
-    customer_id: str,
-    channel: str,
-    text: str,
-    external_message_id: str = "",
-    raw_payload: Optional[dict] = None,
-):
-    business_id = business.get("id")
-
-    upsert_customer(
-        business_id=business_id,
-        platform=platform,
-        customer_id=customer_id,
-    )
-
-    upsert_conversation(
-        business_id=business_id,
-        platform=platform,
-        customer_id=customer_id,
-        channel=channel,
-    )
-
-    save_inbox_message(
-        business_id=business_id,
-        platform=platform,
-        customer_id=customer_id,
-        channel=channel,
-        direction="inbound",
-        role="customer",
-        content=text,
-        external_message_id=external_message_id,
-        raw_payload=raw_payload,
-    )
-
-    state = get_conversation_state(
-        business_id=business_id,
-        platform=platform,
-        customer_id=customer_id,
-        channel=channel,
-    )
-
-    if state in ["HUMAN_ACTIVE", "PAUSED"]:
-        print("AI paused for conversation:", {
-            "business_id": business_id,
-            "platform": platform,
-            "customer_id": customer_id,
-            "channel": channel,
-            "state": state,
-        })
-        return None
-
-    if not business.get("bot_enabled", True):
-        print("Bot disabled for business")
-        return None
-
-    if channel == "dm" and business.get("auto_reply_dms") is False:
-        print("Auto reply DMs disabled")
-        return None
-
-    if channel == "comment" and business.get("auto_reply_comments") is False:
-        print("Auto reply comments disabled")
-        return None
-
-    reply_text = get_ai_reply(
-        user_text=text,
-        business=business,
-        customer_id=customer_id,
-        channel=channel,
-    )
-
-    trigger = detect_button_trigger(text)
-    buttons = get_business_buttons(business_id, trigger=trigger)
-
-    save_inbox_message(
-        business_id=business_id,
-        platform=platform,
-        customer_id=customer_id,
-        channel=channel,
-        direction="outbound",
-        role="assistant",
-        content=reply_text,
-        external_message_id="",
-        raw_payload={"buttons": buttons},
-    )
-
-    return {
-        "reply": reply_text,
-        "buttons": buttons,
-    }
 
 
 async def process_messaging_event(entry_id: str, messaging: dict):
@@ -1481,29 +1160,28 @@ async def process_messaging_event(entry_id: str, messaging: dict):
     if not business:
         return
 
-    access_token = business.get("access_token") or business.get("page_access_token")
+    if not business.get("bot_enabled", True):
+        print("Bot disabled for business")
+        return
+
+    access_token = business.get("access_token")
 
     if not access_token:
         return
 
-    result = await handle_customer_message(
+    reply_text = get_ai_reply(
+        user_text=message_text,
         business=business,
-        platform="instagram",
         customer_id=sender_id,
         channel="dm",
-        text=message_text,
-        external_message_id=message_id,
-        raw_payload=messaging,
     )
 
-    if result:
-        send_dm(
-            access_token=access_token,
-            recipient_id=sender_id,
-            text=result["reply"],
-            business=business,
-            buttons=result.get("buttons"),
-        )
+    send_dm(
+        access_token=access_token,
+        recipient_id=sender_id,
+        text=reply_text,
+        business=business,
+    )
 
 
 async def process_comment_event(entry_id: str, change: dict):
@@ -1536,46 +1214,40 @@ async def process_comment_event(entry_id: str, change: dict):
     if not business:
         return
 
-    access_token = business.get("access_token") or business.get("page_access_token")
+    if not business.get("bot_enabled", True):
+        print("Bot disabled for business")
+        return
+
+    access_token = business.get("access_token")
 
     if not access_token:
         return
 
-    result = await handle_customer_message(
+    reply_text = get_ai_reply(
+        user_text=comment_text,
         business=business,
-        platform="instagram",
         customer_id=commenter_id,
         channel="comment",
-        text=comment_text,
-        external_message_id=comment_id,
-        raw_payload=change,
     )
 
-    if result:
-        reply_to_comment(
-            access_token=access_token,
-            comment_id=comment_id,
-            text=result["reply"],
-            business=business,
-        )
+    reply_to_comment(
+        access_token=access_token,
+        comment_id=comment_id,
+        text=reply_text,
+        business=business,
+    )
 
 
 @app.get("/")
 async def home():
     return {
         "status": "ok",
-        "version": "previous_working_plus_phase1_v1",
+        "version": "analytics_basic_reliable_metrics_v2",
         "connect_instagram": "/connect-instagram",
         "connect_facebook": "/connect-facebook",
         "analytics_sync": "/analytics/sync",
         "debug_businesses": "/debug/businesses",
-        "webhook": "/webhook",
     }
-
-
-@app.head("/")
-async def home_head():
-    return PlainTextResponse("", status_code=200)
 
 
 @app.api_route("/analytics/sync", methods=["GET", "POST"])
@@ -1933,71 +1605,6 @@ async def clear_memory(business_id: str, customer_id: str, channel: str = "dm"):
     }
 
 
-@app.get("/debug/inbox")
-async def debug_inbox(business_id: str, limit: int = 50):
-    result = safe_db_select(
-        supabase.table("inbox_messages")
-        .select("*")
-        .eq("business_id", business_id)
-        .order("created_at", desc=True)
-        .limit(limit),
-        fallback=[],
-    )
-
-    return {
-        "count": len(result),
-        "messages": result,
-    }
-
-
-@app.post("/dashboard/conversation/state")
-async def dashboard_update_conversation_state(request: Request):
-    data = await request.json()
-
-    if DASHBOARD_SECRET and data.get("dashboard_secret") != DASHBOARD_SECRET:
-        return JSONResponse(
-            content={
-                "status": "error",
-                "message": "Invalid dashboard secret",
-            },
-            status_code=403,
-        )
-
-    business_id = data.get("business_id")
-    platform = data.get("platform", "instagram")
-    customer_id = data.get("customer_id")
-    channel = data.get("channel", "dm")
-    state = data.get("state", "AI_ACTIVE")
-
-    if state not in ["AI_ACTIVE", "HUMAN_ACTIVE", "PAUSED"]:
-        return JSONResponse(
-            content={
-                "status": "error",
-                "message": "Invalid state",
-            },
-            status_code=400,
-        )
-
-    safe_db_upsert(
-        "conversations",
-        {
-            "business_id": business_id,
-            "platform": platform,
-            "customer_id": customer_id,
-            "channel": channel,
-            "state": state,
-            "updated_at": now_iso(),
-            "last_message_at": now_iso(),
-        },
-        on_conflict="business_id,platform,customer_id,channel",
-    )
-
-    return {
-        "status": "ok",
-        "state": state,
-    }
-
-
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     params = request.query_params
@@ -2078,12 +1685,12 @@ async def receive_webhook(request: Request):
 @app.get("/privacy")
 async def privacy():
     return PlainTextResponse(
-        "Privacy Policy: This app collects Instagram messages, comments, and analytics data to provide automated AI replies, inbox tools, buttons, human takeover, and business dashboard analytics."
+        "Privacy Policy: This app collects Instagram messages, comments, and analytics data to provide automated AI replies and business dashboard analytics."
     )
 
 
 @app.get("/terms")
 async def terms():
     return PlainTextResponse(
-        "Terms of Service: This app provides automated Instagram replies, inbox tools, buttons, human takeover, and analytics dashboard tools using AI."
+        "Terms of Service: This app provides automated Instagram replies and analytics dashboard tools using AI."
     )
