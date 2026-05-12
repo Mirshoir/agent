@@ -77,6 +77,15 @@ if not all([SUPABASE_URL, SUPABASE_SERVICE_KEY, ADMIN_EMAIL, DASHBOARD_SECRET]):
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 
+DEFAULT_AI_REPLY_RULES = """- Keep answers short and comfortable.
+- Usually 1-3 short sentences.
+- Do not send catalog automatically.
+- Send catalog only if customer asks for catalog, prices, models, collection, or photos.
+- If customer only greets, greet back and ask what they need.
+- Do not overload customer with too much information.
+- Sound natural like a real sales manager."""
+
+
 def normalize_email(email):
     return str(email or "").strip().lower()
 
@@ -362,7 +371,7 @@ with st.sidebar:
 st.markdown("""
 <div class="gradient-header">
     <h2 style="margin:0;">🤖 Instagram + Telegram Bot Dashboard</h2>
-    <p style="margin:6px 0 0 0;">Manage business knowledge, bot status, and messages</p>
+    <p style="margin:6px 0 0 0;">Manage business knowledge, bot status, reply behavior, and messages</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -429,6 +438,75 @@ def business_editor(business):
             tone = st.text_input("Tone", value=business.get("tone", "friendly, polite"))
 
         bot_enabled = st.toggle("Main Bot Enabled", value=bool(business.get("bot_enabled", True)))
+
+        st.divider()
+        st.subheader("💬 AI Reply Behavior")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            reply_style_options = [
+                "short_comfortable",
+                "very_short",
+                "normal_sales",
+            ]
+            current_reply_style = business.get("reply_style", "short_comfortable")
+            reply_style_index = reply_style_options.index(current_reply_style) if current_reply_style in reply_style_options else 0
+
+            reply_style = st.selectbox(
+                "Reply Style",
+                reply_style_options,
+                index=reply_style_index,
+                help="short_comfortable is recommended.",
+                disabled="reply_style" not in business,
+            )
+
+            max_tokens = st.number_input(
+                "AI Max Tokens",
+                min_value=50,
+                max_value=500,
+                value=int(business.get("ai_max_tokens", 130) or 130),
+                step=10,
+                disabled="ai_max_tokens" not in business,
+            )
+
+        with col2:
+            catalog_policy_options = [
+                "only_when_customer_asks",
+                "offer_when_relevant",
+                "never_send",
+            ]
+            current_catalog_policy = business.get("catalog_policy", "only_when_customer_asks")
+            catalog_policy_index = catalog_policy_options.index(current_catalog_policy) if current_catalog_policy in catalog_policy_options else 0
+
+            catalog_policy = st.selectbox(
+                "Catalog Policy",
+                catalog_policy_options,
+                index=catalog_policy_index,
+                help="Use only_when_customer_asks to avoid automatic catalog messages.",
+                disabled="catalog_policy" not in business,
+            )
+
+            temperature = st.number_input(
+                "AI Temperature",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(business.get("ai_temperature", 0.5) or 0.5),
+                step=0.1,
+                disabled="ai_temperature" not in business,
+            )
+
+        ai_reply_rules = st.text_area(
+            "AI Reply Rules",
+            value=business.get("ai_reply_rules", DEFAULT_AI_REPLY_RULES),
+            height=150,
+            disabled="ai_reply_rules" not in business,
+            help="These rules should be used by main.py when generating replies.",
+        )
+
+        st.caption(
+            "Recommended: reply_style = short_comfortable, catalog_policy = only_when_customer_asks, max_tokens = 130, temperature = 0.5"
+        )
 
         st.divider()
         st.subheader("📸 Instagram")
@@ -530,6 +608,11 @@ def business_editor(business):
                 "language": language,
                 "tone": tone.strip(),
                 "bot_enabled": bot_enabled,
+                "reply_style": reply_style,
+                "catalog_policy": catalog_policy,
+                "ai_reply_rules": ai_reply_rules.strip(),
+                "ai_max_tokens": int(max_tokens),
+                "ai_temperature": float(temperature),
                 "auto_reply_dms": auto_reply_dms,
                 "auto_reply_comments": auto_reply_comments,
                 "telegram_bot_enabled": telegram_enabled,
@@ -625,6 +708,20 @@ elif nav_option == "➕ Add Business" and is_admin:
         prices = st.text_area("Prices")
         delivery_info = st.text_area("Delivery Info")
         faq = st.text_area("FAQ")
+        catalog_link = st.text_input("Catalog Link")
+        sales_phone = st.text_input("Sales Phone")
+
+        st.divider()
+        st.subheader("💬 Default AI Reply Behavior")
+
+        reply_style = st.selectbox("Reply Style", ["short_comfortable", "very_short", "normal_sales"])
+        catalog_policy = st.selectbox("Catalog Policy", ["only_when_customer_asks", "offer_when_relevant", "never_send"])
+        ai_max_tokens = st.number_input("AI Max Tokens", min_value=50, max_value=500, value=130, step=10)
+        ai_temperature = st.number_input("AI Temperature", min_value=0.0, max_value=1.0, value=0.5, step=0.1)
+        ai_reply_rules = st.text_area("AI Reply Rules", value=DEFAULT_AI_REPLY_RULES, height=150)
+
+        st.divider()
+
         knowledge = st.text_area("Main Knowledge Prompt", height=180)
 
         submitted = st.form_submit_button("Create Business", type="primary", use_container_width=True)
@@ -651,11 +748,16 @@ elif nav_option == "➕ Add Business" and is_admin:
                     "delivery_info": delivery_info.strip(),
                     "working_hours": "",
                     "faq": faq.strip(),
-                    "catalog_link": "",
-                    "sales_phone": "",
+                    "catalog_link": catalog_link.strip(),
+                    "sales_phone": sales_phone.strip(),
                     "telegram_single": "",
                     "telegram_package": "",
                     "telegram_bag": "",
+                    "reply_style": reply_style,
+                    "catalog_policy": catalog_policy,
+                    "ai_reply_rules": ai_reply_rules.strip(),
+                    "ai_max_tokens": int(ai_max_tokens),
+                    "ai_temperature": float(ai_temperature),
                 }
 
                 try:
