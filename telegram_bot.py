@@ -22,10 +22,8 @@ MESSAGE_BUFFER = {}
 def log(title, data=None):
     print("\n" + "=" * 80)
     print(title)
-
     if data is not None:
         print(data)
-
     print("=" * 80 + "\n")
 
 
@@ -37,7 +35,6 @@ def get_active_business():
         .limit(1)
         .execute()
     )
-
     return result.data[0] if result.data else None
 
 
@@ -86,9 +83,7 @@ def get_recent_chat_history(customer_id: str, limit: int = 10):
             .limit(limit)
             .execute()
         )
-
         return result.data or []
-
     except Exception as e:
         log("Could not load Telegram history", str(e))
         return []
@@ -111,60 +106,67 @@ Business info:
 IMPORTANT BEHAVIOR RULES:
 
 - Speak naturally like a real Telegram sales manager.
-- Keep answers SHORT.
-- Usually 1-4 sentences only.
+- Keep answers short and comfortable.
+- Usually 1-3 short sentences.
 - Never dump all business information at once.
 - Never write huge lists unless customer explicitly asks.
+- Never overwhelm the customer.
 - Ask follow-up questions naturally.
-- Focus on selling and continuing conversation.
+- Focus on selling and continuing the conversation.
 - Sound warm, confident, and human.
 - Use emojis lightly.
 - Reply in the customer's language.
-- If customer says only "hello", introduce briefly and ask what product they need.
-- If customer asks about products, answer briefly first, then ask what exactly interests them.
-- Give catalog only if relevant.
-- Never overwhelm the customer.
 - Avoid AI-style formatting.
 - Avoid long markdown sections.
 - Avoid giant bullet lists.
 - Talk like a real Uzbek sales manager.
 
+CATALOG RULE:
+
+- Do NOT offer catalog automatically.
+- Do NOT send catalog in greeting.
+- Do NOT ask "Do you want to see catalog?" in greeting.
+- Send catalog ONLY if the customer explicitly asks for:
+  catalog, katalog, models, modellar, price list, narxlar, collection, kolleksiya, photos, rasmlar.
+- If customer only says hello, greet and ask what they need.
+- If customer asks what you sell, answer briefly and ask what product interests them.
+- One main idea per message.
+
 GOOD EXAMPLE:
-Customer: Hello
+Customer: Assalomu alaykum
 Assistant:
-Assalomu alaykum 😊
-Milana Premium virtual yordamchisiman.
-Qaysi mahsulot sizni qiziqtiryapti?
+Va alaykum assalom! 😊
+
+Milana Premiumga xush kelibsiz! Qanday yordam kerak? Qiziqayotgan mahsulotingiz bormi?
 
 GOOD EXAMPLE:
 Customer: What do you sell?
 Assistant:
-Bizda premium kiyim va tekstil mahsulotlari mavjud 😊
-Wholesale, eksport va custom buyurtmalar qilamiz.
-Qaysi turdagi mahsulot kerak edi?
+Bizda premium kiyim va tekstil mahsulotlari bor 😊
+Qaysi mahsulot sizni qiziqtiryapti?
 
 GOOD EXAMPLE:
-Customer: Do you have catalog?
+Customer: Katalog bormi?
 Assistant:
 Ha albatta 😊
 Mana katalogimiz:
 https://shmirzaev.github.io/Milana-Premium-Catalog/
 
-Qaysi mahsulot sizni qiziqtirdi?
-
 BAD EXAMPLE:
-- Huge explanations
-- Huge bullet lists
-- Too much information at once
-- AI assistant behavior
+Va alaykum assalom! 😊
+
+Milana Premiumga xush kelibsiz! Qanday yordam kerak?
+
+Katalogimizni ko'rishni xohlaysizmi?
+https://shmirzaev.github.io/Milana-Premium-Catalog/
+
+WHY BAD:
+- Catalog was offered without customer asking.
+- Too much information at once.
+- Feels automated.
 """
 
-    messages = [
-        {
-            "role": "system",
-            "content": system_prompt,
-        }
-    ]
+    messages = [{"role": "system", "content": system_prompt}]
 
     for msg in history:
         messages.append(
@@ -174,18 +176,13 @@ BAD EXAMPLE:
             }
         )
 
-    messages.append(
-        {
-            "role": "user",
-            "content": user_text,
-        }
-    )
+    messages.append({"role": "user", "content": user_text})
 
     payload = {
         "model": business.get("ai_model") or "mistral-small-latest",
         "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 180,
+        "temperature": 0.5,
+        "max_tokens": 130,
     }
 
     res = requests.post(
@@ -198,13 +195,7 @@ BAD EXAMPLE:
         timeout=30,
     )
 
-    log(
-        "Telegram Mistral response",
-        {
-            "status": res.status_code,
-            "body": res.text,
-        },
-    )
+    log("Telegram Mistral response", {"status": res.status_code, "body": res.text})
 
     if not res.ok:
         return "Assalomu alaykum 😊"
@@ -221,7 +212,7 @@ BAD EXAMPLE:
         if not reply:
             return "Assalomu alaykum 😊"
 
-        return reply[:4000]
+        return reply[:1500]
 
     except Exception as e:
         log("Telegram AI parse error", str(e))
@@ -242,13 +233,7 @@ def send_telegram_message(chat_id, text, reply_to_message_id=None):
 
     res = requests.post(url, json=payload, timeout=30)
 
-    log(
-        "Telegram send result",
-        {
-            "status": res.status_code,
-            "body": res.text,
-        },
-    )
+    log("Telegram send result", {"status": res.status_code, "body": res.text})
 
     return res
 
@@ -277,7 +262,6 @@ def save_telegram_message(
         }
 
         supabase.table("inbox_messages").insert(data).execute()
-
         log("Telegram inbox message saved", data)
 
     except Exception as e:
@@ -295,9 +279,7 @@ async def set_telegram_webhook():
 
     res = requests.get(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
-        params={
-            "url": webhook_url,
-        },
+        params={"url": webhook_url},
         timeout=30,
     )
 
@@ -334,7 +316,6 @@ async def telegram_webhook(request: Request):
 
         chat_id = chat.get("id")
         chat_type = chat.get("type", "private")
-
         customer_id = user.get("id")
         message_id = message.get("message_id")
 
@@ -356,7 +337,6 @@ async def telegram_webhook(request: Request):
                 return JSONResponse({"status": "ignored_group_message"})
 
         buffer_key = f"{chat_id}_{customer_id}"
-
         current_time = time.time()
 
         if buffer_key not in MESSAGE_BUFFER:
@@ -375,9 +355,7 @@ async def telegram_webhook(request: Request):
         if time.time() - latest_time < 2:
             return JSONResponse({"status": "waiting_more_messages"})
 
-        combined_text = "\n".join(
-            MESSAGE_BUFFER[buffer_key]["texts"]
-        ).strip()
+        combined_text = "\n".join(MESSAGE_BUFFER[buffer_key]["texts"]).strip()
 
         del MESSAGE_BUFFER[buffer_key]
 
@@ -400,7 +378,9 @@ async def telegram_webhook(request: Request):
         send_telegram_message(
             chat_id=chat_id,
             text=reply,
-            reply_to_message_id=message_id if chat_type in ["group", "supergroup"] else None,
+            reply_to_message_id=message_id
+            if chat_type in ["group", "supergroup"]
+            else None,
         )
 
         save_telegram_message(
