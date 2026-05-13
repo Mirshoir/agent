@@ -3,14 +3,31 @@ import time
 import secrets
 import requests
 from urllib.parse import urlencode
+
 from pydantic import BaseModel
 from fastapi import FastAPI, Request, Header
 from fastapi.responses import PlainTextResponse, JSONResponse, RedirectResponse
 from supabase import create_client
-from telegram_bot import telegram_router
+
+from telegram_bot import (
+    telegram_router,
+    start_telegram_user_client,
+    stop_telegram_user_client,
+)
 
 app = FastAPI()
 app.include_router(telegram_router)
+
+
+@app.on_event("startup")
+async def startup_telegram_user_client():
+    await start_telegram_user_client()
+
+
+@app.on_event("shutdown")
+async def shutdown_telegram_user_client():
+    await stop_telegram_user_client()
+
 
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
@@ -212,6 +229,7 @@ def exchange_instagram_code_for_token(code: str):
         },
         timeout=30,
     )
+
     log("Instagram short-lived token exchange", {"status": res.status_code, "body": res.text})
     res.raise_for_status()
     return res.json()
@@ -689,12 +707,14 @@ async def process_comment_event(entry_id: str, change: dict):
 async def home():
     return {
         "status": "ok",
-        "version": "instagram_hybrid_inbox_backend_FIXED",
+        "version": "instagram_hybrid_inbox_backend_FIXED_WITH_TELEGRAM_USER_CLIENT",
         "webhook": "/webhook",
         "connect": "/connect-instagram",
         "connect_instagram": "/connect-instagram",
         "connect_facebook": "/connect-facebook",
         "dashboard_send_dm": "/dashboard/send-instagram-dm",
+        "telegram_bot_webhook": "/webhook/telegram",
+        "telegram_private_user_client": "enabled_by_env",
         "verify_token_set": bool(VERIFY_TOKEN),
         "meta_app_id_set": bool(META_APP_ID),
         "instagram_redirect_uri": INSTAGRAM_REDIRECT_URI,
@@ -955,12 +975,12 @@ async def receive_webhook(request: Request):
 @app.get("/privacy")
 async def privacy():
     return PlainTextResponse(
-        "Privacy Policy: This app collects Instagram messages and comments to provide automated AI replies and dashboard inbox functionality."
+        "Privacy Policy: This app collects Instagram, Telegram bot, and Telegram user-account messages to provide automated and manual sales replies."
     )
 
 
 @app.get("/terms")
 async def terms():
     return PlainTextResponse(
-        "Terms of Service: This app provides automated and manual Instagram replies using AI-assisted tools."
+        "Terms of Service: This app provides automated and manual Instagram and Telegram sales replies using AI-assisted tools."
     )
