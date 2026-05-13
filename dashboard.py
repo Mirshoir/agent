@@ -19,104 +19,462 @@ st.set_page_config(
 
 st.markdown("""
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&family=DM+Sans:wght@400;500;700&display=swap');
+
+* {
+    font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+:root {
+    --primary-gradient: linear-gradient(135deg, #f97316 0%, #ea580c 100%);
+    --secondary-gradient: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    --accent-rose: #f43f5e;
+    --accent-gold: #fbbf24;
+    --text-primary: #0f172a;
+    --text-secondary: #64748b;
+    --bg-light: #ffffff;
+    --bg-subtle: #f8fafc;
+    --border-color: rgba(15, 23, 42, 0.08);
+    --shadow-sm: 0 2px 8px rgba(15, 23, 42, 0.06);
+    --shadow-md: 0 4px 24px rgba(15, 23, 42, 0.12);
+    --shadow-lg: 0 20px 40px rgba(15, 23, 42, 0.15);
+}
+
+html, body, [data-testid="stAppViewContainer"] {
+    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+}
+
+/* Premium Header */
 .main-header {
-    background: linear-gradient(135deg,#111827,#7c2d12,#be123c);
-    border-radius: 26px;
-    padding: 22px 28px;
+    background: var(--secondary-gradient);
+    border-radius: 20px;
+    padding: 32px;
     color: white;
-    margin-bottom: 22px;
+    margin-bottom: 28px;
+    position: relative;
+    overflow: hidden;
+    box-shadow: var(--shadow-lg);
 }
-.metric-card {
-    background: rgba(120,120,120,0.08);
-    border-radius: 22px;
-    border: 1px solid rgba(120,120,120,0.18);
-    padding: 20px;
-    text-align: center;
+
+.main-header::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    right: -10%;
+    width: 400px;
+    height: 400px;
+    background: radial-gradient(circle, rgba(249, 115, 22, 0.1) 0%, transparent 70%);
+    border-radius: 50%;
 }
-.metric-value {
-    font-size: 34px;
+
+.main-header h2 {
+    font-size: 32px;
     font-weight: 800;
+    letter-spacing: -0.02em;
+    margin: 0;
+    position: relative;
+    z-index: 1;
 }
+
+.main-header p {
+    margin: 10px 0 0 0;
+    opacity: 0.85;
+    font-size: 15px;
+    position: relative;
+    z-index: 1;
+}
+
+/* Premium Metric Cards */
+.metric-card {
+    background: var(--bg-light);
+    border-radius: 16px;
+    border: 1px solid var(--border-color);
+    padding: 24px;
+    text-align: center;
+    box-shadow: var(--shadow-sm);
+    transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    position: relative;
+    overflow: hidden;
+}
+
+.metric-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--primary-gradient);
+    opacity: 0;
+    transition: opacity 0.3s ease;
+}
+
+.metric-card:hover {
+    border-color: var(--border-color);
+    box-shadow: var(--shadow-md);
+    transform: translateY(-4px);
+}
+
+.metric-card:hover::before {
+    opacity: 1;
+}
+
+.metric-value {
+    font-size: 36px;
+    font-weight: 800;
+    background: var(--primary-gradient);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    letter-spacing: -0.02em;
+    margin: 0;
+}
+
 .metric-label {
-    opacity: .75;
+    color: var(--text-secondary);
     font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-top: 12px;
 }
+
+/* Premium Login Card */
 .login-card {
-    background: rgba(120,120,120,0.08);
-    border: 1px solid rgba(120,120,120,0.18);
+    background: var(--bg-light);
+    border: 1px solid var(--border-color);
     border-radius: 24px;
-    padding: 26px;
-    margin-bottom: 18px;
+    padding: 32px;
+    margin-bottom: 20px;
+    box-shadow: var(--shadow-md);
+    backdrop-filter: blur(10px);
 }
+
+.login-card h1 {
+    font-size: 48px;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    margin: 0 0 12px 0;
+    background: var(--primary-gradient);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.login-card h3 {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin: 0 0 8px 0;
+}
+
+.login-card p {
+    color: var(--text-secondary);
+    margin: 0;
+    font-size: 15px;
+}
+
+/* Chat Shell */
 .chat-shell {
-    border: 1px solid rgba(120,120,120,0.18);
-    border-radius: 24px;
-    padding: 16px;
-    background: rgba(120,120,120,0.04);
+    border: 1px solid var(--border-color);
+    border-radius: 20px;
+    padding: 20px;
+    background: var(--bg-light);
+    box-shadow: var(--shadow-sm);
 }
+
 .chat-top {
-    border-bottom: 1px solid rgba(120,120,120,0.18);
-    padding-bottom: 12px;
-    margin-bottom: 12px;
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 16px;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
 }
+
+/* Chat Messages */
 .inbound-msg {
-    background: rgba(229,231,235,0.22);
-    border: 1px solid rgba(120,120,120,0.15);
-    border-radius: 20px 20px 20px 6px;
-    padding: 12px 14px;
-    margin: 10px 0;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border-color);
+    border-radius: 16px 16px 16px 2px;
+    padding: 14px 16px;
+    margin: 12px 0;
     max-width: 76%;
+    color: var(--text-primary);
+    animation: slideInLeft 0.3s ease-out;
 }
+
 .outbound-msg {
-    background: linear-gradient(135deg,#c026d3,#e11d48);
+    background: var(--primary-gradient);
     color: white;
-    border-radius: 20px 20px 6px 20px;
-    padding: 12px 14px;
-    margin: 10px 0 10px auto;
+    border-radius: 16px 16px 2px 16px;
+    padding: 14px 16px;
+    margin: 12px 0 12px auto;
     max-width: 76%;
+    animation: slideInRight 0.3s ease-out;
+    box-shadow: 0 4px 16px rgba(249, 115, 22, 0.3);
 }
+
+@keyframes slideInLeft {
+    from {
+        opacity: 0;
+        transform: translateX(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+@keyframes slideInRight {
+    from {
+        opacity: 0;
+        transform: translateX(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
 .small-muted {
-    opacity: .65;
+    color: var(--text-secondary);
     font-size: 12px;
-    margin-top: 4px;
+    font-weight: 500;
+    margin-top: 6px;
+    opacity: 0.7;
 }
+
+/* Avatar */
 .avatar {
-    width: 38px;
-    height: 38px;
-    border-radius: 999px;
-    background: linear-gradient(135deg,#c026d3,#e11d48);
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    background: var(--primary-gradient);
     color: white;
     display: inline-flex;
-    align-items:center;
-    justify-content:center;
-    font-weight:800;
-    margin-right:10px;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 14px;
+    margin-right: 12px;
+    box-shadow: 0 4px 12px rgba(249, 115, 22, 0.3);
 }
+
+/* Platform Badges */
 .platform-badge {
-    display:inline-block;
-    padding:4px 9px;
-    border-radius:999px;
-    font-size:12px;
-    font-weight:700;
-    margin-left:6px;
+    display: inline-block;
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 700;
+    margin-left: 8px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
 }
+
 .ig-badge {
-    background:rgba(225,29,72,0.12);
-    color:#e11d48;
+    background: linear-gradient(135deg, rgba(244, 63, 94, 0.12), rgba(249, 115, 22, 0.12));
+    color: var(--accent-rose);
 }
+
 .tg-badge {
-    background:rgba(14,165,233,0.13);
-    color:#0284c7;
+    background: linear-gradient(135deg, rgba(14, 165, 233, 0.12), rgba(59, 130, 246, 0.12));
+    color: #0284c7;
 }
+
+/* Client Card */
 .client-card {
-    border: 1px solid rgba(120,120,120,0.15);
-    border-radius: 18px;
-    padding: 12px;
-    margin-bottom: 8px;
-    background: rgba(120,120,120,0.06);
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    padding: 14px;
+    margin-bottom: 10px;
+    background: var(--bg-light);
+    transition: all 0.2s ease;
+    cursor: pointer;
 }
+
+.client-card:hover {
+    border-color: var(--accent-rose);
+    box-shadow: var(--shadow-sm);
+    transform: translateX(4px);
+}
+
+/* Buttons */
 .stButton button {
-    border-radius: 999px;
+    border-radius: 10px;
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: 0.05em;
+    padding: 12px 24px !important;
+    border: none;
+    transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+    text-transform: uppercase;
+}
+
+.stButton button[kind="primary"] {
+    background: var(--primary-gradient) !important;
+    color: white !important;
+    box-shadow: 0 4px 16px rgba(249, 115, 22, 0.4);
+}
+
+.stButton button[kind="primary"]:hover {
+    box-shadow: 0 8px 24px rgba(249, 115, 22, 0.5);
+    transform: translateY(-2px);
+}
+
+.stButton button[kind="secondary"] {
+    background: var(--bg-subtle) !important;
+    color: var(--text-primary) !important;
+    border: 1px solid var(--border-color) !important;
+}
+
+.stButton button[kind="secondary"]:hover {
+    background: var(--bg-light) !important;
+    box-shadow: var(--shadow-sm);
+}
+
+/* Input Fields */
+.stTextInput > div > div > input,
+.stTextArea > div > div > textarea,
+.stSelectbox > div > div > select {
+    border-radius: 10px;
+    border: 1px solid var(--border-color) !important;
+    font-size: 14px;
+    transition: all 0.2s ease;
+}
+
+.stTextInput > div > div > input:focus,
+.stTextArea > div > div > textarea:focus,
+.stSelectbox > div > div > select:focus {
+    border-color: var(--accent-rose) !important;
+    box-shadow: 0 0 0 3px rgba(244, 63, 94, 0.1) !important;
+}
+
+/* Toggle/Switch */
+.stCheckbox > label > div:first-child {
+    border-radius: 20px;
+}
+
+/* Sidebar */
+[data-testid="stSidebar"] {
+    background: var(--bg-light);
+    border-right: 1px solid var(--border-color);
+}
+
+[data-testid="stSidebar"] > div:first-child {
+    padding: 28px 20px;
+}
+
+/* Divider */
+.stDivider {
+    border-color: var(--border-color) !important;
+    margin: 24px 0;
+}
+
+/* Radio Buttons */
+.stRadio > label {
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.stRadio > div[role="radiogroup"] > label {
+    padding: 12px 16px;
+    margin-bottom: 8px;
+    background: var(--bg-subtle);
+    border-radius: 10px;
+    border: 1px solid transparent;
+    transition: all 0.2s ease;
+}
+
+.stRadio > div[role="radiogroup"] > label:hover {
+    background: var(--bg-light);
+    border-color: var(--border-color);
+}
+
+/* Expanders */
+.streamlit-expanderHeader {
+    border-radius: 10px;
+    border: 1px solid var(--border-color) !important;
+    padding: 12px 16px !important;
+    background: var(--bg-subtle) !important;
+}
+
+.streamlit-expanderHeader:hover {
+    background: var(--bg-light) !important;
+}
+
+/* Dataframe */
+.stDataframe {
+    font-size: 13px;
+}
+
+/* Success/Error Messages */
+.stSuccess {
+    background: linear-gradient(135deg, rgba(34, 197, 94, 0.12), rgba(74, 222, 128, 0.12));
+    border: 1px solid rgba(34, 197, 94, 0.3);
+    border-radius: 10px;
+    padding: 14px 16px;
+}
+
+.stError {
+    background: linear-gradient(135deg, rgba(244, 63, 94, 0.12), rgba(249, 115, 22, 0.12));
+    border: 1px solid rgba(244, 63, 94, 0.3);
+    border-radius: 10px;
+    padding: 14px 16px;
+}
+
+.stWarning {
+    background: linear-gradient(135deg, rgba(251, 191, 36, 0.12), rgba(249, 115, 22, 0.12));
+    border: 1px solid rgba(251, 191, 36, 0.3);
+    border-radius: 10px;
+    padding: 14px 16px;
+}
+
+/* Section Headers */
+h1, h2, h3 {
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+}
+
+h1 {
+    font-size: 32px;
+    font-weight: 800;
+}
+
+h2 {
+    font-size: 24px;
+    font-weight: 700;
+}
+
+h3 {
+    font-size: 18px;
+    font-weight: 700;
+}
+
+/* Text */
+p, span {
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg-subtle);
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(249, 115, 22, 0.5);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(249, 115, 22, 0.7);
 }
 </style>
 """, unsafe_allow_html=True)
@@ -597,18 +955,22 @@ def send_telegram_user_message_from_backend(customer_id, text):
 if "user" not in st.session_state:
     st.markdown("""
     <div class="login-card" style="max-width:480px;margin:80px auto;text-align:center;">
-        <h1>💬 Milana Premium</h1>
-        <h3>Social Sales Chat</h3>
-        <p>Instagram va Telegram mijozlar bilan savdo suhbati</p>
+        <h1>💬</h1>
+        <h3>Milana Premium</h3>
+        <p>Social Sales Chat Platform</p>
+        <p style="color: #94a3b8; font-size: 14px; margin-top: 12px;">Professional messaging dashboard for Instagram & Telegram</p>
     </div>
     """, unsafe_allow_html=True)
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
+        st.markdown('<div style="margin: 40px 0;"></div>', unsafe_allow_html=True)
         email = st.text_input("Email", placeholder="manager@milana.uz")
-        password = st.text_input("Password", type="password", placeholder="Password")
+        password = st.text_input("Password", type="password", placeholder="••••••••")
 
-        if st.button("Login", type="primary", use_container_width=True):
+        st.markdown('<div style="margin: 20px 0;"></div>', unsafe_allow_html=True)
+        
+        if st.button("Sign In", type="primary", use_container_width=True):
             user = login_user(email, password)
             if user:
                 st.session_state["user"] = user
@@ -625,11 +987,11 @@ is_admin = user_email == normalize_email(ADMIN_EMAIL)
 
 with st.sidebar:
     st.markdown(f"""
-    <div style="text-align:center;">
-        <h1>💬</h1>
-        <h3>Milana Premium</h3>
-        <p>Social Sales Chat</p>
-        <small>{html.escape(user_email)}</small>
+    <div style="text-align:center; padding: 8px 0;">
+        <h1 style="font-size: 48px; margin: 0;">💬</h1>
+        <h3 style="margin: 8px 0 4px 0; font-size: 20px;">Milana Premium</h3>
+        <p style="margin: 0 0 12px 0; font-size: 13px; opacity: 0.7;">Sales Chat Platform</p>
+        <small style="color: #64748b; word-break: break-all;">{html.escape(user_email)}</small>
     </div>
     """, unsafe_allow_html=True)
 
@@ -637,7 +999,7 @@ with st.sidebar:
 
     if is_admin:
         nav_option = st.radio(
-            "Menu",
+            "Navigation",
             [
                 "📊 Sales Overview",
                 "💬 Social Sales Chat",
@@ -645,12 +1007,12 @@ with st.sidebar:
                 "➕ Add Account",
                 "📲 Telegram Setup",
                 "👥 Managers",
-                "🔗 Access",
+                "🔗 Access Control",
             ],
         )
     else:
         nav_option = st.radio(
-            "Menu",
+            "Navigation",
             [
                 "📊 Sales Overview",
                 "💬 Social Sales Chat",
@@ -661,14 +1023,14 @@ with st.sidebar:
 
     st.divider()
 
-    if st.button("Sign Out", use_container_width=True):
+    if st.button("🚪 Sign Out", use_container_width=True):
         logout()
 
 
 st.markdown("""
 <div class="main-header">
-    <h2 style="margin:0;">Milana Premium Social Sales Chat</h2>
-    <p style="margin:6px 0 0 0;">Instagram va Telegram mijozlar bilan savdo suhbatlari uchun yagona panel</p>
+    <h2 style="margin:0;">Milana Premium Sales Dashboard</h2>
+    <p style="margin:6px 0 0 0;">Unified messaging platform for Instagram & Telegram customer conversations</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -695,7 +1057,7 @@ def show_metrics():
 
 def business_editor(business):
     with st.form(key=f"edit_{business['id']}"):
-        st.subheader("📦 Milana Premium Business Setup")
+        st.subheader("📦 Business Configuration")
 
         col1, col2 = st.columns(2)
 
@@ -710,10 +1072,10 @@ def business_editor(business):
             language = st.selectbox("Main Reply Language", language_options, index=language_index)
             tone = st.text_input("Sales Tone", value=business.get("tone", "friendly, polite, sales-focused"))
 
-        bot_enabled = st.toggle("Auto Reply Enabled", value=bool(business.get("bot_enabled", True)))
+        bot_enabled = st.toggle("Enable Auto Reply", value=bool(business.get("bot_enabled", True)))
 
         st.divider()
-        st.subheader("💬 Sales Reply Behavior")
+        st.subheader("💬 AI Reply Configuration")
 
         col1, col2 = st.columns(2)
 
@@ -755,7 +1117,7 @@ def business_editor(business):
         )
 
         st.divider()
-        st.subheader("📦 Products and Sales Knowledge")
+        st.subheader("📦 Products & Pricing")
 
         products = st.text_area("Products / Services", value=business.get("products", ""), height=100)
         prices = st.text_area("Prices", value=business.get("prices", ""), height=90)
@@ -766,18 +1128,18 @@ def business_editor(business):
         phone = st.text_input("Sales Manager Phone", value=business.get("sales_phone", ""))
 
         st.divider()
-        st.subheader("📱 Product Quick Links")
+        st.subheader("📱 Quick Link Templates")
 
         tg_single = st.text_input("Single Product Link", value=business.get("telegram_single", ""))
         tg_package = st.text_input("Package Link", value=business.get("telegram_package", ""))
-        tg_bag = st.text_input("Bag / Meshok Link", value=business.get("telegram_bag", ""))
+        tg_bag = st.text_input("Bulk Order Link", value=business.get("telegram_bag", ""))
 
         st.divider()
-        st.subheader("🧠 Main Sales Knowledge")
+        st.subheader("🧠 Sales Knowledge Base")
 
         knowledge = st.text_area("Knowledge", value=business.get("knowledge", ""), height=260)
 
-        submitted = st.form_submit_button("💾 Save Milana Premium Setup", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("💾 Save Configuration", type="primary", use_container_width=True)
 
         if submitted:
             update_data = {
@@ -806,37 +1168,37 @@ def business_editor(business):
 
             try:
                 safe_update_business(business, update_data)
-                st.success("Saved successfully.")
+                st.success("✅ Configuration saved successfully.")
                 time.sleep(0.5)
                 st.rerun()
             except Exception as e:
-                st.error(f"Save failed: {e}")
+                st.error(f"❌ Save failed: {e}")
 
 
 if nav_option == "📊 Sales Overview":
-    st.subheader("Sales Overview")
+    st.subheader("📊 Sales Analytics Dashboard")
     show_metrics()
 
 
 elif nav_option == "💬 Social Sales Chat":
-    st.subheader("💬 Milana Premium Social Sales Chat")
+    st.subheader("💬 Social Sales Chat")
 
     businesses = get_allowed_businesses()
     business_map = {b.get("id"): b for b in businesses if b.get("id")}
     business_ids = list(business_map.keys())
 
     if not businesses:
-        st.warning("No Milana Premium account found.")
+        st.warning("No sales accounts configured yet.")
     else:
         top1, top2, top3 = st.columns([2, 1, 1])
 
         with top1:
-            search_text = st.text_input("Search clients", placeholder="Search by client, message, or ID")
+            search_text = st.text_input("🔍 Search conversations", placeholder="Search by customer name, ID, or message content")
 
         with top2:
-            platform_filter_label = st.selectbox("Platform", ["All", "Instagram", "Telegram"])
+            platform_filter_label = st.selectbox("Platform", ["All Platforms", "Instagram", "Telegram"])
             platform_filter = {
-                "All": "all",
+                "All Platforms": "all",
                 "Instagram": "instagram",
                 "Telegram": "telegram",
             }[platform_filter_label]
@@ -854,12 +1216,12 @@ elif nav_option == "💬 Social Sales Chat":
             conversations = [c for c in conversations if c.get("unread_count", 0) > 0]
 
         if not conversations:
-            st.info("No social sales conversations yet.")
+            st.info("No conversations yet. Your customer chats will appear here.")
         else:
             left, right = st.columns([1.08, 2.45])
 
             with left:
-                st.markdown("### Clients")
+                st.markdown("### Conversations")
                 options = {}
 
                 for c in conversations:
@@ -881,7 +1243,7 @@ elif nav_option == "💬 Social Sales Chat":
                     label = f"{icon} {name}{unread_badge}\n{source} · {preview}"
                     options[label] = c
 
-                selected_label = st.radio("Select chat", list(options.keys()), label_visibility="collapsed")
+                selected_label = st.radio("Select conversation", list(options.keys()), label_visibility="collapsed")
                 selected_conversation = options[selected_label]
 
             with right:
@@ -926,7 +1288,7 @@ elif nav_option == "💬 Social Sales Chat":
                         <span class="avatar">{'TG' if platform == 'telegram' else 'IG'}</span>
                         <b>{html.escape(customer_name)}</b>
                         <span class="platform-badge {badge_class}">{badge_text}</span><br>
-                        <span class="small-muted">Milana Premium social sales chat</span>
+                        <span class="small-muted">Milana Premium Sales Chat</span>
                     </div>
                     """, unsafe_allow_html=True)
 
@@ -977,7 +1339,7 @@ elif nav_option == "💬 Social Sales Chat":
                             )
 
                 with st.form("manual_social_reply", clear_on_submit=True):
-                    reply_text = st.text_area("Message", placeholder="Reply as Milana Premium...", height=90)
+                    reply_text = st.text_area("Message", placeholder="Type your reply...", height=90)
 
                     c1, c2, c3, c4 = st.columns(4)
 
@@ -996,7 +1358,7 @@ elif nav_option == "💬 Social Sales Chat":
                         quick_text = f"Katalogimiz: {link}" if link else "Qaysi mahsulot katalogi kerak edi?"
                     elif phone_clicked:
                         phone = selected_business.get("sales_phone", "")
-                        quick_text = f"Savdo bo‘limi bilan bog‘lanish: {phone}" if phone else "Telefon raqamingizni qoldiring, menejerimiz bog‘lanadi."
+                        quick_text = f"Savdo bo'limi bilan bog'lanish: {phone}" if phone else "Telefon raqamingizni qoldiring, menejerimiz bog'lanadi."
                     elif product_clicked:
                         quick_text = "Qaysi mahsulot sizni qiziqtiryapti?"
 
@@ -1039,21 +1401,23 @@ elif nav_option == "💬 Social Sales Chat":
                                 ok, result = False, {"error": "Unsupported channel for manual reply", "channel": channel}
 
                             if ok:
-                                st.success("Sent.")
+                                st.success("✅ Message sent.")
                                 time.sleep(0.5)
                                 st.rerun()
                             else:
-                                st.error("Failed to send message.")
+                                st.error("❌ Failed to send message.")
                                 st.json(result)
 
                 st.markdown("</div>", unsafe_allow_html=True)
 
 
 elif nav_option == "📦 Business Setup":
+    st.subheader("📦 Business Configuration")
+    
     businesses = get_allowed_businesses()
 
     if not businesses:
-        st.warning("No Milana Premium account found.")
+        st.warning("No sales accounts configured yet.")
     else:
         if len(businesses) == 1:
             business = businesses[0]
@@ -1069,15 +1433,15 @@ elif nav_option == "📦 Business Setup":
 
 
 elif nav_option == "➕ Add Account" and is_admin:
-    st.subheader("➕ Add Milana Premium Account")
+    st.subheader("➕ Create New Sales Account")
 
     with st.form("add_business"):
         name = st.text_input("Account Name", value="Milana Premium")
         ig_id = st.text_input("Instagram Business ID *")
         fb_id = st.text_input("Facebook Page ID")
-        knowledge = st.text_area("Main Sales Knowledge", height=180)
+        knowledge = st.text_area("Sales Knowledge Base", height=180)
 
-        submitted = st.form_submit_button("Create Account", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("✨ Create Account", type="primary", use_container_width=True)
 
         if submitted:
             if not name.strip() or not ig_id.strip():
@@ -1110,53 +1474,53 @@ elif nav_option == "➕ Add Account" and is_admin:
 
                 try:
                     create_business(data)
-                    st.success("Account created.")
+                    st.success("✅ Account created successfully.")
                     time.sleep(0.5)
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Creation failed: {e}")
+                    st.error(f"❌ Creation failed: {e}")
 
 
 elif nav_option == "📲 Telegram Setup":
-    st.subheader("📲 Telegram Setup")
+    st.subheader("📲 Telegram Configuration")
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.metric("Telegram Bot Token", "OK" if TELEGRAM_BOT_TOKEN else "Missing")
+        st.metric("Bot Status", "✅ Active" if TELEGRAM_BOT_TOKEN else "❌ Missing")
 
     with col2:
-        st.metric("Bot Username", f"@{TELEGRAM_BOT_USERNAME.replace('@', '')}" if TELEGRAM_BOT_USERNAME else "Missing")
+        st.metric("Bot Username", f"@{TELEGRAM_BOT_USERNAME.replace('@', '')}" if TELEGRAM_BOT_USERNAME else "Not Set")
 
     with col3:
-        st.metric("Telegram Messages", get_message_count("telegram"))
+        st.metric("Total Messages", get_message_count("telegram"))
 
     st.divider()
 
-    st.markdown("### Bot Webhook")
+    st.markdown("### Webhook Configuration")
     st.code(telegram_webhook_url())
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        if st.button("Set Telegram Bot Webhook", use_container_width=True):
+        if st.button("🔗 Set Webhook", use_container_width=True):
             ok, data = set_telegram_webhook()
             st.json(data)
 
     with col2:
-        if st.button("Check Bot Webhook", use_container_width=True):
+        if st.button("✓ Check Webhook", use_container_width=True):
             ok, data = get_telegram_webhook_info()
             st.json(data)
 
     with col3:
-        st.link_button("Open Telegram Webhook Check", f"{BACKEND_URL}/webhook/telegram", use_container_width=True)
+        st.link_button("📌 Open Webhook", f"{BACKEND_URL}/webhook/telegram", use_container_width=True)
 
     st.divider()
 
     st.markdown("### Private Telegram Account")
     st.info(
-        "Private Telegram account automation works only if the Telethon session file exists on the backend "
-        "and ENABLE_TELEGRAM_USER_CLIENT=true is set."
+        "Private Telegram account automation requires a valid Telethon session file on the backend "
+        "and ENABLE_TELEGRAM_USER_CLIENT=true environment variable."
     )
 
     st.code(
@@ -1168,16 +1532,16 @@ elif nav_option == "📲 Telegram Setup":
 
 
 elif nav_option == "👥 Managers" and is_admin:
-    st.subheader("👥 Managers")
+    st.subheader("👥 Manager Accounts")
 
-    with st.expander("Create / Reset Manager", expanded=True):
+    with st.expander("➕ Create / Reset Manager", expanded=True):
         email_u = st.text_input("Manager Email")
         pwd_u = st.text_input("Password", type="password")
 
-        if st.button("Create / Reset", use_container_width=True):
+        if st.button("💾 Create / Reset", use_container_width=True):
             if email_u and pwd_u:
                 create_or_update_dashboard_user(email_u, pwd_u)
-                st.success("Manager saved.")
+                st.success("✅ Manager account saved.")
                 st.rerun()
             else:
                 st.error("Email and password required.")
@@ -1187,13 +1551,13 @@ elif nav_option == "👥 Managers" and is_admin:
         st.dataframe(users, use_container_width=True)
 
 
-elif nav_option == "🔗 Access" and is_admin:
-    st.subheader("🔗 Access")
+elif nav_option == "🔗 Access Control" and is_admin:
+    st.subheader("🔗 Access Control Management")
 
     all_biz = get_all_businesses()
 
     if not all_biz:
-        st.warning("No account found.")
+        st.warning("No accounts found.")
     else:
         biz_map = {
             f"{b.get('business_name', 'Milana Premium')} ({b.get('id', '')[:8]})": b["id"]
@@ -1207,19 +1571,19 @@ elif nav_option == "🔗 Access" and is_admin:
         col1, col2 = st.columns(2)
 
         with col1:
-            if st.button("Assign", use_container_width=True):
+            if st.button("✓ Assign Access", use_container_width=True):
                 if email_assign:
                     assign_business_to_user(email_assign, biz_map[selected_biz], role)
-                    st.success("Assigned.")
+                    st.success("✅ Access assigned.")
                     st.rerun()
                 else:
                     st.error("Email required.")
 
         with col2:
-            if st.button("Remove Access", use_container_width=True):
+            if st.button("✕ Remove Access", use_container_width=True):
                 if email_assign:
                     remove_business_assignment(email_assign, biz_map[selected_biz])
-                    st.success("Removed.")
+                    st.success("✅ Access removed.")
                     st.rerun()
                 else:
                     st.error("Email required.")
