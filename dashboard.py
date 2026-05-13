@@ -274,15 +274,6 @@ def create_or_update_dashboard_user(email, password):
     return supabase.table("dashboard_users").upsert(data, on_conflict="email").execute()
 
 
-def set_user_active_status(email, is_active):
-    return (
-        supabase.table("dashboard_users")
-        .update({"is_active": is_active})
-        .eq("email", normalize_email(email))
-        .execute()
-    )
-
-
 def get_business_assignments():
     return (
         supabase.table("business_users")
@@ -381,12 +372,13 @@ def get_social_conversations(business_ids, platform_filter="all", search_text=""
     for row in rows:
         business_id = row.get("business_id")
         platform = row.get("platform", "instagram")
+        channel = row.get("channel", "")
         customer_id = str(row.get("customer_id") or "").strip()
 
         if not business_id or not customer_id:
             continue
 
-        key = f"{platform}::{business_id}::{customer_id}"
+        key = f"{platform}::{business_id}::{channel}::{customer_id}"
 
         fallback_name = f"{'Telegram' if platform == 'telegram' else 'Instagram'} Client {customer_id[-4:]}"
 
@@ -394,7 +386,7 @@ def get_social_conversations(business_ids, platform_filter="all", search_text=""
             conversations[key] = {
                 "business_id": business_id,
                 "platform": platform,
-                "channel": row.get("channel", ""),
+                "channel": channel,
                 "customer_id": customer_id,
                 "chat_id": str(row.get("chat_id") or customer_id),
                 "customer_name": row.get("customer_name") or fallback_name,
@@ -415,21 +407,27 @@ def get_social_conversations(business_ids, platform_filter="all", search_text=""
         q = search_text.lower().strip()
         results = [
             c for c in results
-            if q in f"{c.get('customer_id','')} {c.get('customer_name','')} {c.get('last_message','')} {c.get('platform','')}".lower()
+            if q in f"{c.get('customer_id','')} {c.get('customer_name','')} {c.get('last_message','')} {c.get('platform','')} {c.get('channel','')}".lower()
         ]
 
     return results
 
 
-def get_conversation_messages(business_id, customer_id, platform, limit=250):
+def get_conversation_messages(business_id, customer_id, platform, channel, limit=250):
     try:
-        return (
+        query = (
             supabase.table("inbox_messages")
             .select("*")
             .eq("platform", platform)
             .eq("business_id", business_id)
             .eq("customer_id", str(customer_id))
-            .order("created_at", desc=False)
+        )
+
+        if channel:
+            query = query.eq("channel", channel)
+
+        return (
+            query.order("created_at", desc=False)
             .limit(limit)
             .execute()
             .data
@@ -440,17 +438,21 @@ def get_conversation_messages(business_id, customer_id, platform, limit=250):
         return []
 
 
-def mark_conversation_read(business_id, customer_id, platform):
+def mark_conversation_read(business_id, customer_id, platform, channel):
     try:
-        (
+        query = (
             supabase.table("inbox_messages")
             .update({"is_read": True})
             .eq("platform", platform)
             .eq("business_id", business_id)
             .eq("customer_id", str(customer_id))
             .eq("direction", "inbound")
-            .execute()
         )
+
+        if channel:
+            query = query.eq("channel", channel)
+
+        query.execute()
     except Exception:
         pass
 
@@ -483,15 +485,13 @@ def save_outbound_message(business, customer_id, text, platform, channel, chat_i
 
 
 def send_instagram_dm_from_backend(business_id, customer_id, text):
-    payload = {
-        "business_id": str(business_id),
-        "customer_id": str(customer_id),
-        "text": text,
-    }
-
     response = requests.post(
         f"{BACKEND_URL}/dashboard/send-instagram-dm",
-        json=payload,
+        json={
+            "business_id": str(business_id),
+            "customer_id": str(customer_id),
+            "text": text,
+        },
         headers={"x-dashboard-secret": DASHBOARD_SECRET},
         timeout=30,
     )
@@ -817,12 +817,21 @@ elif nav_option == "💬 Social Sales Chat":
 
                 for c in conversations:
                     platform = c.get("platform", "instagram")
+                    channel = c.get("channel", "")
                     unread = c.get("unread_count", 0)
                     unread_badge = f" 🔴 {unread}" if unread else ""
                     preview = str(c.get("last_message", ""))[:38]
                     icon = "📲" if platform == "telegram" else "📸"
                     name = c.get("customer_name") or f"Client {str(c.get('customer_id'))[-4:]}"
-                    label = f"{icon} {name}{unread_badge}\n{preview}"
+
+                    if platform == "telegram" and channel == "telegram_user_private":
+                        source = "Private"
+                    elif platform == "telegram":
+                        source = "Bot"
+                    else:
+                        source = "Instagram"
+
+                    label = f"{icon} {name}{unread_badge}\n{source} · {preview}"
                     options[label] = c
 
                 selected_label = st.radio("Select chat", list(options.keys()), label_visibility="collapsed")
@@ -841,11 +850,17 @@ elif nav_option == "💬 Social Sales Chat":
                 channel = selected_conversation.get("channel", "")
                 customer_name = selected_conversation.get("customer_name") or f"Client {str(customer_id)[-4:]}"
 
-                mark_conversation_read(selected_business["id"], customer_id, platform)
-                messages = get_conversation_messages(selected_business["id"], customer_id, platform)
+                mark_conversation_read(selected_business["id"], customer_id, platform, channel)
+                messages = get_conversation_messages(selected_business["id"], customer_id, platform, channel)
 
                 badge_class = "tg-badge" if platform == "telegram" else "ig-badge"
-                badge_text = "Telegram" if platform == "telegram" else "Instagram"
+
+                if platform == "telegram" and channel == "telegram_user_private":
+                    badge_text = "Telegram Private"
+                elif platform == "telegram":
+                    badge_text = "Telegram Bot"
+                else:
+                    badge_text = "Instagram"
 
                 st.markdown('<div class="chat-shell">', unsafe_allow_html=True)
 
