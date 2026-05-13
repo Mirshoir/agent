@@ -185,32 +185,19 @@ def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
     entry_id = normalize_id(entry_id)
     recipient_id = normalize_id(recipient_id)
 
-    log("Finding business", {
-        "entry_id": entry_id,
-        "recipient_id": recipient_id,
-    })
-
     checks = [
-        ("instagram_business_id = entry_id", lambda: get_business(entry_id)),
-        ("instagram_business_id = recipient_id", lambda: get_business(recipient_id)),
-        ("facebook_page_id = entry_id", lambda: get_business_by_page_id(entry_id)),
-        ("facebook_page_id = recipient_id", lambda: get_business_by_page_id(recipient_id)),
+        lambda: get_business(entry_id),
+        lambda: get_business(recipient_id),
+        lambda: get_business_by_page_id(entry_id),
+        lambda: get_business_by_page_id(recipient_id),
     ]
 
-    for label, fn in checks:
+    for fn in checks:
         business = fn()
         if business:
-            log(f"Matched business by {label}", sanitize_business_row(business))
             return business
 
-    fallback = get_active_instagram_direct_business()
-
-    if fallback:
-        log("Matched fallback active Instagram Direct business", sanitize_business_row(fallback))
-        return fallback
-
-    log("No business matched")
-    return None
+    return get_active_instagram_direct_business()
 
 
 def exchange_instagram_code_for_token(code: str):
@@ -225,12 +212,7 @@ def exchange_instagram_code_for_token(code: str):
         },
         timeout=30,
     )
-
-    log("Instagram short-lived token exchange", {
-        "status": res.status_code,
-        "body": res.text,
-    })
-
+    log("Instagram short-lived token exchange", {"status": res.status_code, "body": res.text})
     res.raise_for_status()
     return res.json()
 
@@ -246,10 +228,7 @@ def exchange_for_long_lived_token(short_lived_token: str) -> str:
         timeout=30,
     )
 
-    log("Instagram long-lived token exchange", {
-        "status": res.status_code,
-        "body": res.text,
-    })
+    log("Instagram long-lived token exchange", {"status": res.status_code, "body": res.text})
 
     if not res.ok:
         return short_lived_token
@@ -268,10 +247,7 @@ def refresh_long_lived_token(existing_long_lived_token: str) -> str:
         timeout=30,
     )
 
-    log("Instagram token refresh", {
-        "status": res.status_code,
-        "body": res.text,
-    })
+    log("Instagram token refresh", {"status": res.status_code, "body": res.text})
 
     if not res.ok:
         return existing_long_lived_token
@@ -290,11 +266,7 @@ def get_instagram_user(access_token: str):
         timeout=30,
     )
 
-    log("Instagram user lookup", {
-        "status": res.status_code,
-        "body": res.text,
-    })
-
+    log("Instagram user lookup", {"status": res.status_code, "body": res.text})
     return res.json() if res.ok else {}
 
 
@@ -326,12 +298,7 @@ def upsert_business(
     }
 
     if existing:
-        result = (
-            supabase.table("businesses")
-            .update(update_data)
-            .eq("id", existing["id"])
-            .execute()
-        )
+        result = supabase.table("businesses").update(update_data).eq("id", existing["id"]).execute()
         log("Updated existing business", result.data)
         return result.data
 
@@ -353,12 +320,7 @@ def upsert_business(
         "telegram_bag": "",
     }
 
-    result = (
-        supabase.table("businesses")
-        .upsert(insert_data, on_conflict="instagram_business_id")
-        .execute()
-    )
-
+    result = supabase.table("businesses").upsert(insert_data, on_conflict="instagram_business_id").execute()
     log("Inserted new business", result.data)
     return result.data
 
@@ -472,10 +434,7 @@ Extra safety rules:
             timeout=30,
         )
 
-        log("Mistral response", {
-            "status": res.status_code,
-            "body": res.text,
-        })
+        log("Mistral response", {"status": res.status_code, "body": res.text})
 
         if not res.ok:
             return "Xabaringiz qabul qilindi 😊"
@@ -535,12 +494,7 @@ def send_dm(access_token: str, recipient_id: str, text: str, business: dict = No
         timeout=30,
     )
 
-    log("Send DM result", {
-        "url": url,
-        "status": res.status_code,
-        "body": res.text,
-    })
-
+    log("Send DM result", {"url": url, "status": res.status_code, "body": res.text})
     return res
 
 
@@ -548,11 +502,6 @@ def reply_to_comment(access_token: str, comment_id: str, text: str, business: di
     comment_id = normalize_id(comment_id)
 
     if not access_token or not comment_id or not text:
-        log("Cannot reply to comment", {
-            "has_token": bool(access_token),
-            "comment_id": comment_id,
-            "has_text": bool(text),
-        })
         return None
 
     oauth_provider = (business or {}).get("oauth_provider", "")
@@ -571,12 +520,7 @@ def reply_to_comment(access_token: str, comment_id: str, text: str, business: di
         timeout=30,
     )
 
-    log("Comment reply result", {
-        "url": url,
-        "status": res.status_code,
-        "body": res.text,
-    })
-
+    log("Comment reply result", {"url": url, "status": res.status_code, "body": res.text})
     return res
 
 
@@ -626,13 +570,11 @@ async def process_messaging_event(entry_id: str, messaging: dict):
     log("Processing messaging event", messaging)
 
     if "read" in messaging or "delivery" in messaging:
-        log("Skipping read/delivery event")
         return
 
     message = messaging.get("message") or {}
 
     if not message:
-        log("Skipping empty message event")
         return
 
     sender_id = normalize_id(messaging.get("sender", {}).get("id"))
@@ -642,25 +584,17 @@ async def process_messaging_event(entry_id: str, messaging: dict):
     is_echo = bool(message.get("is_echo"))
 
     if is_echo:
-        log("Skipping echo message")
         return
 
     if not sender_id or not recipient_id or not message_text:
-        log("Missing messaging data", {
-            "sender_id": sender_id,
-            "recipient_id": recipient_id,
-            "message_text": message_text,
-        })
         return
 
     if already_processed(processed_message_ids, message_id):
-        log("Duplicate message skipped", message_id)
         return
 
     business = find_business_for_webhook(entry_id, recipient_id)
 
     if not business:
-        log("No business found for messaging event")
         return
 
     save_inbox_message(
@@ -675,17 +609,14 @@ async def process_messaging_event(entry_id: str, messaging: dict):
     )
 
     if not business.get("bot_enabled", True):
-        log("Bot disabled for business. Inbox saved only.")
         return
 
     if business.get("auto_reply_dms") is False:
-        log("Auto reply DMs disabled. Inbox saved only.")
         return
 
     access_token = get_business_access_token(business)
 
     if not access_token:
-        log("Business has no access token")
         return
 
     reply_text = get_ai_reply(message_text, business)
@@ -717,39 +648,31 @@ async def process_messaging_event(entry_id: str, messaging: dict):
 
 
 async def process_comment_event(entry_id: str, change: dict):
-    log("Processing comment event", change)
-
     value = change.get("value", {})
 
     comment_id = normalize_id(value.get("comment_id") or value.get("id"))
     comment_text = value.get("message") or value.get("text") or ""
 
     if not comment_id or not comment_text:
-        log("Missing comment data", value)
         return
 
     if already_processed(processed_comment_ids, comment_id):
-        log("Duplicate comment skipped", comment_id)
         return
 
     business = find_business_for_webhook(entry_id)
 
     if not business:
-        log("No business found for comment event")
         return
 
     if not business.get("bot_enabled", True):
-        log("Bot disabled for business")
         return
 
     if business.get("auto_reply_comments") is False:
-        log("Auto reply comments disabled")
         return
 
     access_token = get_business_access_token(business)
 
     if not access_token:
-        log("Business has no access token")
         return
 
     reply_text = get_ai_reply(comment_text, business)
@@ -766,7 +689,7 @@ async def process_comment_event(entry_id: str, change: dict):
 async def home():
     return {
         "status": "ok",
-        "version": "instagram_hybrid_inbox_backend",
+        "version": "instagram_hybrid_inbox_backend_FIXED",
         "webhook": "/webhook",
         "connect": "/connect-instagram",
         "connect_instagram": "/connect-instagram",
@@ -834,12 +757,6 @@ async def instagram_callback(request: Request):
             oauth_provider="instagram_direct",
         )
 
-        log("Instagram Direct connected with long-lived token", {
-            "instagram_business_id": user_id,
-            "username": username,
-            "token": safe_token(access_token),
-        })
-
         return RedirectResponse(f"{DASHBOARD_URL}?connected=success")
 
     except Exception as e:
@@ -853,18 +770,12 @@ async def refresh_token(instagram_business_id: str):
     business = get_business(instagram_business_id)
 
     if not business:
-        return JSONResponse(
-            content={"status": "error", "message": "Business not found"},
-            status_code=404,
-        )
+        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
 
     existing_token = business.get("access_token") or ""
 
     if not existing_token:
-        return JSONResponse(
-            content={"status": "error", "message": "No access token found for this business"},
-            status_code=400,
-        )
+        return JSONResponse({"status": "error", "message": "No access token found for this business"}, status_code=400)
 
     try:
         new_token = refresh_long_lived_token(existing_token)
@@ -874,20 +785,14 @@ async def refresh_token(instagram_business_id: str):
             "token_preview": safe_token(new_token),
         }).eq("instagram_business_id", instagram_business_id).execute()
 
-        return JSONResponse(
-            content={
-                "status": "ok",
-                "message": "Token refreshed",
-                "token_preview": safe_token(new_token),
-            }
-        )
+        return JSONResponse({
+            "status": "ok",
+            "message": "Token refreshed",
+            "token_preview": safe_token(new_token),
+        })
 
     except Exception as e:
-        log("Token refresh error", str(e))
-        return JSONResponse(
-            content={"status": "error", "message": str(e)},
-            status_code=500,
-        )
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 
 @app.get("/connect-facebook")
@@ -926,35 +831,23 @@ async def dashboard_send_instagram_dm(
     x_dashboard_secret: str = Header(default=""),
 ):
     if DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET:
-        return JSONResponse(
-            content={"status": "error", "message": "Unauthorized"},
-            status_code=401,
-        )
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
 
     business = get_business_by_id(payload.business_id)
 
     if not business:
-        return JSONResponse(
-            content={"status": "error", "message": "Business not found"},
-            status_code=404,
-        )
+        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
 
     text = payload.text.strip()
     customer_id = normalize_id(payload.customer_id)
 
     if not text or not customer_id:
-        return JSONResponse(
-            content={"status": "error", "message": "Missing customer_id or text"},
-            status_code=400,
-        )
+        return JSONResponse({"status": "error", "message": "Missing customer_id or text"}, status_code=400)
 
     access_token = get_business_access_token(business)
 
     if not access_token:
-        return JSONResponse(
-            content={"status": "error", "message": "Business has no access token"},
-            status_code=400,
-        )
+        return JSONResponse({"status": "error", "message": "Business has no access token"}, status_code=400)
 
     res = send_dm(
         access_token=access_token,
@@ -964,10 +857,7 @@ async def dashboard_send_instagram_dm(
     )
 
     if res is None:
-        return JSONResponse(
-            content={"status": "error", "message": "Send failed"},
-            status_code=500,
-        )
+        return JSONResponse({"status": "error", "message": "Send failed"}, status_code=500)
 
     try:
         result = res.json()
@@ -975,10 +865,7 @@ async def dashboard_send_instagram_dm(
         result = {"text": res.text}
 
     if not res.ok:
-        return JSONResponse(
-            content={"status": "error", "meta": result},
-            status_code=res.status_code,
-        )
+        return JSONResponse({"status": "error", "meta": result}, status_code=res.status_code)
 
     save_inbox_message(
         business=business,
@@ -991,55 +878,31 @@ async def dashboard_send_instagram_dm(
         is_read=True,
     )
 
-    return JSONResponse(
-        content={
-            "status": "ok",
-            "meta": result,
-        },
-        status_code=200,
-    )
+    return JSONResponse({"status": "ok", "meta": result}, status_code=200)
 
 
 @app.get("/debug/businesses")
 async def debug_businesses():
-    result = (
-        supabase.table("businesses")
-        .select("*")
-        .order("created_at", desc=True)
-        .execute()
-    )
-
+    result = supabase.table("businesses").select("*").order("created_at", desc=True).execute()
     rows = [sanitize_business_row(r) for r in (result.data or [])]
-
-    return {
-        "count": len(rows),
-        "businesses": rows,
-    }
+    return {"count": len(rows), "businesses": rows}
 
 
 @app.get("/debug/active")
 async def debug_active():
     business = get_active_instagram_direct_business()
-    return {
-        "found": bool(business),
-        "business": sanitize_business_row(business),
-    }
+    return {"found": bool(business), "business": sanitize_business_row(business)}
 
 
 @app.get("/debug/business/{instagram_business_id}")
 async def debug_business(instagram_business_id: str):
     business = get_business(instagram_business_id)
-    return {
-        "found": bool(business),
-        "business": sanitize_business_row(business),
-    }
+    return {"found": bool(business), "business": sanitize_business_row(business)}
 
 
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     params = request.query_params
-
-    log("Webhook verification request", dict(params))
 
     if (
         params.get("hub.mode") == "subscribe"
@@ -1061,18 +924,11 @@ async def receive_webhook(request: Request):
         for entry in data.get("entry", []):
             entry_id = normalize_id(entry.get("id"))
 
-            log("Webhook entry", {
-                "entry_id": entry_id,
-                "keys": list(entry.keys()),
-            })
-
             for messaging in entry.get("messaging", []):
                 await process_messaging_event(entry_id, messaging)
 
             for change in entry.get("changes", []):
                 field = change.get("field")
-
-                log("Webhook change field", field)
 
                 if field in ["comments", "feed"]:
                     await process_comment_event(entry_id, change)
@@ -1089,20 +945,11 @@ async def receive_webhook(request: Request):
 
                     await process_messaging_event(entry_id, fake_messaging)
 
-                else:
-                    log("Unhandled webhook field", change)
-
-        return JSONResponse(content={"status": "ok"}, status_code=200)
+        return JSONResponse({"status": "ok"}, status_code=200)
 
     except Exception as e:
         log("Webhook error", str(e))
-        return JSONResponse(
-            content={
-                "status": "error",
-                "message": str(e),
-            },
-            status_code=500,
-        )
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 
 @app.get("/privacy")
