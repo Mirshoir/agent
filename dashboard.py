@@ -97,7 +97,6 @@ ADMIN_EMAIL = get_secret("ADMIN_EMAIL", "")
 DASHBOARD_SECRET = get_secret("DASHBOARD_SECRET")
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_BOT_USERNAME = get_secret("TELEGRAM_BOT_USERNAME", "")
-META_GRAPH_VERSION = get_secret("META_GRAPH_VERSION", "v23.0")
 
 if not all([SUPABASE_URL, SUPABASE_SERVICE_KEY, ADMIN_EMAIL, DASHBOARD_SECRET]):
     st.error("Missing SUPABASE_URL, SUPABASE_SERVICE_KEY, ADMIN_EMAIL, or DASHBOARD_SECRET.")
@@ -408,61 +407,19 @@ def mark_conversation_read(business_id, customer_id):
         pass
 
 
-def save_manual_outbound_message(business, customer_id, text, raw_payload=None):
-    data = {
-        "business_id": business.get("id"),
-        "instagram_business_id": business.get("instagram_business_id"),
-        "platform": "instagram",
-        "customer_id": str(customer_id),
-        "channel": "dm",
-        "direction": "outbound",
-        "role": "assistant",
-        "content": text,
-        "external_message_id": "",
-        "raw_payload": raw_payload or {},
-        "is_read": True,
-    }
-
-    try:
-        return supabase.table("inbox_messages").insert(data).execute()
-    except Exception:
-        fallback = {
-            "business_id": business.get("id"),
-            "instagram_business_id": business.get("instagram_business_id"),
-            "platform": "instagram",
-            "customer_id": str(customer_id),
-            "channel": "dm",
-            "direction": "outbound",
-            "role": "assistant",
-            "content": text,
-            "external_message_id": "",
-            "raw_payload": raw_payload or {},
-        }
-        return supabase.table("inbox_messages").insert(fallback).execute()
-
-
-def send_instagram_dm(business, recipient_id, text):
-    page_id = business.get("facebook_page_id") or business.get("page_id")
-    token = business.get("page_access_token") or business.get("access_token")
-
-    if not page_id:
-        return False, {"error": "Missing facebook_page_id for this business."}
-
-    if not token:
-        return False, {"error": "Missing page_access_token or access_token for this business."}
-
-    url = f"https://graph.facebook.com/{META_GRAPH_VERSION}/{page_id}/messages"
-
+def send_instagram_dm_from_backend(business_id, customer_id, text):
     payload = {
-        "recipient": {"id": str(recipient_id)},
-        "message": {"text": text},
-        "messaging_type": "RESPONSE",
+        "business_id": str(business_id),
+        "customer_id": str(customer_id),
+        "text": text,
     }
 
     response = requests.post(
-        url,
-        params={"access_token": token},
+        f"{BACKEND_URL}/dashboard/send-instagram-dm",
         json=payload,
+        headers={
+            "x-dashboard-secret": DASHBOARD_SECRET,
+        },
         timeout=30,
     )
 
@@ -952,23 +909,13 @@ elif nav_option == "📥 Inbox":
                         if not clean_reply:
                             st.error("Reply cannot be empty.")
                         else:
-                            ok, result = send_instagram_dm(
-                                business=selected_business,
-                                recipient_id=customer_id,
+                            ok, result = send_instagram_dm_from_backend(
+                                business_id=selected_business["id"],
+                                customer_id=customer_id,
                                 text=clean_reply,
                             )
 
                             if ok:
-                                try:
-                                    save_manual_outbound_message(
-                                        business=selected_business,
-                                        customer_id=customer_id,
-                                        text=clean_reply,
-                                        raw_payload=result,
-                                    )
-                                except Exception as e:
-                                    st.warning(f"Message sent, but database save failed: {e}")
-
                                 st.success("Reply sent.")
                                 time.sleep(0.5)
                                 st.rerun()
