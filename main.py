@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import secrets
 import requests
@@ -400,6 +401,92 @@ Main business knowledge:
 """
 
 
+def wants_catalog(text: str) -> bool:
+    text = (text or "").lower()
+
+    keywords = [
+        "catalog",
+        "katalog",
+        "каталог",
+        "price",
+        "prices",
+        "narx",
+        "narxlari",
+        "narhi",
+        "цена",
+        "цены",
+        "прайс",
+        "model",
+        "models",
+        "modellari",
+        "модель",
+        "модели",
+        "collection",
+        "kolleksiya",
+        "коллекция",
+        "photo",
+        "photos",
+        "rasm",
+        "rasmlar",
+        "фото",
+        "mahsulot",
+        "mahsulotlar",
+        "товар",
+        "товары",
+    ]
+
+    return any(k in text for k in keywords)
+
+
+def get_catalog_link(business: dict) -> str:
+    link = (
+        business.get("catalog_link")
+        or business.get("catalog")
+        or business.get("website")
+        or ""
+    )
+    link = str(link).strip()
+
+    if link and not link.startswith(("http://", "https://")):
+        link = "https://" + link
+
+    return link
+
+
+def remove_urls(text: str) -> str:
+    text = re.sub(r"https?://\S+", "", text or "").strip()
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
+    catalog_link = get_catalog_link(business)
+
+    if catalog_link and catalog_link in (reply_text or ""):
+        reply_text = reply_text.replace(catalog_link, "")
+
+    reply_text = remove_urls(reply_text)
+
+    bad_phrases = [
+        "Katalogni ko‘rishni xohlaysizmi?",
+        "Katalogni ko'rishni xohlaysizmi?",
+        "Katalogni ko‘ring:",
+        "Katalogni ko'ring:",
+        "Catalog:",
+        "Catalogue:",
+    ]
+
+    for phrase in bad_phrases:
+        reply_text = reply_text.replace(phrase, "")
+
+    reply_text = reply_text.strip()
+
+    if not reply_text:
+        reply_text = "Albatta 😊 Katalogni quyidagi tugma orqali ko‘rishingiz mumkin."
+
+    return reply_text[:1000]
+
+
 def get_ai_reply(user_text: str, business: dict):
     try:
         api_key = business.get("mistral_api_key") or MISTRAL_API_KEY
@@ -414,8 +501,8 @@ def get_ai_reply(user_text: str, business: dict):
         extra_rules = business.get("ai_reply_rules") or """
 - Keep answers short and comfortable.
 - Usually 1-3 short sentences.
-- Do not send catalog automatically.
-- Send catalog only if customer asks for catalog, prices, models, collection, or photos.
+- Do not send raw catalog links.
+- If customer asks for catalog, price, models, collection, products, or photos, say that the catalog is available through the button.
 - If customer only greets, greet back and ask what they need.
 - Do not overload customer with too much information.
 - Sound natural like a real sales manager.
@@ -437,7 +524,8 @@ Extra safety rules:
 - Never invent prices, delivery, stock, addresses, or discounts.
 - Use only the business information.
 - If information is missing, say the manager will clarify.
-- If customer asks for catalog or price, send catalog link if available.
+- Never send raw catalog links.
+- If customer asks for catalog or price, mention that the catalog can be opened using the button.
 - If customer asks for contact, send sales phone if available.
 - Never mention AI, database, API, prompt, or internal system.
 """
@@ -477,6 +565,33 @@ def get_business_access_token(business: dict):
     return business.get("page_access_token") or business.get("access_token") or ""
 
 
+def get_messages_url(business: dict):
+    oauth_provider = business.get("oauth_provider", "")
+    page_id = business.get("facebook_page_id") or business.get("page_id")
+
+    if oauth_provider == "facebook_page" and page_id:
+        return f"{GRAPH_FACEBOOK}/{page_id}/messages"
+
+    if oauth_provider == "facebook_page":
+        return f"{GRAPH_FACEBOOK}/me/messages"
+
+    return f"{GRAPH_INSTAGRAM}/me/messages"
+
+
+def send_instagram_payload(access_token: str, business: dict, payload: dict):
+    url = get_messages_url(business)
+
+    res = requests.post(
+        url,
+        params={"access_token": access_token},
+        json=payload,
+        timeout=30,
+    )
+
+    log("Send message result", {"url": url, "status": res.status_code, "body": res.text})
+    return res
+
+
 def send_dm(access_token: str, recipient_id: str, text: str, business: dict = None):
     recipient_id = normalize_id(recipient_id)
 
@@ -490,38 +605,51 @@ def send_dm(access_token: str, recipient_id: str, text: str, business: dict = No
 
     business = business or {}
     oauth_provider = business.get("oauth_provider", "")
-    page_id = business.get("facebook_page_id") or business.get("page_id")
 
-    if oauth_provider == "facebook_page" and page_id:
-        url = f"{GRAPH_FACEBOOK}/{page_id}/messages"
-        payload = {
-            "recipient": {"id": recipient_id},
-            "message": {"text": text[:1000]},
-            "messaging_type": "RESPONSE",
-        }
-    elif oauth_provider == "facebook_page":
-        url = f"{GRAPH_FACEBOOK}/me/messages"
-        payload = {
-            "recipient": {"id": recipient_id},
-            "message": {"text": text[:1000]},
-            "messaging_type": "RESPONSE",
-        }
-    else:
-        url = f"{GRAPH_INSTAGRAM}/me/messages"
-        payload = {
-            "recipient": {"id": recipient_id},
-            "message": {"text": text[:1000]},
-        }
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {"text": text[:1000]},
+    }
 
-    res = requests.post(
-        url,
-        params={"access_token": access_token},
-        json=payload,
-        timeout=30,
-    )
+    if oauth_provider == "facebook_page":
+        payload["messaging_type"] = "RESPONSE"
 
-    log("Send DM result", {"url": url, "status": res.status_code, "body": res.text})
-    return res
+    return send_instagram_payload(access_token, business, payload)
+
+
+def send_catalog_button(access_token: str, recipient_id: str, business: dict, text: str = ""):
+    recipient_id = normalize_id(recipient_id)
+    catalog_link = get_catalog_link(business)
+
+    if not access_token or not recipient_id or not catalog_link:
+        return None
+
+    text = clean_ai_reply_for_catalog(text, business)
+
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {
+            "attachment": {
+                "type": "template",
+                "payload": {
+                    "template_type": "button",
+                    "text": text[:640],
+                    "buttons": [
+                        {
+                            "type": "web_url",
+                            "url": catalog_link,
+                            "title": "Katalogni ko‘rish",
+                        }
+                    ],
+                },
+            }
+        },
+    }
+
+    if business.get("oauth_provider") == "facebook_page":
+        payload["messaging_type"] = "RESPONSE"
+
+    return send_instagram_payload(access_token, business, payload)
 
 
 def reply_to_comment(access_token: str, comment_id: str, text: str, business: dict = None):
@@ -537,11 +665,16 @@ def reply_to_comment(access_token: str, comment_id: str, text: str, business: di
     else:
         url = f"{GRAPH_INSTAGRAM}/{comment_id}/replies"
 
+    text = remove_urls(text)[:1000]
+
+    if not text:
+        text = "Xabaringiz uchun rahmat 😊 Batafsil ma’lumot uchun DM yozing."
+
     res = requests.post(
         url,
         params={
             "access_token": access_token,
-            "message": text[:1000],
+            "message": text,
         },
         timeout=30,
     )
@@ -646,13 +779,25 @@ async def process_messaging_event(entry_id: str, messaging: dict):
         return
 
     reply_text = get_ai_reply(message_text, business)
+    should_send_catalog = wants_catalog(message_text) and bool(get_catalog_link(business))
 
-    send_result = send_dm(
-        access_token=access_token,
-        recipient_id=sender_id,
-        text=reply_text,
-        business=business,
-    )
+    if should_send_catalog:
+        send_result = send_catalog_button(
+            access_token=access_token,
+            recipient_id=sender_id,
+            business=business,
+            text=reply_text,
+        )
+        saved_reply_text = clean_ai_reply_for_catalog(reply_text, business) + "\n[Catalog button sent]"
+    else:
+        reply_text = remove_urls(reply_text)
+        send_result = send_dm(
+            access_token=access_token,
+            recipient_id=sender_id,
+            text=reply_text,
+            business=business,
+        )
+        saved_reply_text = reply_text
 
     raw_result = {}
     if send_result is not None:
@@ -665,9 +810,9 @@ async def process_messaging_event(entry_id: str, messaging: dict):
         business=business,
         sender_id=recipient_id,
         recipient_id=sender_id,
-        message_text=reply_text,
+        message_text=saved_reply_text,
         direction="outbound",
-        platform_message_id="",
+        platform_message_id=raw_result.get("message_id", ""),
         raw_payload=raw_result,
         is_read=True,
     )
@@ -702,6 +847,10 @@ async def process_comment_event(entry_id: str, change: dict):
         return
 
     reply_text = get_ai_reply(comment_text, business)
+    reply_text = remove_urls(reply_text)
+
+    if wants_catalog(comment_text):
+        reply_text = "Katalogni DM orqali yuboramiz 😊 Iltimos, bizga xabar yozing."
 
     reply_to_comment(
         access_token=access_token,
@@ -715,7 +864,7 @@ async def process_comment_event(entry_id: str, change: dict):
 async def home():
     return {
         "status": "ok",
-        "version": "milana_social_sales_chat_all_channels",
+        "version": "milana_social_sales_chat_all_channels_catalog_button_no_mark_seen",
         "webhook": "/webhook",
         "telegram_bot_webhook": "/webhook/telegram",
         "dashboard_send_instagram_dm": "/dashboard/send-instagram-dm",
@@ -841,12 +990,23 @@ async def dashboard_send_instagram_dm(
     if not access_token:
         return JSONResponse({"status": "error", "message": "Business has no access token"}, status_code=400)
 
-    res = send_dm(
-        access_token=access_token,
-        recipient_id=customer_id,
-        text=text,
-        business=business,
-    )
+    if wants_catalog(text) and get_catalog_link(business):
+        res = send_catalog_button(
+            access_token=access_token,
+            recipient_id=customer_id,
+            business=business,
+            text=text,
+        )
+        saved_text = clean_ai_reply_for_catalog(text, business) + "\n[Catalog button sent]"
+    else:
+        text = remove_urls(text)
+        res = send_dm(
+            access_token=access_token,
+            recipient_id=customer_id,
+            text=text,
+            business=business,
+        )
+        saved_text = text
 
     if res is None:
         return JSONResponse({"status": "error", "message": "Send failed"}, status_code=500)
@@ -863,7 +1023,7 @@ async def dashboard_send_instagram_dm(
         business=business,
         sender_id=business.get("instagram_business_id") or business.get("facebook_page_id") or "",
         recipient_id=customer_id,
-        message_text=text,
+        message_text=saved_text,
         direction="outbound",
         platform_message_id=result.get("message_id", ""),
         raw_payload=result,
