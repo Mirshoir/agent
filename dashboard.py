@@ -11,27 +11,20 @@ from supabase import create_client
 load_dotenv()
 
 st.set_page_config(
-    page_title="Bot Dashboard",
-    page_icon="🤖",
+    page_title="Milana Premium Social Sales Chat",
+    page_icon="💬",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 st.markdown("""
 <style>
-.modern-card {
-    background: rgba(120,120,120,0.08);
-    border: 1px solid rgba(120,120,120,0.18);
-    border-radius: 24px;
-    padding: 22px;
-    margin-bottom: 18px;
-}
-.gradient-header {
-    background: linear-gradient(135deg,#6366f1,#a855f7,#ec4899);
-    border-radius: 28px;
+.main-header {
+    background: linear-gradient(135deg,#111827,#7c2d12,#be123c);
+    border-radius: 26px;
     padding: 22px 28px;
     color: white;
-    margin-bottom: 24px;
+    margin-bottom: 22px;
 }
 .metric-card {
     background: rgba(120,120,120,0.08);
@@ -48,32 +41,63 @@ st.markdown("""
     opacity: .75;
     font-size: 13px;
 }
-.inbox-card {
+.login-card {
     background: rgba(120,120,120,0.08);
-    border: 1px solid rgba(120,120,120,0.16);
+    border: 1px solid rgba(120,120,120,0.18);
+    border-radius: 24px;
+    padding: 26px;
+    margin-bottom: 18px;
+}
+.chat-shell {
+    border: 1px solid rgba(120,120,120,0.18);
+    border-radius: 24px;
+    padding: 16px;
+    background: rgba(120,120,120,0.04);
+}
+.chat-top {
+    border-bottom: 1px solid rgba(120,120,120,0.18);
+    padding-bottom: 12px;
+    margin-bottom: 12px;
+}
+.client-row {
+    border: 1px solid rgba(120,120,120,0.15);
     border-radius: 18px;
-    padding: 14px;
-    margin-bottom: 10px;
+    padding: 12px;
+    margin-bottom: 8px;
+    background: rgba(120,120,120,0.06);
 }
 .inbound-msg {
-    background: rgba(99,102,241,0.13);
-    border: 1px solid rgba(99,102,241,0.20);
-    border-radius: 18px;
+    background: rgba(229,231,235,0.22);
+    border: 1px solid rgba(120,120,120,0.15);
+    border-radius: 20px 20px 20px 6px;
     padding: 12px 14px;
-    margin: 8px 0;
-    max-width: 78%;
+    margin: 10px 0;
+    max-width: 76%;
 }
 .outbound-msg {
-    background: rgba(34,197,94,0.13);
-    border: 1px solid rgba(34,197,94,0.20);
-    border-radius: 18px;
+    background: linear-gradient(135deg,#c026d3,#e11d48);
+    color: white;
+    border-radius: 20px 20px 6px 20px;
     padding: 12px 14px;
-    margin: 8px 0 8px auto;
-    max-width: 78%;
+    margin: 10px 0 10px auto;
+    max-width: 76%;
 }
 .small-muted {
     opacity: .65;
     font-size: 12px;
+    margin-top: 4px;
+}
+.avatar {
+    width: 38px;
+    height: 38px;
+    border-radius: 999px;
+    background: linear-gradient(135deg,#c026d3,#e11d48);
+    color: white;
+    display: inline-flex;
+    align-items:center;
+    justify-content:center;
+    font-weight:800;
+    margin-right:10px;
 }
 .stButton button {
     border-radius: 999px;
@@ -110,7 +134,7 @@ DEFAULT_AI_REPLY_RULES = """- Keep answers short and comfortable.
 - Send catalog only if customer asks for catalog, prices, models, collection, or photos.
 - If customer only greets, greet back and ask what they need.
 - Do not overload customer with too much information.
-- Sound natural like a real sales manager."""
+- Sound natural like a real Milana Premium sales manager."""
 
 
 def normalize_email(email):
@@ -171,7 +195,6 @@ def get_user_businesses(user_email):
         .data
         or []
     )
-
     if not links:
         return []
 
@@ -349,7 +372,7 @@ def get_instagram_conversations(business_ids, search_text="", limit=700):
             conversations[key] = {
                 "business_id": business_id,
                 "customer_id": customer_id,
-                "customer_name": row.get("customer_name") or customer_id,
+                "customer_name": row.get("customer_name") or f"Instagram Client {customer_id[-4:]}",
                 "last_message": row.get("content", ""),
                 "last_message_at": row.get("created_at", ""),
                 "unread_count": 0,
@@ -417,9 +440,7 @@ def send_instagram_dm_from_backend(business_id, customer_id, text):
     response = requests.post(
         f"{BACKEND_URL}/dashboard/send-instagram-dm",
         json=payload,
-        headers={
-            "x-dashboard-secret": DASHBOARD_SECRET,
-        },
+        headers={"x-dashboard-secret": DASHBOARD_SECRET},
         timeout=30,
     )
 
@@ -433,15 +454,16 @@ def send_instagram_dm_from_backend(business_id, customer_id, text):
 
 if "user" not in st.session_state:
     st.markdown("""
-    <div class="modern-card" style="max-width:480px;margin:80px auto;text-align:center;">
-        <h1>🤖 Bot Dashboard</h1>
-        <p>Manage Instagram and Telegram bots</p>
+    <div class="login-card" style="max-width:480px;margin:80px auto;text-align:center;">
+        <h1>💬 Milana Premium</h1>
+        <h3>Social Sales Chat</h3>
+        <p>Instagram va Telegram mijozlar bilan savdo suhbati</p>
     </div>
     """, unsafe_allow_html=True)
 
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
-        email = st.text_input("Email", placeholder="admin@example.com")
+        email = st.text_input("Email", placeholder="manager@milana.uz")
         password = st.text_input("Password", type="password", placeholder="Password")
 
         if st.button("Login", type="primary", use_container_width=True):
@@ -462,10 +484,10 @@ is_admin = user_email == normalize_email(ADMIN_EMAIL)
 with st.sidebar:
     st.markdown(f"""
     <div style="text-align:center;">
-        <h1>🤖</h1>
-        <h3>Bot Manager</h3>
-        <p>{html.escape(user_email)}</p>
-        <b>{"Admin" if is_admin else "Business Owner"}</b>
+        <h1>💬</h1>
+        <h3>Milana Premium</h3>
+        <p>Social Sales Chat</p>
+        <small>{html.escape(user_email)}</small>
     </div>
     """, unsafe_allow_html=True)
 
@@ -473,25 +495,25 @@ with st.sidebar:
 
     if is_admin:
         nav_option = st.radio(
-            "Navigation",
+            "Menu",
             [
-                "📊 Dashboard",
-                "📥 Inbox",
-                "📋 Businesses",
-                "➕ Add Business",
-                "📲 Telegram",
-                "👥 Users",
-                "🔗 Assignments",
+                "📊 Sales Overview",
+                "💬 Instagram Chat",
+                "📦 Business Setup",
+                "➕ Add Account",
+                "📲 Telegram Setup",
+                "👥 Managers",
+                "🔗 Access",
             ],
         )
     else:
         nav_option = st.radio(
-            "Navigation",
+            "Menu",
             [
-                "📊 Dashboard",
-                "📥 Inbox",
-                "📋 My Business",
-                "📲 Telegram",
+                "📊 Sales Overview",
+                "💬 Instagram Chat",
+                "📦 Business Setup",
+                "📲 Telegram Setup",
             ],
         )
 
@@ -502,9 +524,9 @@ with st.sidebar:
 
 
 st.markdown("""
-<div class="gradient-header">
-    <h2 style="margin:0;">🤖 Instagram + Telegram Bot Dashboard</h2>
-    <p style="margin:6px 0 0 0;">Manage business knowledge, inbox, bot status, and manual replies</p>
+<div class="main-header">
+    <h2 style="margin:0;">Milana Premium Social Sales Chat</h2>
+    <p style="margin:6px 0 0 0;">Instagram mijozlar bilan suhbat, savdo va tezkor javoblar uchun yagona panel</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -520,59 +542,36 @@ def show_metrics():
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{total_businesses}</div>
-            <div class="metric-label">Businesses</div>
-        </div>
-        """, unsafe_allow_html=True)
-
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{total_businesses}</div><div class="metric-label">Connected Sales Accounts</div></div>', unsafe_allow_html=True)
     with c2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{active_bots}</div>
-            <div class="metric-label">Active Bots</div>
-        </div>
-        """, unsafe_allow_html=True)
-
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{active_bots}</div><div class="metric-label">Auto Reply Active</div></div>', unsafe_allow_html=True)
     with c3:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{instagram_connected}</div>
-            <div class="metric-label">Instagram Connected</div>
-        </div>
-        """, unsafe_allow_html=True)
-
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{instagram_connected}</div><div class="metric-label">Instagram Connected</div></div>', unsafe_allow_html=True)
     with c4:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-value">{telegram_ready}</div>
-            <div class="metric-label">Telegram Configured</div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{telegram_ready}</div><div class="metric-label">Telegram Ready</div></div>', unsafe_allow_html=True)
 
 
 def business_editor(business):
     with st.form(key=f"edit_{business['id']}"):
-        st.subheader("🏢 Business Info")
+        st.subheader("📦 Milana Premium Business Setup")
 
         col1, col2 = st.columns(2)
 
         with col1:
-            business_name = st.text_input("Business Name", value=business.get("business_name", ""))
-            business_type = st.text_input("Business Type", value=business.get("business_type", ""))
+            business_name = st.text_input("Account Name", value=business.get("business_name", "Milana Premium"))
+            business_type = st.text_input("Business Type", value=business.get("business_type", "Textile and Clothing"))
 
         with col2:
             language_options = ["uz", "ru", "en"]
             current_language = business.get("language", "uz")
             language_index = language_options.index(current_language) if current_language in language_options else 0
-            language = st.selectbox("Language", language_options, index=language_index)
-            tone = st.text_input("Tone", value=business.get("tone", "friendly, polite"))
+            language = st.selectbox("Main Reply Language", language_options, index=language_index)
+            tone = st.text_input("Sales Tone", value=business.get("tone", "friendly, polite, sales-focused"))
 
-        bot_enabled = st.toggle("Main Bot Enabled", value=bool(business.get("bot_enabled", True)))
+        bot_enabled = st.toggle("Auto Reply Enabled", value=bool(business.get("bot_enabled", True)))
 
         st.divider()
-        st.subheader("💬 AI Reply Behavior")
+        st.subheader("💬 Sales Reply Behavior")
 
         col1, col2 = st.columns(2)
 
@@ -580,16 +579,10 @@ def business_editor(business):
             reply_style_options = ["short_comfortable", "very_short", "normal_sales"]
             current_reply_style = business.get("reply_style", "short_comfortable")
             reply_style_index = reply_style_options.index(current_reply_style) if current_reply_style in reply_style_options else 0
-
-            reply_style = st.selectbox(
-                "Reply Style",
-                reply_style_options,
-                index=reply_style_index,
-                disabled="reply_style" not in business,
-            )
+            reply_style = st.selectbox("Reply Style", reply_style_options, index=reply_style_index, disabled="reply_style" not in business)
 
             max_tokens = st.number_input(
-                "AI Max Tokens",
+                "Answer Length",
                 min_value=50,
                 max_value=500,
                 value=int(business.get("ai_max_tokens", 130) or 130),
@@ -601,16 +594,10 @@ def business_editor(business):
             catalog_policy_options = ["only_when_customer_asks", "offer_when_relevant", "never_send"]
             current_catalog_policy = business.get("catalog_policy", "only_when_customer_asks")
             catalog_policy_index = catalog_policy_options.index(current_catalog_policy) if current_catalog_policy in catalog_policy_options else 0
-
-            catalog_policy = st.selectbox(
-                "Catalog Policy",
-                catalog_policy_options,
-                index=catalog_policy_index,
-                disabled="catalog_policy" not in business,
-            )
+            catalog_policy = st.selectbox("Catalog Sending Rule", catalog_policy_options, index=catalog_policy_index, disabled="catalog_policy" not in business)
 
             temperature = st.number_input(
-                "AI Temperature",
+                "Reply Creativity",
                 min_value=0.0,
                 max_value=1.0,
                 value=float(business.get("ai_temperature", 0.5) or 0.5),
@@ -619,34 +606,24 @@ def business_editor(business):
             )
 
         ai_reply_rules = st.text_area(
-            "AI Reply Rules",
+            "Sales Assistant Rules",
             value=business.get("ai_reply_rules", DEFAULT_AI_REPLY_RULES),
             height=150,
             disabled="ai_reply_rules" not in business,
         )
 
-        st.caption("Recommended: short_comfortable, only_when_customer_asks, max_tokens 130, temperature 0.5")
-
         st.divider()
-        st.subheader("📸 Instagram")
+        st.subheader("📸 Instagram Connection")
 
         col1, col2 = st.columns(2)
 
         with col1:
-            st.text_input("Instagram Business ID", value=business.get("instagram_business_id", ""), disabled=True)
-            auto_reply_dms = st.toggle(
-                "Auto Reply DMs",
-                value=bool(business.get("auto_reply_dms", True)),
-                disabled="auto_reply_dms" not in business,
-            )
+            st.text_input("Instagram Account ID", value=business.get("instagram_business_id", ""), disabled=True)
+            auto_reply_dms = st.toggle("Auto Reply Instagram DMs", value=bool(business.get("auto_reply_dms", True)), disabled="auto_reply_dms" not in business)
 
         with col2:
             st.text_input("Facebook Page ID", value=business.get("facebook_page_id", ""), disabled=True)
-            auto_reply_comments = st.toggle(
-                "Auto Reply Comments",
-                value=bool(business.get("auto_reply_comments", True)),
-                disabled="auto_reply_comments" not in business,
-            )
+            auto_reply_comments = st.toggle("Auto Reply Comments", value=bool(business.get("auto_reply_comments", True)), disabled="auto_reply_comments" not in business)
 
         if business.get("access_token") or business.get("page_access_token"):
             st.success("Instagram connected")
@@ -654,44 +631,7 @@ def business_editor(business):
             st.warning("Instagram is not connected")
 
         st.divider()
-        st.subheader("📲 Telegram")
-
-        telegram_enabled = st.toggle(
-            "Telegram Bot Enabled for this Business",
-            value=bool(business.get("telegram_bot_enabled", business.get("bot_enabled", True))),
-            disabled="telegram_bot_enabled" not in business,
-        )
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            telegram_business_username = st.text_input(
-                "Telegram Bot Username",
-                value=business.get("telegram_bot_username", TELEGRAM_BOT_USERNAME or ""),
-                disabled="telegram_bot_username" not in business,
-            )
-
-        with col2:
-            telegram_chat_id = st.text_input(
-                "Telegram Main Chat ID",
-                value=str(business.get("telegram_chat_id", "")),
-                disabled="telegram_chat_id" not in business,
-            )
-
-        if TELEGRAM_BOT_TOKEN:
-            st.success("Telegram token exists in environment/secrets")
-        else:
-            st.error("TELEGRAM_BOT_TOKEN is missing")
-
-        if TELEGRAM_BOT_USERNAME:
-            st.info(f"Telegram username: @{TELEGRAM_BOT_USERNAME.replace('@', '')}")
-        else:
-            st.warning("TELEGRAM_BOT_USERNAME is missing")
-
-        st.caption(f"Webhook URL: {telegram_webhook_url()}")
-
-        st.divider()
-        st.subheader("📦 Business Knowledge")
+        st.subheader("📦 Products and Sales Knowledge")
 
         products = st.text_area("Products / Services", value=business.get("products", ""), height=100)
         prices = st.text_area("Prices", value=business.get("prices", ""), height=90)
@@ -699,25 +639,25 @@ def business_editor(business):
         hours = st.text_area("Working Hours", value=business.get("working_hours", ""), height=80)
         faq = st.text_area("FAQ", value=business.get("faq", ""), height=120)
         catalog = st.text_input("Catalog Link", value=business.get("catalog_link", ""))
-        phone = st.text_input("Sales Phone", value=business.get("sales_phone", ""))
+        phone = st.text_input("Sales Manager Phone", value=business.get("sales_phone", ""))
 
         st.divider()
-        st.subheader("📱 Telegram Product Links")
+        st.subheader("📱 Product Quick Links")
 
         tg_single = st.text_input("Single Product Link", value=business.get("telegram_single", ""))
         tg_package = st.text_input("Package Link", value=business.get("telegram_package", ""))
         tg_bag = st.text_input("Bag / Meshok Link", value=business.get("telegram_bag", ""))
 
         st.divider()
-        st.subheader("🧠 Main Knowledge Prompt")
+        st.subheader("🧠 Main Sales Knowledge")
 
         knowledge = st.text_area("Knowledge", value=business.get("knowledge", ""), height=260)
 
-        submitted = st.form_submit_button("💾 Save Changes", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("💾 Save Milana Premium Setup", type="primary", use_container_width=True)
 
         if submitted:
             if not business_name.strip():
-                st.error("Business name is required.")
+                st.error("Account name is required.")
                 return
 
             update_data = {
@@ -733,9 +673,6 @@ def business_editor(business):
                 "ai_temperature": float(temperature),
                 "auto_reply_dms": auto_reply_dms,
                 "auto_reply_comments": auto_reply_comments,
-                "telegram_bot_enabled": telegram_enabled,
-                "telegram_bot_username": telegram_business_username.strip(),
-                "telegram_chat_id": telegram_chat_id.strip(),
                 "products": products.strip(),
                 "prices": prices.strip(),
                 "delivery_info": delivery.strip(),
@@ -758,117 +695,84 @@ def business_editor(business):
                 st.error(f"Save failed: {e}")
 
 
-if nav_option == "📊 Dashboard":
-    st.subheader(f"Welcome, {user_email.split('@')[0]}")
+if nav_option == "📊 Sales Overview":
+    st.subheader("Sales Overview")
     show_metrics()
 
     st.divider()
 
     col1, col2 = st.columns(2)
-
     with col1:
-        st.markdown("### Instagram Messages")
-        st.metric("Total Instagram Messages", get_message_count("instagram"))
-
+        st.metric("Instagram Messages", get_message_count("instagram"))
     with col2:
-        st.markdown("### Telegram Messages")
-        st.metric("Total Telegram Messages", get_message_count("telegram"))
+        st.metric("Telegram Messages", get_message_count("telegram"))
 
 
-elif nav_option == "📥 Inbox":
-    st.subheader("📥 Instagram Inbox")
+elif nav_option == "💬 Instagram Chat":
+    st.subheader("💬 Milana Premium Instagram Chat")
 
     businesses = get_allowed_businesses()
     business_map = {b.get("id"): b for b in businesses if b.get("id")}
     business_ids = list(business_map.keys())
 
     if not businesses:
-        st.warning("No businesses found.")
+        st.warning("No Milana Premium account found.")
     else:
-        top1, top2, top3 = st.columns([1.5, 1, 1])
-
+        top1, top2 = st.columns([2, 1])
         with top1:
-            search_text = st.text_input("Search conversations", placeholder="Customer ID, name, or message")
-
+            search_text = st.text_input("Search Instagram clients", placeholder="Search by client, message, or ID")
         with top2:
-            business_filter_options = {"All businesses": None}
-            for b in businesses:
-                business_filter_options[b.get("business_name", "No name")] = b.get("id")
-
-            selected_business_filter = st.selectbox("Business", list(business_filter_options.keys()))
-
-        with top3:
             unread_only = st.toggle("Unread only", value=False)
 
-        selected_business_id = business_filter_options[selected_business_filter]
-        filtered_business_ids = [selected_business_id] if selected_business_id else business_ids
-
-        conversations = get_instagram_conversations(filtered_business_ids, search_text=search_text)
+        conversations = get_instagram_conversations(business_ids, search_text=search_text)
 
         if unread_only:
             conversations = [c for c in conversations if c.get("unread_count", 0) > 0]
 
         if not conversations:
-            st.info("No Instagram DM conversations yet. Send a DM from a tester/admin account to your connected Instagram business account.")
+            st.info("No Instagram conversations yet.")
         else:
-            left, right = st.columns([1, 2.2])
+            left, right = st.columns([1.05, 2.4])
 
             with left:
-                st.markdown("### Conversations")
-
+                st.markdown("### Instagram Clients")
                 options = {}
+
                 for c in conversations:
                     business = business_map.get(c["business_id"], {})
                     unread = c.get("unread_count", 0)
                     unread_badge = f" 🔴 {unread}" if unread else ""
-                    label = f"{c.get('customer_name') or c.get('customer_id')} | {business.get('business_name', 'Business')}{unread_badge}"
+                    preview = str(c.get("last_message", ""))[:34]
+                    label = f"👤 Client {str(c.get('customer_id'))[-4:]}{unread_badge}\n{preview}"
                     options[label] = c
 
-                selected_label = st.radio(
-                    "Select chat",
-                    list(options.keys()),
-                    label_visibility="collapsed",
-                )
-
+                selected_label = st.radio("Select Instagram chat", list(options.keys()), label_visibility="collapsed")
                 selected_conversation = options[selected_label]
-                selected_business = business_map.get(selected_conversation["business_id"], {})
-
-                st.markdown(f"""
-                <div class="inbox-card">
-                    <b>Customer</b><br>
-                    {html.escape(str(selected_conversation.get("customer_name") or selected_conversation.get("customer_id")))}<br><br>
-                    <b>Business</b><br>
-                    {html.escape(str(selected_business.get("business_name", "")))}<br><br>
-                    <b>Platform</b><br>
-                    Instagram DM<br><br>
-                    <b>Messages</b><br>
-                    {selected_conversation.get("total_messages", 0)}
-                </div>
-                """, unsafe_allow_html=True)
 
             with right:
                 selected_business = business_map.get(selected_conversation["business_id"])
 
                 if not selected_business:
-                    st.error("Business not found for this conversation.")
+                    st.error("Sales account not found for this conversation.")
                     st.stop()
 
                 customer_id = selected_conversation["customer_id"]
+                client_title = f"Instagram Client {str(customer_id)[-4:]}"
 
                 mark_conversation_read(selected_business["id"], customer_id)
                 messages = get_conversation_messages(selected_business["id"], customer_id)
 
-                header_left, header_right = st.columns([2, 1])
+                st.markdown('<div class="chat-shell">', unsafe_allow_html=True)
 
-                with header_left:
-                    st.markdown(f"### Chat with `{customer_id}`")
-                    st.caption(f"Business: {selected_business.get('business_name', '')}")
+                st.markdown(f"""
+                <div class="chat-top">
+                    <span class="avatar">IG</span>
+                    <b>{html.escape(client_title)}</b><br>
+                    <span class="small-muted">Milana Premium Instagram sales chat</span>
+                </div>
+                """, unsafe_allow_html=True)
 
-                with header_right:
-                    if st.button("Refresh", use_container_width=True):
-                        st.rerun()
-
-                chat_box = st.container(height=480)
+                chat_box = st.container(height=500)
 
                 with chat_box:
                     for msg in messages:
@@ -880,7 +784,6 @@ elif nav_option == "📥 Inbox":
                             st.markdown(
                                 f"""
                                 <div class="outbound-msg">
-                                    <b>You</b><br>
                                     {content}
                                     <div class="small-muted">{created_at}</div>
                                 </div>
@@ -891,7 +794,6 @@ elif nav_option == "📥 Inbox":
                             st.markdown(
                                 f"""
                                 <div class="inbound-msg">
-                                    <b>Customer</b><br>
                                     {content}
                                     <div class="small-muted">{created_at}</div>
                                 </div>
@@ -900,299 +802,178 @@ elif nav_option == "📥 Inbox":
                             )
 
                 with st.form("manual_instagram_reply", clear_on_submit=True):
-                    reply_text = st.text_area("Reply", placeholder="Write your reply...", height=100)
-                    send_clicked = st.form_submit_button("Send Instagram DM", type="primary", use_container_width=True)
+                    reply_text = st.text_area("Message", placeholder="Reply as Milana Premium...", height=90)
+                    c1, c2, c3, c4 = st.columns(4)
 
-                    if send_clicked:
-                        clean_reply = reply_text.strip()
+                    with c1:
+                        send_clicked = st.form_submit_button("Send", type="primary", use_container_width=True)
+                    with c2:
+                        catalog_clicked = st.form_submit_button("Catalog", use_container_width=True)
+                    with c3:
+                        phone_clicked = st.form_submit_button("Contact", use_container_width=True)
+                    with c4:
+                        product_clicked = st.form_submit_button("Ask Product", use_container_width=True)
 
-                        if not clean_reply:
-                            st.error("Reply cannot be empty.")
+                    quick_text = ""
+                    if catalog_clicked:
+                        link = selected_business.get("catalog_link", "")
+                        quick_text = f"Katalogimiz: {link}" if link else "Qaysi mahsulot katalogi kerak edi?"
+                    elif phone_clicked:
+                        phone = selected_business.get("sales_phone", "")
+                        quick_text = f"Savdo bo‘limi bilan bog‘lanish: {phone}" if phone else "Telefon raqamingizni qoldiring, menejerimiz bog‘lanadi."
+                    elif product_clicked:
+                        quick_text = "Qaysi mahsulot sizni qiziqtiryapti?"
+
+                    final_text = quick_text or reply_text.strip()
+
+                    if send_clicked or catalog_clicked or phone_clicked or product_clicked:
+                        if not final_text.strip():
+                            st.error("Message cannot be empty.")
                         else:
                             ok, result = send_instagram_dm_from_backend(
                                 business_id=selected_business["id"],
                                 customer_id=customer_id,
-                                text=clean_reply,
+                                text=final_text.strip(),
                             )
 
                             if ok:
-                                st.success("Reply sent.")
+                                st.success("Sent.")
                                 time.sleep(0.5)
                                 st.rerun()
                             else:
-                                st.error("Failed to send Instagram DM.")
+                                st.error("Failed to send message.")
                                 st.json(result)
 
+                st.markdown("</div>", unsafe_allow_html=True)
 
-elif nav_option in ["📋 Businesses", "📋 My Business"]:
+
+elif nav_option in ["📦 Business Setup"]:
     businesses = get_allowed_businesses()
 
     if not businesses:
-        st.warning("No businesses found.")
+        st.warning("No Milana Premium account found.")
     else:
-        if len(businesses) == 1:
-            business = businesses[0]
+        business = businesses[0] if len(businesses) == 1 else st.selectbox(
+            "Select Account",
+            {f"{b.get('business_name', 'Milana Premium')} | IG: {b.get('instagram_business_id', 'No ID')}": b for b in businesses},
+        )
+        if isinstance(business, str):
+            pass
         else:
-            business_options = {
-                f"{b.get('business_name', 'No name')} | IG: {b.get('instagram_business_id', 'No ID')}": b
-                for b in businesses
-            }
-            selected = st.selectbox("Select Business", list(business_options.keys()))
-            business = business_options[selected]
-
-        business_editor(business)
+            business_editor(business)
 
 
-elif nav_option == "➕ Add Business" and is_admin:
-    st.subheader("➕ Add Business")
+elif nav_option == "➕ Add Account" and is_admin:
+    st.subheader("➕ Add Milana Premium Account")
 
     with st.form("add_business"):
-        col1, col2 = st.columns(2)
+        name = st.text_input("Account Name", value="Milana Premium")
+        ig_id = st.text_input("Instagram Business ID *")
+        fb_id = st.text_input("Facebook Page ID")
+        knowledge = st.text_area("Main Sales Knowledge", height=180)
 
-        with col1:
-            name = st.text_input("Business Name *")
-            ig_id = st.text_input("Instagram Business ID *")
-            fb_id = st.text_input("Facebook Page ID")
-
-        with col2:
-            biz_type = st.text_input("Business Type")
-            lang = st.selectbox("Language", ["uz", "ru", "en"])
-            tone_val = st.text_input("Tone", value="friendly, polite")
-
-        st.divider()
-
-        products = st.text_area("Products / Services")
-        prices = st.text_area("Prices")
-        delivery_info = st.text_area("Delivery Info")
-        faq = st.text_area("FAQ")
-        catalog_link = st.text_input("Catalog Link")
-        sales_phone = st.text_input("Sales Phone")
-
-        st.divider()
-        st.subheader("💬 Default AI Reply Behavior")
-
-        reply_style = st.selectbox("Reply Style", ["short_comfortable", "very_short", "normal_sales"])
-        catalog_policy = st.selectbox("Catalog Policy", ["only_when_customer_asks", "offer_when_relevant", "never_send"])
-        ai_max_tokens = st.number_input("AI Max Tokens", min_value=50, max_value=500, value=130, step=10)
-        ai_temperature = st.number_input("AI Temperature", min_value=0.0, max_value=1.0, value=0.5, step=0.1)
-        ai_reply_rules = st.text_area("AI Reply Rules", value=DEFAULT_AI_REPLY_RULES, height=150)
-
-        st.divider()
-
-        knowledge = st.text_area("Main Knowledge Prompt", height=180)
-
-        submitted = st.form_submit_button("Create Business", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("Create Account", type="primary", use_container_width=True)
 
         if submitted:
             if not name.strip() or not ig_id.strip():
-                st.error("Business Name and Instagram Business ID are required.")
+                st.error("Account Name and Instagram Business ID are required.")
             else:
                 data = {
                     "business_name": name.strip(),
                     "instagram_business_id": ig_id.strip(),
                     "facebook_page_id": fb_id.strip(),
-                    "business_type": biz_type.strip(),
-                    "language": lang,
-                    "tone": tone_val.strip(),
+                    "business_type": "Textile and Clothing",
+                    "language": "uz",
+                    "tone": "friendly, polite, sales-focused",
                     "bot_enabled": False,
                     "knowledge": knowledge.strip(),
                     "access_token": "",
                     "page_access_token": "",
                     "oauth_provider": "",
                     "facebook_page_name": "",
-                    "products": products.strip(),
-                    "prices": prices.strip(),
-                    "delivery_info": delivery_info.strip(),
+                    "products": "",
+                    "prices": "",
+                    "delivery_info": "",
                     "working_hours": "",
-                    "faq": faq.strip(),
-                    "catalog_link": catalog_link.strip(),
-                    "sales_phone": sales_phone.strip(),
+                    "faq": "",
+                    "catalog_link": "",
+                    "sales_phone": "",
                     "telegram_single": "",
                     "telegram_package": "",
                     "telegram_bag": "",
-                    "reply_style": reply_style,
-                    "catalog_policy": catalog_policy,
-                    "ai_reply_rules": ai_reply_rules.strip(),
-                    "ai_max_tokens": int(ai_max_tokens),
-                    "ai_temperature": float(ai_temperature),
                 }
 
                 try:
                     create_business(data)
-                    st.success("Business created.")
+                    st.success("Account created.")
                     time.sleep(0.5)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Creation failed: {e}")
 
 
-elif nav_option == "📲 Telegram":
-    st.subheader("📲 Telegram Bot Manager")
+elif nav_option == "📲 Telegram Setup":
+    st.subheader("📲 Telegram Setup")
 
     col1, col2, col3 = st.columns(3)
-
     with col1:
         st.metric("Telegram Token", "OK" if TELEGRAM_BOT_TOKEN else "Missing")
-
     with col2:
         st.metric("Bot Username", f"@{TELEGRAM_BOT_USERNAME.replace('@', '')}" if TELEGRAM_BOT_USERNAME else "Missing")
-
     with col3:
         st.metric("Telegram Messages", get_message_count("telegram"))
 
     st.divider()
-
-    st.markdown("### Webhook")
     st.code(telegram_webhook_url())
 
     col1, col2, col3 = st.columns(3)
-
     with col1:
         if st.button("Set Telegram Webhook", use_container_width=True):
             ok, data = set_telegram_webhook()
-            if ok and data.get("ok"):
-                st.success("Telegram webhook set successfully.")
-            else:
-                st.error("Failed to set webhook.")
             st.json(data)
-
     with col2:
         if st.button("Check Webhook Info", use_container_width=True):
             ok, data = get_telegram_webhook_info()
-            if ok:
-                st.json(data)
-            else:
-                st.error("Could not get webhook info.")
-                st.json(data)
-
+            st.json(data)
     with col3:
         st.link_button("Open Backend Check", f"{BACKEND_URL}/webhook/telegram", use_container_width=True)
 
-    st.divider()
 
-    st.markdown("### Telegram Business Control")
+elif nav_option == "👥 Managers" and is_admin:
+    st.subheader("👥 Managers")
 
-    businesses = get_allowed_businesses()
-
-    if not businesses:
-        st.warning("No businesses found.")
-    else:
-        business_options = {
-            f"{b.get('business_name', 'No name')} | {b.get('id', '')[:8]}": b
-            for b in businesses
-        }
-        selected = st.selectbox("Select Business", list(business_options.keys()))
-        business = business_options[selected]
-
-        with st.form("telegram_business_settings"):
-            telegram_enabled = st.toggle(
-                "Telegram Enabled",
-                value=bool(business.get("telegram_bot_enabled", business.get("bot_enabled", True))),
-                disabled="telegram_bot_enabled" not in business,
-            )
-
-            telegram_bot_username = st.text_input(
-                "Telegram Bot Username",
-                value=business.get("telegram_bot_username", TELEGRAM_BOT_USERNAME or ""),
-                disabled="telegram_bot_username" not in business,
-            )
-
-            telegram_chat_id = st.text_input(
-                "Main Telegram Chat ID",
-                value=str(business.get("telegram_chat_id", "")),
-                disabled="telegram_chat_id" not in business,
-            )
-
-            telegram_notes = st.text_area(
-                "Telegram Notes",
-                value=business.get("telegram_notes", ""),
-                height=100,
-                disabled="telegram_notes" not in business,
-            )
-
-            if st.form_submit_button("Save Telegram Settings", type="primary", use_container_width=True):
-                update_data = {
-                    "telegram_bot_enabled": telegram_enabled,
-                    "telegram_bot_username": telegram_bot_username.strip(),
-                    "telegram_chat_id": telegram_chat_id.strip(),
-                    "telegram_notes": telegram_notes.strip(),
-                }
-
-                try:
-                    safe_update_business(business, update_data)
-                    st.success("Telegram settings saved.")
-                    time.sleep(0.5)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Save failed: {e}")
-
-        st.info(
-            "If Telegram fields are disabled, add these columns to your businesses table: "
-            "telegram_bot_enabled, telegram_bot_username, telegram_chat_id, telegram_notes."
-        )
-
-
-elif nav_option == "👥 Users" and is_admin:
-    st.subheader("👥 Users")
-
-    with st.expander("Create / Reset User", expanded=True):
-        email_u = st.text_input("User Email")
+    with st.expander("Create / Reset Manager", expanded=True):
+        email_u = st.text_input("Manager Email")
         pwd_u = st.text_input("Password", type="password")
 
         if st.button("Create / Reset", use_container_width=True):
             if email_u and pwd_u:
                 create_or_update_dashboard_user(email_u, pwd_u)
-                st.success("User saved.")
+                st.success("Manager saved.")
                 st.rerun()
             else:
                 st.error("Email and password required.")
 
-    with st.expander("Activate / Deactivate User"):
-        email_status = st.text_input("Email")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            if st.button("Activate", use_container_width=True):
-                if email_status:
-                    set_user_active_status(email_status, True)
-                    st.success("Activated.")
-                else:
-                    st.error("Email required.")
-
-        with col2:
-            if st.button("Deactivate", use_container_width=True):
-                if email_status:
-                    set_user_active_status(email_status, False)
-                    st.success("Deactivated.")
-                else:
-                    st.error("Email required.")
-
-    st.divider()
-
     users = get_all_dashboard_users()
-
     if users:
         st.dataframe(users, use_container_width=True)
-    else:
-        st.info("No users found.")
 
 
-elif nav_option == "🔗 Assignments" and is_admin:
-    st.subheader("🔗 Assignments")
+elif nav_option == "🔗 Access" and is_admin:
+    st.subheader("🔗 Access")
 
     all_biz = get_all_businesses()
 
     if not all_biz:
-        st.warning("No businesses found.")
+        st.warning("No account found.")
     else:
         biz_map = {
-            f"{b.get('business_name', 'No name')} ({b.get('id', '')[:8]})": b["id"]
+            f"{b.get('business_name', 'Milana Premium')} ({b.get('id', '')[:8]})": b["id"]
             for b in all_biz
         }
 
-        email_assign = st.text_input("User Email")
-        selected_biz = st.selectbox("Business", list(biz_map.keys()))
+        email_assign = st.text_input("Manager Email")
+        selected_biz = st.selectbox("Milana Account", list(biz_map.keys()))
         role = st.selectbox("Role", ["owner", "editor"])
 
         col1, col2 = st.columns(2)
@@ -1207,7 +988,7 @@ elif nav_option == "🔗 Assignments" and is_admin:
                     st.error("Email required.")
 
         with col2:
-            if st.button("Remove Assignment", use_container_width=True):
+            if st.button("Remove Access", use_container_width=True):
                 if email_assign:
                     remove_business_assignment(email_assign, biz_map[selected_biz])
                     st.success("Removed.")
@@ -1215,11 +996,6 @@ elif nav_option == "🔗 Assignments" and is_admin:
                 else:
                     st.error("Email required.")
 
-    st.divider()
-
-    assignments = get_business_assignments()
-
-    if assignments:
-        st.dataframe(assignments, use_container_width=True)
-    else:
-        st.info("No assignments found.")
+        assignments = get_business_assignments()
+        if assignments:
+            st.dataframe(assignments, use_container_width=True)
