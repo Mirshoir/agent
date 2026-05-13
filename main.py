@@ -128,6 +128,31 @@ def already_processed(cache: dict, event_id: str) -> bool:
     return False
 
 
+def is_chat_ai_enabled(platform, channel, customer_id, business_id=None):
+    try:
+        query = (
+            supabase.table("chat_ai_settings")
+            .select("ai_enabled")
+            .eq("platform", platform)
+            .eq("channel", channel or "")
+            .eq("customer_id", str(customer_id))
+        )
+
+        if business_id:
+            query = query.eq("business_id", business_id)
+
+        result = query.limit(1).execute()
+        rows = result.data or []
+
+        if not rows:
+            return True
+
+        return bool(rows[0].get("ai_enabled", True))
+    except Exception as e:
+        log("Could not check chat AI setting", str(e))
+        return True
+
+
 def sanitize_business_row(row: dict):
     if not row:
         return None
@@ -776,6 +801,10 @@ async def process_messaging_event(entry_id: str, messaging: dict):
     access_token = get_business_access_token(business)
 
     if not access_token:
+        return
+
+    if not is_chat_ai_enabled("instagram", "dm", sender_id, business.get("id")):
+        log("AI disabled for this Instagram chat", {"customer_id": sender_id, "business_id": business.get("id")})
         return
 
     reply_text = get_ai_reply(message_text, business)
