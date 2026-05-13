@@ -993,20 +993,332 @@ async def process_comment_event(entry_id: str, change: dict):
     )
 
 
-@app.get("/")
-async def home():
-    return {
+@app.get("/api/health")
+async def api_health():
+    """Health check endpoint"""
+    return {"status": "ok", "version": "2.1.0"}
+
+
+@app.post("/api/auth/login")
+async def api_login(email: str = "", password: str = ""):
+    """Login endpoint for frontend"""
+    if not email or not password:
+        return JSONResponse({"status": "error", "message": "Email and password required"}, status_code=400)
+    
+    # This is a placeholder - implement your actual auth logic
+    # For now, return a token structure
+    return JSONResponse({
         "status": "ok",
-        "version": "milana_social_sales_chat_with_media_support",
-        "webhook": "/webhook",
-        "telegram_bot_webhook": "/webhook/telegram",
-        "dashboard_send_instagram_dm": "/dashboard/send-instagram-dm",
-        "dashboard_send_instagram_media": "/dashboard/send-instagram-media",
-        "dashboard_send_telegram_user": "/dashboard/send-telegram-user-message",
-        "dashboard_send_telegram_media": "/dashboard/send-telegram-media",
-        "verify_token_set": bool(VERIFY_TOKEN),
-        "meta_app_id_set": bool(META_APP_ID),
-    }
+        "user": {
+            "email": email,
+            "id": "user_123",
+            "is_admin": email == "admin@example.com"
+        },
+        "token": "jwt_token_here"
+    })
+
+
+@app.get("/api/businesses")
+async def api_get_businesses():
+    """Get all businesses"""
+    try:
+        result = supabase.table("businesses").select("*").order("created_at", desc=True).execute()
+        return {
+            "status": "ok",
+            "count": len(result.data or []),
+            "data": result.data or []
+        }
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.get("/api/business/{business_id}")
+async def api_get_business(business_id: str):
+    """Get single business"""
+    try:
+        result = supabase.table("businesses").select("*").eq("id", business_id).limit(1).execute()
+        if not result.data:
+            return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
+        return {"status": "ok", "data": result.data[0]}
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.get("/api/conversations")
+async def api_get_conversations(platform: str = "all", search: str = ""):
+    """Get all conversations"""
+    try:
+        query = supabase.table("inbox_messages").select("*").order("created_at", desc=True).limit(900)
+        
+        if platform != "all":
+            query = query.eq("platform", platform)
+        
+        rows = query.execute().data or []
+        
+        # Group into conversations
+        conversations = {}
+        for row in rows:
+            business_id = row.get("business_id")
+            platform = row.get("platform", "instagram")
+            channel = row.get("channel", "")
+            customer_id = str(row.get("customer_id") or "").strip()
+            
+            if not business_id or not customer_id:
+                continue
+            
+            key = f"{platform}::{business_id}::{channel}::{customer_id}"
+            
+            if key not in conversations:
+                conversations[key] = {
+                    "id": key,
+                    "business_id": business_id,
+                    "platform": platform,
+                    "channel": channel,
+                    "customer_id": customer_id,
+                    "chat_id": str(row.get("chat_id") or customer_id),
+                    "customer_name": row.get("customer_name") or f"Client {str(customer_id)[-4:]}",
+                    "last_message": row.get("content", ""),
+                    "last_message_at": row.get("created_at", ""),
+                    "unread_count": 0,
+                    "total_messages": 0,
+                }
+            
+            conversations[key]["total_messages"] += 1
+            if row.get("direction") == "inbound" and not bool(row.get("is_read", False)):
+                conversations[key]["unread_count"] += 1
+        
+        results = list(conversations.values())
+        
+        # Filter by search
+        if search.strip():
+            q = search.lower().strip()
+            results = [c for c in results if q in f"{c.get('customer_id','')} {c.get('customer_name','')} {c.get('last_message','')}".lower()]
+        
+        return {
+            "status": "ok",
+            "count": len(results),
+            "data": results
+        }
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.get("/api/conversation/{conversation_id}")
+async def api_get_conversation_messages(conversation_id: str, limit: int = 250):
+    """Get messages for a conversation"""
+    try:
+        # Parse conversation_id (format: platform::business_id::channel::customer_id)
+        parts = conversation_id.split("::")
+        if len(parts) != 4:
+            return JSONResponse({"status": "error", "message": "Invalid conversation ID"}, status_code=400)
+        
+        platform, business_id, channel, customer_id = parts
+        
+        query = (
+            supabase.table("inbox_messages")
+            .select("*")
+            .eq("platform", platform)
+            .eq("business_id", business_id)
+            .eq("customer_id", str(customer_id))
+        )
+        
+        if channel:
+            query = query.eq("channel", channel)
+        
+        messages = query.order("created_at", desc=False).limit(limit).execute().data or []
+        
+        return {
+            "status": "ok",
+            "count": len(messages),
+            "data": messages
+        }
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.post("/api/send-message")
+async def api_send_message(
+    conversation_id: str,
+    text: str,
+    business_id: str,
+    x_dashboard_secret: str = Header(default=""),
+):
+    """Send text message"""
+    if DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    
+    try:
+        # Parse conversation_id
+        parts = conversation_id.split("::")
+        platform, biz_id, channel, customer_id = parts
+        
+        business = get_business_by_id(biz_id)
+        if not business:
+            return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
+        
+        if platform == "instagram":
+            ok, result = send_instagram_dm(
+                access_token=get_business_access_token(business),
+                recipient_id=customer_id,
+                text=text,
+                business=business
+            )
+        elif platform == "telegram":
+            ok, result = send_telegram_bot_message(
+                chat_id=customer_id,
+                text=text
+            )
+        else:
+            return JSONResponse({"status": "error", "message": "Unknown platform"}, status_code=400)
+        
+        return {
+            "status": "ok" if ok else "error",
+            "meta": result
+        }
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.post("/api/send-file")
+async def api_send_file(
+    conversation_id: str,
+    caption: str = "",
+    media_type: str = "photo",
+    file_data: str = "",
+    filename: str = "",
+    business_id: str = "",
+    x_dashboard_secret: str = Header(default=""),
+):
+    """Send file (photo/video)"""
+    if DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    
+    try:
+        # Parse conversation_id
+        parts = conversation_id.split("::")
+        platform, biz_id, channel, customer_id = parts
+        
+        business = get_business_by_id(biz_id)
+        if not business:
+            return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
+        
+        if platform == "instagram":
+            ok, result = send_instagram_file_from_backend(
+                business_id=biz_id,
+                customer_id=customer_id,
+                caption=caption,
+                media_type=media_type,
+                file_data=file_data,
+                filename=filename
+            )
+        elif platform == "telegram":
+            ok, result = send_telegram_file_from_backend(
+                customer_id=customer_id,
+                caption=caption,
+                media_type=media_type,
+                file_data=file_data,
+                filename=filename,
+                chat_id=customer_id
+            )
+        else:
+            return JSONResponse({"status": "error", "message": "Unknown platform"}, status_code=400)
+        
+        return {
+            "status": "ok" if ok else "error",
+            "meta": result
+        }
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.post("/api/send-voice")
+async def api_send_voice(
+    customer_id: str,
+    file_data: str = "",
+    filename: str = "",
+    chat_id: str = "",
+    x_dashboard_secret: str = Header(default=""),
+):
+    """Send voice message (Telegram only)"""
+    if DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    
+    try:
+        ok, result = send_telegram_voice_file_from_backend(
+            customer_id=customer_id,
+            file_data=file_data,
+            filename=filename,
+            chat_id=chat_id or customer_id
+        )
+        
+        return {
+            "status": "ok" if ok else "error",
+            "meta": result
+        }
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.post("/api/chat-ai-toggle")
+async def api_toggle_chat_ai(
+    business_id: str,
+    platform: str,
+    channel: str,
+    customer_id: str,
+    enabled: bool,
+    x_dashboard_secret: str = Header(default=""),
+):
+    """Toggle AI for conversation"""
+    if DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    
+    try:
+        set_chat_ai_enabled(business_id, platform, channel, customer_id, enabled)
+        return {"status": "ok", "enabled": enabled}
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.post("/api/business-settings")
+async def api_update_business_settings(
+    business_id: str,
+    settings: dict,
+    x_dashboard_secret: str = Header(default=""),
+):
+    """Update business settings"""
+    if DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    
+    try:
+        business = get_business_by_id(business_id)
+        if not business:
+            return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
+        
+        update_business(business_id, settings)
+        return {"status": "ok", "message": "Settings updated"}
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.get("/api/stats")
+async def api_get_stats():
+    """Get dashboard statistics"""
+    try:
+        businesses = get_all_businesses()
+        instagram_count = get_message_count("instagram")
+        telegram_count = get_message_count("telegram")
+        
+        return {
+            "status": "ok",
+            "data": {
+                "total_accounts": len(businesses),
+                "active_accounts": sum(1 for b in businesses if b.get("bot_enabled")),
+                "instagram_messages": instagram_count,
+                "telegram_messages": telegram_count,
+            }
+        }
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 
 @app.head("/")
