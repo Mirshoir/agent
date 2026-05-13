@@ -206,10 +206,10 @@ html, body, [data-testid="stAppViewContainer"] {
 .messages-area {
     flex: 1;
     overflow-y: auto;
-    padding: 24px;
+    padding: 16px 24px;
     display: flex;
     flex-direction: column;
-    gap: 16px;
+    gap: 4px;
     background: white;
 }
 
@@ -217,6 +217,8 @@ html, body, [data-testid="stAppViewContainer"] {
     display: flex;
     gap: 12px;
     animation: slideIn 0.3s ease-out;
+    width: 100%;
+    margin-bottom: 8px;
 }
 
 .message.outbound {
@@ -224,12 +226,15 @@ html, body, [data-testid="stAppViewContainer"] {
 }
 
 .message-bubble {
-    max-width: 70%;
+    max-width: 75%;
     padding: 12px 16px;
     border-radius: 12px;
     word-wrap: break-word;
     font-size: 14px;
     line-height: 1.5;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
 }
 
 .message.inbound .message-bubble {
@@ -248,18 +253,21 @@ html, body, [data-testid="stAppViewContainer"] {
 
 .message-media {
     max-width: 100%;
-    max-height: 300px;
+    max-height: 350px;
     border-radius: 8px;
     object-fit: cover;
-    margin-bottom: 8px;
-    border: 1px solid var(--border);
+    border: none;
+}
+
+.message-text {
+    word-wrap: break-word;
+    white-space: pre-wrap;
 }
 
 .message-time {
     font-size: 11px;
-    color: var(--text-secondary);
-    margin-top: 6px;
     opacity: 0.7;
+    margin-top: 4px;
 }
 
 @keyframes slideIn {
@@ -1128,7 +1136,6 @@ with st.sidebar:
                 "💬 Conversations",
                 "⚙️ Business Config",
                 "➕ Add Business",
-                "📲 Telegram Setup",
                 "👥 Team Members",
                 "🔗 Access Control",
             ],
@@ -1140,7 +1147,6 @@ with st.sidebar:
                 "📈 Analytics",
                 "💬 Conversations",
                 "⚙️ Business Config",
-                "📲 Telegram Setup",
             ],
         )
 
@@ -1190,16 +1196,24 @@ def render_message(msg, selected_business):
     html_content = f'<div class="message {message_class}">'
     html_content += f'<div class="message-bubble">'
     
-    if media_type and media_url:
-        if media_type == "photo":
-            html_content += f'<img src="{media_url}" class="message-media" style="max-width: 300px;">'
-        elif media_type == "video":
-            html_content += f'<video controls class="message-media" style="max-width: 300px;"><source src="{media_url}"></video>'
-        elif media_type == "voice":
-            html_content += f'<audio controls class="message-media"><source src="{media_url}"></audio>'
+    # Display media
+    if media_type == "photo" and media_url:
+        html_content += f'<img src="{media_url}" class="message-media" loading="lazy" alt="Photo">'
+    elif media_type == "video" and media_url:
+        html_content += f'<video controls class="message-media"><source src="{media_url}" type="video/mp4">Your browser does not support the video tag.</video>'
+    elif media_type == "voice" and media_url:
+        html_content += f'<audio controls class="message-media"><source src="{media_url}" type="audio/ogg">Your browser does not support the audio element.</audio>'
     
-    if content:
-        html_content += f'{content}'
+    # Display text
+    if content and content.strip() not in ["📸 Photo", "🎥 Video", "🎤 Voice message", "📸 Photo sent", "🎥 Video sent"]:
+        html_content += f'<div class="message-text">{content}</div>'
+    elif media_type:
+        if media_type == "photo":
+            html_content += '<div class="message-text">📸 Photo</div>'
+        elif media_type == "video":
+            html_content += '<div class="message-text">🎥 Video</div>'
+        elif media_type == "voice":
+            html_content += '<div class="message-text">🎤 Voice Message</div>'
     
     html_content += f'<div class="message-time">{created_at}</div>'
     html_content += '</div></div>'
@@ -1378,6 +1392,9 @@ elif nav_option == "💬 Conversations":
                 for msg in messages:
                     render_message(msg, selected_business)
                 st.markdown('</div>', unsafe_allow_html=True)
+                
+                # Add spacing for input
+                st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True)
 
                 with st.form("manual_reply", clear_on_submit=True):
                     reply_text = st.text_area("Message", placeholder="Type your reply...", height=80)
@@ -1492,40 +1509,6 @@ elif nav_option == "➕ Add Business" and is_admin:
                     st.rerun()
                 except Exception as e:
                     st.error(f"❌ Failed: {e}")
-
-elif nav_option == "📲 Telegram Setup":
-    st.subheader("📲 Telegram Bot Setup")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.metric("Bot Status", "✅" if TELEGRAM_BOT_TOKEN else "❌")
-
-    with col2:
-        st.metric("Username", f"@{TELEGRAM_BOT_USERNAME.replace('@', '')}" if TELEGRAM_BOT_USERNAME else "Not Set")
-
-    with col3:
-        st.metric("Messages", get_message_count("telegram"))
-
-    st.divider()
-
-    st.markdown("### Webhook URL")
-    st.code(telegram_webhook_url())
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        if st.button("🔗 Set Webhook", use_container_width=True):
-            ok, data = set_telegram_webhook()
-            st.json(data)
-
-    with col2:
-        if st.button("✓ Check", use_container_width=True):
-            ok, data = get_telegram_webhook_info()
-            st.json(data)
-
-    with col3:
-        st.link_button("📌 Test", f"{BACKEND_URL}/webhook/telegram", use_container_width=True)
 
 elif nav_option == "👥 Team Members" and is_admin:
     st.subheader("👥 Team Management")
