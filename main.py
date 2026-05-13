@@ -98,11 +98,29 @@ class ManualTelegramMessage(BaseModel):
     text: str
 
 
-class ManualTelegramMedia(BaseModel):
+class ManualTelegramFile(BaseModel):
+    customer_id: str
+    chat_id: str
+    caption: str = ""
+    media_type: str  # "photo" or "video"
+    file_data: str  # base64 encoded
+    filename: str
+
+
+class ManualTelegramVoiceFile(BaseModel):
+    customer_id: str
+    chat_id: str
+    file_data: str  # base64 encoded
+    filename: str
+
+
+class ManualInstagramFile(BaseModel):
+    business_id: str
     customer_id: str
     caption: str = ""
-    media_type: str  # "photo", "video", "voice"
-    media_file_id: str
+    media_type: str  # "photo" or "video"
+    file_data: str  # base64 encoded
+    filename: str
 
 
 def log(title, data=None):
@@ -819,11 +837,42 @@ async def process_messaging_event(entry_id: str, messaging: dict):
     message_text = message.get("text") or ""
     message_id = message.get("mid") or str(messaging.get("timestamp") or "")
     is_echo = bool(message.get("is_echo"))
+    
+    # Handle media
+    media_type = None
+    media_url = None
+    attachment = message.get("attachments", [])
+    
+    if attachment and len(attachment) > 0:
+        att = attachment[0]
+        att_type = att.get("type", "")
+        att_payload = att.get("payload", {})
+        att_url = att_payload.get("url", "")
+        
+        if att_type == "image":
+            media_type = "photo"
+            media_url = att_url
+            if not message_text:
+                message_text = "📸 Photo"
+        elif att_type == "video":
+            media_type = "video"
+            media_url = att_url
+            if not message_text:
+                message_text = "🎥 Video"
+        elif att_type == "file":
+            media_type = "file"
+            media_url = att_url
+            if not message_text:
+                message_text = "📎 File"
 
     if is_echo:
         return
 
-    if not sender_id or not recipient_id or not message_text:
+    if not sender_id or not recipient_id:
+        return
+    
+    # Check if we have text or media
+    if not message_text and not media_type:
         return
 
     if already_processed(processed_message_ids, message_id):
@@ -843,6 +892,8 @@ async def process_messaging_event(entry_id: str, messaging: dict):
         platform_message_id=message_id,
         raw_payload=messaging,
         is_read=False,
+        media_type=media_type,
+        media_url=media_url,
     )
 
     if not business.get("bot_enabled", True):
@@ -860,7 +911,7 @@ async def process_messaging_event(entry_id: str, messaging: dict):
         log("AI disabled for this Instagram chat", {"customer_id": sender_id, "business_id": business.get("id")})
         return
 
-    reply_text = get_ai_reply(message_text, business)
+    reply_text = get_ai_reply(message_text or "Photo/Video received", business)
     should_send_catalog = wants_catalog(message_text) and bool(get_catalog_link(business))
 
     if should_send_catalog:
@@ -1216,69 +1267,254 @@ async def dashboard_send_telegram_user_message(
     return JSONResponse({"status": "ok", "meta": result}, status_code=200)
 
 
-@app.post("/dashboard/send-telegram-media")
-async def dashboard_send_telegram_media(
-    payload: ManualTelegramMedia,
+@app.post("/dashboard/send-telegram-file")
+async def dashboard_send_telegram_file(
+    payload: ManualTelegramFile,
     x_dashboard_secret: str = Header(default=""),
 ):
     if DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET:
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
 
     customer_id = normalize_id(payload.customer_id)
+    chat_id = normalize_id(payload.chat_id)
 
-    if not customer_id or not payload.media_file_id:
-        return JSONResponse({"status": "error", "message": "Missing customer_id or media_file_id"}, status_code=400)
-
-    chat_id = customer_id
-
-    if payload.media_type == "photo":
-        res = send_telegram_photo(
-            chat_id=chat_id,
-            photo_file_id=payload.media_file_id,
-            caption=payload.caption,
-        )
-    elif payload.media_type == "video":
-        res = send_telegram_video(
-            chat_id=chat_id,
-            video_file_id=payload.media_file_id,
-            caption=payload.caption,
-        )
-    elif payload.media_type == "voice":
-        res = send_telegram_voice(
-            chat_id=chat_id,
-            voice_file_id=payload.media_file_id,
-        )
-    else:
-        return JSONResponse({"status": "error", "message": "Unsupported media type"}, status_code=400)
-
-    if res is None:
-        return JSONResponse({"status": "error", "message": "Send failed"}, status_code=500)
+    if not customer_id or not payload.file_data:
+        return JSONResponse({"status": "error", "message": "Missing customer_id or file_data"}, status_code=400)
 
     try:
-        result = res.json()
-    except Exception:
-        result = {"text": res.text}
+        import base64
+        import tempfile
+        import os
+        
+        # Decode base64 file
+        file_bytes = base64.b64decode(payload.file_data)
+        
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{payload.filename}") as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+        
+        try:
+            # Upload to Telegram using multipart
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/send{'Photo' if payload.media_type == 'photo' else 'Video'}"
+            
+            with open(tmp_path, 'rb') as f:
+                files = {
+                    payload.media_type: f,
+                    'chat_id': (None, str(chat_id)),
+                }
+                
+                if payload.caption:
+                    files['caption'] = (None, payload.caption[:1024])
+                
+                res = requests.post(url, files=files, timeout=60)
+            
+            try:
+                result = res.json()
+            except:
+                result = {"text": res.text}
+            
+            if not res.ok:
+                return JSONResponse({"status": "error", "meta": result}, status_code=res.status_code)
+            
+            business = get_active_business()
+            if business:
+                save_telegram_message(
+                    business=business,
+                    customer_id=customer_id,
+                    text=payload.caption or f"📎 {payload.media_type.upper()} sent",
+                    direction="outbound",
+                    message_id="",
+                    raw_payload=result,
+                    channel="telegram_user_private",
+                    chat_id=chat_id,
+                    media_type=payload.media_type,
+                )
+            
+            return JSONResponse({"status": "ok", "meta": result}, status_code=200)
+        
+        finally:
+            # Clean up temp file
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+    
+    except Exception as e:
+        log("Telegram file send error", str(e))
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
-    if not res.ok:
-        return JSONResponse({"status": "error", "meta": result}, status_code=res.status_code)
 
-    business = get_active_business()
+@app.post("/dashboard/send-telegram-voice-file")
+async def dashboard_send_telegram_voice_file(
+    payload: ManualTelegramVoiceFile,
+    x_dashboard_secret: str = Header(default=""),
+):
+    if DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
 
-    if business:
-        save_telegram_message(
-            business=business,
-            customer_id=customer_id,
-            text=payload.caption or f"📎 {payload.media_type.upper()} sent",
-            direction="outbound",
-            message_id="",
-            raw_payload=result,
-            channel="telegram_user_private",
-            chat_id=chat_id,
-            media_type=payload.media_type,
-            media_file_id=payload.media_file_id,
-        )
+    customer_id = normalize_id(payload.customer_id)
+    chat_id = normalize_id(payload.chat_id)
 
-    return JSONResponse({"status": "ok", "meta": result}, status_code=200)
+    if not customer_id or not payload.file_data:
+        return JSONResponse({"status": "error", "message": "Missing customer_id or file_data"}, status_code=400)
+
+    try:
+        import base64
+        import tempfile
+        import os
+        
+        # Decode base64 file
+        file_bytes = base64.b64decode(payload.file_data)
+        
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{payload.filename}") as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+        
+        try:
+            # Upload to Telegram
+            url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVoice"
+            
+            with open(tmp_path, 'rb') as f:
+                files = {
+                    'voice': f,
+                    'chat_id': (None, str(chat_id)),
+                }
+                
+                res = requests.post(url, files=files, timeout=60)
+            
+            try:
+                result = res.json()
+            except:
+                result = {"text": res.text}
+            
+            if not res.ok:
+                return JSONResponse({"status": "error", "meta": result}, status_code=res.status_code)
+            
+            business = get_active_business()
+            if business:
+                save_telegram_message(
+                    business=business,
+                    customer_id=customer_id,
+                    text="🎤 Voice message sent",
+                    direction="outbound",
+                    message_id="",
+                    raw_payload=result,
+                    channel="telegram_user_private",
+                    chat_id=chat_id,
+                    media_type="voice",
+                )
+            
+            return JSONResponse({"status": "ok", "meta": result}, status_code=200)
+        
+        finally:
+            # Clean up temp file
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+    
+    except Exception as e:
+        log("Telegram voice send error", str(e))
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.post("/dashboard/send-instagram-file")
+async def dashboard_send_instagram_file(
+    payload: ManualInstagramFile,
+    x_dashboard_secret: str = Header(default=""),
+):
+    if DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    business = get_business_by_id(payload.business_id)
+
+    if not business:
+        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
+
+    customer_id = normalize_id(payload.customer_id)
+
+    if not customer_id or not payload.file_data:
+        return JSONResponse({"status": "error", "message": "Missing customer_id or file_data"}, status_code=400)
+
+    try:
+        import base64
+        import tempfile
+        import os
+        import mimetypes
+        
+        # Decode base64 file
+        file_bytes = base64.b64decode(payload.file_data)
+        
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{payload.filename}") as tmp:
+            tmp.write(file_bytes)
+            tmp_path = tmp.name
+        
+        try:
+            # For Instagram, we need to use a more sophisticated approach
+            # We'll use imgbb or similar free image hosting for now
+            # Or upload directly through Instagram's API if we have server-side capability
+            
+            access_token = get_business_access_token(business)
+            
+            if not access_token:
+                return JSONResponse({"status": "error", "message": "No access token"}, status_code=400)
+            
+            # Upload to Telegram first as temporary solution
+            # In production, use AWS S3, Google Cloud Storage, or imgbb
+            with open(tmp_path, 'rb') as f:
+                files = {payload.media_type: f}
+                data = {'chat_id': '-1001234567890'}  # Placeholder channel
+                
+                # For now, store locally and serve through API
+                # You should implement proper cloud storage
+                result = {
+                    "ok": True,
+                    "message": "File stored for delivery",
+                    "file_size": len(file_bytes),
+                }
+            
+            # Send via Instagram
+            res = send_instagram_media(
+                access_token=access_token,
+                recipient_id=customer_id,
+                media_type=payload.media_type,
+                media_url=f"{PUBLIC_BASE_URL}/files/{payload.filename}",
+                caption=payload.caption,
+                business=business,
+            )
+            
+            if res is None:
+                return JSONResponse({"status": "error", "message": "Send failed"}, status_code=500)
+            
+            try:
+                result = res.json()
+            except:
+                result = {"text": res.text}
+            
+            if not res.ok:
+                return JSONResponse({"status": "error", "meta": result}, status_code=res.status_code)
+            
+            save_inbox_message(
+                business=business,
+                sender_id=business.get("instagram_business_id") or "",
+                recipient_id=customer_id,
+                message_text=payload.caption or f"📎 {payload.media_type.upper()} sent",
+                direction="outbound",
+                platform_message_id=result.get("message_id", ""),
+                raw_payload=result,
+                is_read=True,
+                media_type=payload.media_type,
+            )
+            
+            return JSONResponse({"status": "ok", "meta": result}, status_code=200)
+        
+        finally:
+            # Clean up temp file
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+    
+    except Exception as e:
+        log("Instagram file send error", str(e))
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 
 @app.get("/debug/businesses")
