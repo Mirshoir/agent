@@ -66,6 +66,31 @@ def already_processed(cache, event_id, ttl=3600):
     return False
 
 
+def is_chat_ai_enabled(platform, channel, customer_id, business_id=None):
+    try:
+        query = (
+            supabase.table("chat_ai_settings")
+            .select("ai_enabled")
+            .eq("platform", platform)
+            .eq("channel", channel or "")
+            .eq("customer_id", str(customer_id))
+        )
+
+        if business_id:
+            query = query.eq("business_id", business_id)
+
+        result = query.limit(1).execute()
+        rows = result.data or []
+
+        if not rows:
+            return True
+
+        return bool(rows[0].get("ai_enabled", True))
+    except Exception as e:
+        log("Could not check chat AI setting", str(e))
+        return True
+
+
 def get_active_business():
     result = (
         supabase.table("businesses")
@@ -457,6 +482,10 @@ async def telegram_webhook(request: Request):
             chat_id=chat_id,
         )
 
+        if not is_chat_ai_enabled("telegram", channel, customer_id, business.get("id")):
+            log("AI disabled for this Telegram chat", {"customer_id": customer_id, "channel": channel, "business_id": business.get("id")})
+            return JSONResponse({"status": "ai_disabled"})
+
         reply = get_ai_reply(
             user_text=combined_text,
             business=business,
@@ -566,6 +595,10 @@ async def process_telegram_user_event(event):
             customer_name=customer_name,
             chat_id=chat_id,
         )
+
+        if not is_chat_ai_enabled("telegram", "telegram_user_private", sender_id, business.get("id")):
+            log("AI disabled for this Telegram private user chat", {"customer_id": sender_id, "business_id": business.get("id")})
+            return
 
         reply = get_ai_reply(
             user_text=combined_text,
