@@ -136,7 +136,7 @@ def get_recent_chat_history(customer_id: str, platform="telegram", channel=None,
         return []
 
 
-def get_ai_reply(user_text, business, customer_id, channel="telegram_bot"):
+def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private"):
     api_key = business.get("mistral_api_key") or MISTRAL_API_KEY
 
     if not api_key:
@@ -430,7 +430,10 @@ async def telegram_webhook(request: Request):
             if mention not in text.lower() and not replied_to_bot:
                 return JSONResponse({"status": "ignored_group_message"})
 
-        channel = "telegram_bot_group" if chat_type in ["group", "supergroup"] else "telegram_bot_private"
+        if chat_type in ["group", "supergroup"]:
+            channel = "telegram_bot_group"
+        else:
+            channel = "telegram_bot_private"
 
         customer_name = build_customer_name(user)
 
@@ -571,14 +574,14 @@ async def process_telegram_user_event(event):
             channel="telegram_user_private",
         )
 
-        await event.respond(reply)
+        sent = await event.respond(reply)
 
         save_telegram_message(
             business=business,
             customer_id=sender_id,
             text=reply,
             direction="outbound",
-            message_id="",
+            message_id=getattr(sent, "id", ""),
             raw_payload={
                 "chat_id": chat_id,
                 "source": "telethon_user_account",
@@ -590,6 +593,37 @@ async def process_telegram_user_event(event):
 
     except Exception as e:
         log("Telegram user account event error", str(e))
+
+
+async def send_telegram_user_message(customer_id, text):
+    global TELEGRAM_USER_CLIENT
+
+    if not TELEGRAM_USER_CLIENT:
+        return False, {"error": "Telegram private user client is not running"}
+
+    try:
+        entity = await TELEGRAM_USER_CLIENT.get_entity(int(customer_id))
+        sent = await TELEGRAM_USER_CLIENT.send_message(entity, text)
+
+        sender_name = str(customer_id)
+
+        try:
+            if hasattr(entity, "first_name") or hasattr(entity, "last_name"):
+                sender_name = f"{getattr(entity, 'first_name', '')} {getattr(entity, 'last_name', '')}".strip()
+                if getattr(entity, "username", None):
+                    sender_name = f"{sender_name} (@{entity.username})".strip()
+        except Exception:
+            pass
+
+        return True, {
+            "message_id": getattr(sent, "id", ""),
+            "customer_id": str(customer_id),
+            "chat_id": str(customer_id),
+            "customer_name": sender_name or str(customer_id),
+        }
+
+    except Exception as e:
+        return False, {"error": str(e)}
 
 
 async def start_telegram_user_client():
@@ -620,17 +654,36 @@ async def start_telegram_user_client():
     async def private_user_message_handler(event):
         await process_telegram_user_event(event)
 
-    await TELEGRAM_USER_CLIENT.start()
+    try:
+        await TELEGRAM_USER_CLIENT.connect()
 
-    me = await TELEGRAM_USER_CLIENT.get_me()
+        if not await TELEGRAM_USER_CLIENT.is_user_authorized():
+            log(
+                "Telegram private user session is not authorized. "
+                "Create milana_user_session.session locally first, then deploy it."
+            )
+            await TELEGRAM_USER_CLIENT.disconnect()
+            TELEGRAM_USER_CLIENT = None
+            return None
 
-    log("Telegram private user client started", {
-        "id": getattr(me, "id", None),
-        "username": getattr(me, "username", None),
-        "phone": "***hidden***",
-    })
+        me = await TELEGRAM_USER_CLIENT.get_me()
 
-    return TELEGRAM_USER_CLIENT
+        log("Telegram private user client started", {
+            "id": getattr(me, "id", None),
+            "username": getattr(me, "username", None),
+            "phone": "***hidden***",
+        })
+
+        return TELEGRAM_USER_CLIENT
+
+    except Exception as e:
+        log("Telegram private user client startup error", str(e))
+        try:
+            await TELEGRAM_USER_CLIENT.disconnect()
+        except Exception:
+            pass
+        TELEGRAM_USER_CLIENT = None
+        return None
 
 
 async def stop_telegram_user_client():
