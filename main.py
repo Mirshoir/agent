@@ -13,6 +13,9 @@ from telegram_bot import (
     telegram_router,
     start_telegram_user_client,
     stop_telegram_user_client,
+    send_telegram_user_message,
+    save_telegram_message,
+    get_active_business,
 )
 
 app = FastAPI()
@@ -73,6 +76,11 @@ DEDUP_TTL_SECONDS = 60 * 60
 
 class ManualInstagramReply(BaseModel):
     business_id: str
+    customer_id: str
+    text: str
+
+
+class ManualTelegramUserReply(BaseModel):
     customer_id: str
     text: str
 
@@ -707,18 +715,13 @@ async def process_comment_event(entry_id: str, change: dict):
 async def home():
     return {
         "status": "ok",
-        "version": "instagram_hybrid_inbox_backend_FIXED_WITH_TELEGRAM_USER_CLIENT",
+        "version": "milana_social_sales_chat_all_channels",
         "webhook": "/webhook",
-        "connect": "/connect-instagram",
-        "connect_instagram": "/connect-instagram",
-        "connect_facebook": "/connect-facebook",
-        "dashboard_send_dm": "/dashboard/send-instagram-dm",
         "telegram_bot_webhook": "/webhook/telegram",
-        "telegram_private_user_client": "enabled_by_env",
+        "dashboard_send_instagram_dm": "/dashboard/send-instagram-dm",
+        "dashboard_send_telegram_user": "/dashboard/send-telegram-user-message",
         "verify_token_set": bool(VERIFY_TOKEN),
         "meta_app_id_set": bool(META_APP_ID),
-        "instagram_redirect_uri": INSTAGRAM_REDIRECT_URI,
-        "facebook_redirect_uri": FACEBOOK_REDIRECT_URI,
     }
 
 
@@ -782,37 +785,6 @@ async def instagram_callback(request: Request):
     except Exception as e:
         log("Instagram OAuth error", str(e))
         return PlainTextResponse(f"Instagram OAuth error: {str(e)}", status_code=500)
-
-
-@app.get("/refresh-token/{instagram_business_id}")
-async def refresh_token(instagram_business_id: str):
-    instagram_business_id = normalize_id(instagram_business_id)
-    business = get_business(instagram_business_id)
-
-    if not business:
-        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-
-    existing_token = business.get("access_token") or ""
-
-    if not existing_token:
-        return JSONResponse({"status": "error", "message": "No access token found for this business"}, status_code=400)
-
-    try:
-        new_token = refresh_long_lived_token(existing_token)
-
-        supabase.table("businesses").update({
-            "access_token": new_token,
-            "token_preview": safe_token(new_token),
-        }).eq("instagram_business_id", instagram_business_id).execute()
-
-        return JSONResponse({
-            "status": "ok",
-            "message": "Token refreshed",
-            "token_preview": safe_token(new_token),
-        })
-
-    except Exception as e:
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 
 @app.get("/connect-facebook")
@@ -901,23 +873,51 @@ async def dashboard_send_instagram_dm(
     return JSONResponse({"status": "ok", "meta": result}, status_code=200)
 
 
+@app.post("/dashboard/send-telegram-user-message")
+async def dashboard_send_telegram_user_message(
+    payload: ManualTelegramUserReply,
+    x_dashboard_secret: str = Header(default=""),
+):
+    if DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    text = payload.text.strip()
+    customer_id = normalize_id(payload.customer_id)
+
+    if not text or not customer_id:
+        return JSONResponse({"status": "error", "message": "Missing customer_id or text"}, status_code=400)
+
+    ok, result = await send_telegram_user_message(
+        customer_id=customer_id,
+        text=text,
+    )
+
+    if not ok:
+        return JSONResponse({"status": "error", "meta": result}, status_code=400)
+
+    business = get_active_business()
+
+    if business:
+        save_telegram_message(
+            business=business,
+            customer_id=customer_id,
+            text=text,
+            direction="outbound",
+            message_id=result.get("message_id", ""),
+            raw_payload=result,
+            channel="telegram_user_private",
+            customer_name=result.get("customer_name", ""),
+            chat_id=result.get("chat_id", customer_id),
+        )
+
+    return JSONResponse({"status": "ok", "meta": result}, status_code=200)
+
+
 @app.get("/debug/businesses")
 async def debug_businesses():
     result = supabase.table("businesses").select("*").order("created_at", desc=True).execute()
     rows = [sanitize_business_row(r) for r in (result.data or [])]
     return {"count": len(rows), "businesses": rows}
-
-
-@app.get("/debug/active")
-async def debug_active():
-    business = get_active_instagram_direct_business()
-    return {"found": bool(business), "business": sanitize_business_row(business)}
-
-
-@app.get("/debug/business/{instagram_business_id}")
-async def debug_business(instagram_business_id: str):
-    business = get_business(instagram_business_id)
-    return {"found": bool(business), "business": sanitize_business_row(business)}
 
 
 @app.get("/webhook")
@@ -975,7 +975,7 @@ async def receive_webhook(request: Request):
 @app.get("/privacy")
 async def privacy():
     return PlainTextResponse(
-        "Privacy Policy: This app collects Instagram, Telegram bot, and Telegram user-account messages to provide automated and manual sales replies."
+        "Privacy Policy: This app collects Instagram and Telegram messages to provide automated and manual sales replies."
     )
 
 
