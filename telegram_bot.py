@@ -1,22 +1,40 @@
 import os
 import time
+import asyncio
 import requests
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from supabase import create_client
 
+try:
+    from telethon import TelegramClient, events
+except Exception:
+    TelegramClient = None
+    events = None
+
+
 telegram_router = APIRouter()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "").lower()
+TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "").lower().replace("@", "")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
+
+TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
+TELEGRAM_USER_SESSION = os.getenv("TELEGRAM_USER_SESSION", "milana_user_session")
+ENABLE_TELEGRAM_USER_CLIENT = os.getenv("ENABLE_TELEGRAM_USER_CLIENT", "false").lower() == "true"
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 MESSAGE_BUFFER = {}
+USER_MESSAGE_BUFFER = {}
+PROCESSED_BOT_MESSAGES = {}
+PROCESSED_USER_MESSAGES = {}
+TELEGRAM_USER_CLIENT = None
 
 
 def log(title, data=None):
@@ -25,6 +43,27 @@ def log(title, data=None):
     if data is not None:
         print(data)
     print("=" * 80 + "\n")
+
+
+def normalize_text(value):
+    return str(value or "").strip()
+
+
+def already_processed(cache, event_id, ttl=3600):
+    if not event_id:
+        return False
+
+    now = time.time()
+    expired = [k for k, v in cache.items() if now - v > ttl]
+
+    for key in expired:
+        cache.pop(key, None)
+
+    if event_id in cache:
+        return True
+
+    cache[event_id] = now
+    return False
 
 
 def get_active_business():
@@ -41,13 +80,13 @@ def get_active_business():
 def build_business_context(business):
     return f"""
 Business name:
-{business.get("business_name", "")}
+{business.get("business_name", "Milana Premium")}
 
 Business type:
-{business.get("business_type", "")}
+{business.get("business_type", "Textile and Clothing")}
 
 Language:
-{business.get("language", "")}
+{business.get("language", "uz")}
 
 Products:
 {business.get("products", "")}
@@ -72,30 +111,42 @@ Knowledge:
 """
 
 
-def get_recent_chat_history(customer_id: str, limit: int = 10):
+def get_recent_chat_history(customer_id: str, platform="telegram", channel=None, limit=10):
     try:
-        result = (
+        query = (
             supabase.table("inbox_messages")
             .select("role,content")
             .eq("customer_id", str(customer_id))
-            .eq("platform", "telegram")
-            .order("created_at", desc=False)
+            .eq("platform", platform)
+        )
+
+        if channel:
+            query = query.eq("channel", channel)
+
+        result = (
+            query.order("created_at", desc=False)
             .limit(limit)
             .execute()
         )
+
         return result.data or []
+
     except Exception as e:
         log("Could not load Telegram history", str(e))
         return []
 
 
-def get_ai_reply(user_text, business, customer_id):
-    api_key = business.get("mistral_api_key") or os.getenv("MISTRAL_API_KEY")
+def get_ai_reply(user_text, business, customer_id, channel="telegram_bot"):
+    api_key = business.get("mistral_api_key") or MISTRAL_API_KEY
 
     if not api_key:
-        return "Assalomu alaykum 😊"
+        return "Assalomu alaykum 😊 Qanday yordam kerak?"
 
-    history = get_recent_chat_history(customer_id)
+    history = get_recent_chat_history(
+        customer_id=customer_id,
+        platform="telegram",
+        channel=channel,
+    )
 
     system_prompt = f"""
 You are a real human sales manager for Milana Premium.
@@ -117,9 +168,11 @@ IMPORTANT BEHAVIOR RULES:
 - Use emojis lightly.
 - Reply in the customer's language.
 - Avoid AI-style formatting.
-- Avoid long markdown sections.
-- Avoid giant bullet lists.
+- Avoid markdown.
+- Avoid bullet lists.
 - Talk like a real Uzbek sales manager.
+- You are representing Milana Premium textile and clothing.
+- Do not mention AI, bot, automation, prompt, database, or API.
 
 CATALOG RULE:
 
@@ -136,71 +189,49 @@ GOOD EXAMPLE:
 Customer: Assalomu alaykum
 Assistant:
 Va alaykum assalom! 😊
-
-Milana Premiumga xush kelibsiz! Qanday yordam kerak? Qiziqayotgan mahsulotingiz bormi?
-
-GOOD EXAMPLE:
-Customer: What do you sell?
-Assistant:
-Bizda premium kiyim va tekstil mahsulotlari bor 😊
-Qaysi mahsulot sizni qiziqtiryapti?
+Milana Premiumga xush kelibsiz! Qanday yordam kerak?
 
 GOOD EXAMPLE:
 Customer: Katalog bormi?
 Assistant:
 Ha albatta 😊
 Mana katalogimiz:
-https://shmirzaev.github.io/Milana-Premium-Catalog/
-
-BAD EXAMPLE:
-Va alaykum assalom! 😊
-
-Milana Premiumga xush kelibsiz! Qanday yordam kerak?
-
-Katalogimizni ko'rishni xohlaysizmi?
-https://shmirzaev.github.io/Milana-Premium-Catalog/
-
-WHY BAD:
-- Catalog was offered without customer asking.
-- Too much information at once.
-- Feels automated.
+{business.get("catalog_link", "")}
 """
 
     messages = [{"role": "system", "content": system_prompt}]
 
     for msg in history:
-        messages.append(
-            {
-                "role": msg["role"],
-                "content": msg["content"],
-            }
-        )
+        role = msg.get("role") or "user"
+        content = msg.get("content") or ""
+        if content:
+            messages.append({"role": role, "content": content})
 
     messages.append({"role": "user", "content": user_text})
 
     payload = {
         "model": business.get("ai_model") or "mistral-small-latest",
         "messages": messages,
-        "temperature": 0.5,
-        "max_tokens": 130,
+        "temperature": float(business.get("ai_temperature", 0.5) or 0.5),
+        "max_tokens": int(business.get("ai_max_tokens", 130) or 130),
     }
 
-    res = requests.post(
-        "https://api.mistral.ai/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        json=payload,
-        timeout=30,
-    )
-
-    log("Telegram Mistral response", {"status": res.status_code, "body": res.text})
-
-    if not res.ok:
-        return "Assalomu alaykum 😊"
-
     try:
+        res = requests.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=30,
+        )
+
+        log("Telegram Mistral response", {"status": res.status_code, "body": res.text})
+
+        if not res.ok:
+            return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada javob beradi."
+
         reply = (
             res.json()
             .get("choices", [{}])[0]
@@ -209,17 +240,61 @@ WHY BAD:
             .strip()
         )
 
-        if not reply:
-            return "Assalomu alaykum 😊"
-
-        return reply[:1500]
+        return reply[:1500] if reply else "Assalomu alaykum 😊 Qanday yordam kerak?"
 
     except Exception as e:
-        log("Telegram AI parse error", str(e))
-        return "Assalomu alaykum 😊"
+        log("Telegram AI error", str(e))
+        return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada javob beradi."
 
 
-def send_telegram_message(chat_id, text, reply_to_message_id=None):
+def save_telegram_message(
+    business,
+    customer_id,
+    text,
+    direction,
+    message_id="",
+    raw_payload=None,
+    channel="telegram_bot_private",
+    customer_name="",
+    chat_id="",
+):
+    try:
+        data = {
+            "business_id": business.get("id"),
+            "instagram_business_id": business.get("instagram_business_id"),
+            "platform": "telegram",
+            "customer_id": str(customer_id),
+            "customer_name": customer_name or str(customer_id),
+            "chat_id": str(chat_id or customer_id),
+            "channel": channel,
+            "direction": direction,
+            "role": "user" if direction == "inbound" else "assistant",
+            "content": text,
+            "external_message_id": str(message_id),
+            "raw_payload": raw_payload or {},
+            "is_read": False if direction == "inbound" else True,
+        }
+
+        try:
+            supabase.table("inbox_messages").insert(data).execute()
+        except Exception:
+            fallback = dict(data)
+            fallback.pop("customer_name", None)
+            fallback.pop("chat_id", None)
+            fallback.pop("is_read", None)
+            supabase.table("inbox_messages").insert(fallback).execute()
+
+        log("Telegram inbox message saved", data)
+
+    except Exception as e:
+        log("Could not save Telegram message", str(e))
+
+
+def send_telegram_bot_message(chat_id, text, reply_to_message_id=None):
+    if not TELEGRAM_BOT_TOKEN:
+        log("Missing TELEGRAM_BOT_TOKEN")
+        return None
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
     payload = {
@@ -233,39 +308,53 @@ def send_telegram_message(chat_id, text, reply_to_message_id=None):
 
     res = requests.post(url, json=payload, timeout=30)
 
-    log("Telegram send result", {"status": res.status_code, "body": res.text})
+    log("Telegram bot send result", {"status": res.status_code, "body": res.text})
 
     return res
 
 
-def save_telegram_message(
-    business,
-    customer_id,
-    text,
-    direction,
-    message_id="",
-    raw_payload=None,
-    channel="private",
-):
-    try:
-        data = {
-            "business_id": business.get("id"),
-            "instagram_business_id": business.get("instagram_business_id"),
-            "platform": "telegram",
-            "customer_id": str(customer_id),
-            "channel": channel,
-            "direction": direction,
-            "role": "user" if direction == "inbound" else "assistant",
-            "content": text,
-            "external_message_id": str(message_id),
-            "raw_payload": raw_payload or {},
+def build_customer_name(user):
+    first_name = normalize_text(user.get("first_name"))
+    last_name = normalize_text(user.get("last_name"))
+    username = normalize_text(user.get("username"))
+
+    full_name = f"{first_name} {last_name}".strip()
+
+    if username:
+        return f"{full_name} (@{username})".strip()
+
+    return full_name or str(user.get("id", ""))
+
+
+def buffer_message(buffer_store, buffer_key, text):
+    current_time = time.time()
+
+    if buffer_key not in buffer_store:
+        buffer_store[buffer_key] = {
+            "texts": [],
+            "last_time": current_time,
         }
 
-        supabase.table("inbox_messages").insert(data).execute()
-        log("Telegram inbox message saved", data)
+    buffer_store[buffer_key]["texts"].append(text)
+    buffer_store[buffer_key]["last_time"] = current_time
 
-    except Exception as e:
-        log("Could not save Telegram message", str(e))
+
+def pop_buffer_if_ready(buffer_store, buffer_key, wait_seconds=2):
+    time.sleep(wait_seconds + 1)
+
+    if buffer_key not in buffer_store:
+        return None
+
+    latest_time = buffer_store[buffer_key]["last_time"]
+
+    if time.time() - latest_time < wait_seconds:
+        return None
+
+    combined_text = "\n".join(buffer_store[buffer_key]["texts"]).strip()
+
+    del buffer_store[buffer_key]
+
+    return combined_text
 
 
 @telegram_router.get("/webhook/telegram")
@@ -291,7 +380,7 @@ async def telegram_webhook(request: Request):
     try:
         update = await request.json()
 
-        log("TELEGRAM WEBHOOK RECEIVED", update)
+        log("TELEGRAM BOT WEBHOOK RECEIVED", update)
 
         message = (
             update.get("message")
@@ -306,7 +395,7 @@ async def telegram_webhook(request: Request):
         if message.get("from", {}).get("is_bot"):
             return JSONResponse({"status": "ignored_bot"})
 
-        text = message.get("text", "").strip()
+        text = normalize_text(message.get("text"))
 
         if not text:
             return JSONResponse({"status": "ignored_no_text"})
@@ -318,6 +407,11 @@ async def telegram_webhook(request: Request):
         chat_type = chat.get("type", "private")
         customer_id = user.get("id")
         message_id = message.get("message_id")
+
+        event_id = f"bot:{chat_id}:{customer_id}:{message_id}"
+
+        if already_processed(PROCESSED_BOT_MESSAGES, event_id):
+            return JSONResponse({"status": "duplicate"})
 
         business = get_active_business()
 
@@ -336,28 +430,17 @@ async def telegram_webhook(request: Request):
             if mention not in text.lower() and not replied_to_bot:
                 return JSONResponse({"status": "ignored_group_message"})
 
-        buffer_key = f"{chat_id}_{customer_id}"
-        current_time = time.time()
+        channel = "telegram_bot_group" if chat_type in ["group", "supergroup"] else "telegram_bot_private"
 
-        if buffer_key not in MESSAGE_BUFFER:
-            MESSAGE_BUFFER[buffer_key] = {
-                "texts": [],
-                "last_time": current_time,
-            }
+        customer_name = build_customer_name(user)
 
-        MESSAGE_BUFFER[buffer_key]["texts"].append(text)
-        MESSAGE_BUFFER[buffer_key]["last_time"] = current_time
+        buffer_key = f"bot:{chat_id}:{customer_id}"
+        buffer_message(MESSAGE_BUFFER, buffer_key, text)
 
-        time.sleep(3)
+        combined_text = pop_buffer_if_ready(MESSAGE_BUFFER, buffer_key, wait_seconds=2)
 
-        latest_time = MESSAGE_BUFFER[buffer_key]["last_time"]
-
-        if time.time() - latest_time < 2:
+        if not combined_text:
             return JSONResponse({"status": "waiting_more_messages"})
-
-        combined_text = "\n".join(MESSAGE_BUFFER[buffer_key]["texts"]).strip()
-
-        del MESSAGE_BUFFER[buffer_key]
 
         save_telegram_message(
             business=business,
@@ -366,21 +449,22 @@ async def telegram_webhook(request: Request):
             direction="inbound",
             message_id=message_id,
             raw_payload=update,
-            channel=chat_type,
+            channel=channel,
+            customer_name=customer_name,
+            chat_id=chat_id,
         )
 
         reply = get_ai_reply(
             user_text=combined_text,
             business=business,
             customer_id=customer_id,
+            channel=channel,
         )
 
-        send_telegram_message(
+        send_telegram_bot_message(
             chat_id=chat_id,
             text=reply,
-            reply_to_message_id=message_id
-            if chat_type in ["group", "supergroup"]
-            else None,
+            reply_to_message_id=message_id if chat_type in ["group", "supergroup"] else None,
         )
 
         save_telegram_message(
@@ -390,18 +474,184 @@ async def telegram_webhook(request: Request):
             direction="outbound",
             message_id="",
             raw_payload={},
-            channel=chat_type,
+            channel=channel,
+            customer_name=customer_name,
+            chat_id=chat_id,
         )
 
         return JSONResponse({"status": "ok"})
 
     except Exception as e:
-        log("Telegram webhook error", str(e))
+        log("Telegram bot webhook error", str(e))
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
-        return JSONResponse(
-            {
-                "status": "error",
-                "message": str(e),
+
+async def process_telegram_user_event(event):
+    try:
+        if event.out:
+            return
+
+        if not event.is_private:
+            return
+
+        text = normalize_text(event.raw_text)
+
+        if not text:
+            return
+
+        sender = await event.get_sender()
+        sender_id = str(sender.id)
+        chat_id = str(event.chat_id)
+        message_id = str(event.id)
+
+        event_id = f"user:{chat_id}:{sender_id}:{message_id}"
+
+        if already_processed(PROCESSED_USER_MESSAGES, event_id):
+            return
+
+        business = get_active_business()
+
+        if not business:
+            log("No active business for Telegram private user account")
+            return
+
+        customer_name_parts = []
+
+        if getattr(sender, "first_name", None):
+            customer_name_parts.append(sender.first_name)
+
+        if getattr(sender, "last_name", None):
+            customer_name_parts.append(sender.last_name)
+
+        customer_name = " ".join(customer_name_parts).strip()
+
+        if getattr(sender, "username", None):
+            customer_name = f"{customer_name} (@{sender.username})".strip()
+
+        customer_name = customer_name or sender_id
+
+        buffer_key = f"user:{chat_id}:{sender_id}"
+        buffer_message(USER_MESSAGE_BUFFER, buffer_key, text)
+
+        await asyncio.sleep(3)
+
+        if buffer_key not in USER_MESSAGE_BUFFER:
+            return
+
+        latest_time = USER_MESSAGE_BUFFER[buffer_key]["last_time"]
+
+        if time.time() - latest_time < 2:
+            return
+
+        combined_text = "\n".join(USER_MESSAGE_BUFFER[buffer_key]["texts"]).strip()
+
+        del USER_MESSAGE_BUFFER[buffer_key]
+
+        save_telegram_message(
+            business=business,
+            customer_id=sender_id,
+            text=combined_text,
+            direction="inbound",
+            message_id=message_id,
+            raw_payload={
+                "chat_id": chat_id,
+                "sender_id": sender_id,
+                "message_id": message_id,
+                "source": "telethon_user_account",
             },
-            status_code=500,
+            channel="telegram_user_private",
+            customer_name=customer_name,
+            chat_id=chat_id,
         )
+
+        reply = get_ai_reply(
+            user_text=combined_text,
+            business=business,
+            customer_id=sender_id,
+            channel="telegram_user_private",
+        )
+
+        await event.respond(reply)
+
+        save_telegram_message(
+            business=business,
+            customer_id=sender_id,
+            text=reply,
+            direction="outbound",
+            message_id="",
+            raw_payload={
+                "chat_id": chat_id,
+                "source": "telethon_user_account",
+            },
+            channel="telegram_user_private",
+            customer_name=customer_name,
+            chat_id=chat_id,
+        )
+
+    except Exception as e:
+        log("Telegram user account event error", str(e))
+
+
+async def start_telegram_user_client():
+    global TELEGRAM_USER_CLIENT
+
+    if not ENABLE_TELEGRAM_USER_CLIENT:
+        log("Telegram private user client disabled")
+        return None
+
+    if TelegramClient is None or events is None:
+        log("Telethon is not installed. Run: pip install telethon")
+        return None
+
+    if not TELEGRAM_API_ID or not TELEGRAM_API_HASH:
+        log("Missing TELEGRAM_API_ID or TELEGRAM_API_HASH")
+        return None
+
+    if TELEGRAM_USER_CLIENT:
+        return TELEGRAM_USER_CLIENT
+
+    TELEGRAM_USER_CLIENT = TelegramClient(
+        TELEGRAM_USER_SESSION,
+        int(TELEGRAM_API_ID),
+        TELEGRAM_API_HASH,
+    )
+
+    @TELEGRAM_USER_CLIENT.on(events.NewMessage(incoming=True))
+    async def private_user_message_handler(event):
+        await process_telegram_user_event(event)
+
+    await TELEGRAM_USER_CLIENT.start()
+
+    me = await TELEGRAM_USER_CLIENT.get_me()
+
+    log("Telegram private user client started", {
+        "id": getattr(me, "id", None),
+        "username": getattr(me, "username", None),
+        "phone": "***hidden***",
+    })
+
+    return TELEGRAM_USER_CLIENT
+
+
+async def stop_telegram_user_client():
+    global TELEGRAM_USER_CLIENT
+
+    if TELEGRAM_USER_CLIENT:
+        await TELEGRAM_USER_CLIENT.disconnect()
+        TELEGRAM_USER_CLIENT = None
+        log("Telegram private user client stopped")
+
+
+def start_telegram_user_client_background():
+    try:
+        loop = asyncio.get_event_loop()
+
+        if loop.is_running():
+            loop.create_task(start_telegram_user_client())
+        else:
+            loop.run_until_complete(start_telegram_user_client())
+
+    except RuntimeError:
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        new_loop.run_until_complete(start_telegram_user_client())
