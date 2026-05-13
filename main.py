@@ -766,7 +766,7 @@ async def process_comment_event(entry_id: str, change: dict):
 async def home():
     return {
         "status": "ok",
-        "version": "instagram_inbox_manual_reply_backend",
+        "version": "instagram_hybrid_inbox_backend",
         "webhook": "/webhook",
         "connect": "/connect-instagram",
         "connect_instagram": "/connect-instagram",
