@@ -315,6 +315,53 @@ def get_message_count(platform=None):
         return 0
 
 
+def get_chat_ai_enabled(business_id, platform, channel, customer_id):
+    try:
+        result = (
+            supabase.table("chat_ai_settings")
+            .select("ai_enabled")
+            .eq("business_id", business_id)
+            .eq("platform", platform)
+            .eq("channel", channel or "")
+            .eq("customer_id", str(customer_id))
+            .limit(1)
+            .execute()
+        )
+
+        rows = result.data or []
+        if not rows:
+            return True
+
+        return bool(rows[0].get("ai_enabled", True))
+    except Exception:
+        return True
+
+
+def set_chat_ai_enabled(business_id, platform, channel, customer_id, enabled):
+    data = {
+        "business_id": business_id,
+        "platform": platform,
+        "channel": channel or "",
+        "customer_id": str(customer_id),
+        "ai_enabled": bool(enabled),
+        "updated_at": "now()",
+    }
+
+    try:
+        return (
+            supabase.table("chat_ai_settings")
+            .upsert(data, on_conflict="business_id,platform,channel,customer_id")
+            .execute()
+        )
+    except Exception:
+        data.pop("updated_at", None)
+        return (
+            supabase.table("chat_ai_settings")
+            .upsert(data, on_conflict="business_id,platform,channel,customer_id")
+            .execute()
+        )
+
+
 def telegram_webhook_url():
     return f"{PUBLIC_BASE_URL}/webhook/telegram"
 
@@ -850,6 +897,13 @@ elif nav_option == "💬 Social Sales Chat":
                 channel = selected_conversation.get("channel", "")
                 customer_name = selected_conversation.get("customer_name") or f"Client {str(customer_id)[-4:]}"
 
+                ai_enabled = get_chat_ai_enabled(
+                    business_id=selected_business["id"],
+                    platform=platform,
+                    channel=channel,
+                    customer_id=customer_id,
+                )
+
                 mark_conversation_read(selected_business["id"], customer_id, platform, channel)
                 messages = get_conversation_messages(selected_business["id"], customer_id, platform, channel)
 
@@ -864,14 +918,34 @@ elif nav_option == "💬 Social Sales Chat":
 
                 st.markdown('<div class="chat-shell">', unsafe_allow_html=True)
 
-                st.markdown(f"""
-                <div class="chat-top">
-                    <span class="avatar">{'TG' if platform == 'telegram' else 'IG'}</span>
-                    <b>{html.escape(customer_name)}</b>
-                    <span class="platform-badge {badge_class}">{badge_text}</span><br>
-                    <span class="small-muted">Milana Premium social sales chat</span>
-                </div>
-                """, unsafe_allow_html=True)
+                col_ai_1, col_ai_2 = st.columns([3, 1])
+
+                with col_ai_1:
+                    st.markdown(f"""
+                    <div class="chat-top">
+                        <span class="avatar">{'TG' if platform == 'telegram' else 'IG'}</span>
+                        <b>{html.escape(customer_name)}</b>
+                        <span class="platform-badge {badge_class}">{badge_text}</span><br>
+                        <span class="small-muted">Milana Premium social sales chat</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                with col_ai_2:
+                    new_ai_enabled = st.toggle(
+                        "AI reply",
+                        value=ai_enabled,
+                        key=f"ai_toggle_{platform}_{channel}_{customer_id}",
+                    )
+
+                    if new_ai_enabled != ai_enabled:
+                        set_chat_ai_enabled(
+                            business_id=selected_business["id"],
+                            platform=platform,
+                            channel=channel,
+                            customer_id=customer_id,
+                            enabled=new_ai_enabled,
+                        )
+                        st.rerun()
 
                 chat_box = st.container(height=500)
 
