@@ -5,10 +5,10 @@ import html
 import hashlib
 import requests
 import streamlit as st
+import base64
 from dotenv import load_dotenv
 from supabase import create_client
 from io import BytesIO
-import base64
 
 load_dotenv()
 
@@ -1081,6 +1081,76 @@ def send_telegram_media_from_backend(customer_id, caption, media_type, media_fil
     return response.ok, data
 
 
+def send_telegram_file_from_backend(customer_id, caption, media_type, file_data, filename, chat_id):
+    """Send file (photo/video) to Telegram via base64"""
+    response = requests.post(
+        f"{BACKEND_URL}/dashboard/send-telegram-file",
+        json={
+            "customer_id": str(customer_id),
+            "chat_id": str(chat_id),
+            "caption": caption,
+            "media_type": media_type,
+            "file_data": file_data,
+            "filename": filename,
+        },
+        headers={"x-dashboard-secret": DASHBOARD_SECRET},
+        timeout=60,
+    )
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {"text": response.text}
+
+    return response.ok, data
+
+
+def send_telegram_voice_file_from_backend(customer_id, file_data, filename, chat_id):
+    """Send voice message to Telegram via base64"""
+    response = requests.post(
+        f"{BACKEND_URL}/dashboard/send-telegram-voice-file",
+        json={
+            "customer_id": str(customer_id),
+            "chat_id": str(chat_id),
+            "file_data": file_data,
+            "filename": filename,
+        },
+        headers={"x-dashboard-secret": DASHBOARD_SECRET},
+        timeout=60,
+    )
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {"text": response.text}
+
+    return response.ok, data
+
+
+def send_instagram_file_from_backend(business_id, customer_id, caption, media_type, file_data, filename):
+    """Send file (photo/video) to Instagram via base64"""
+    response = requests.post(
+        f"{BACKEND_URL}/dashboard/send-instagram-file",
+        json={
+            "business_id": str(business_id),
+            "customer_id": str(customer_id),
+            "caption": caption,
+            "media_type": media_type,
+            "file_data": file_data,
+            "filename": filename,
+        },
+        headers={"x-dashboard-secret": DASHBOARD_SECRET},
+        timeout=60,
+    )
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {"text": response.text}
+
+    return response.ok, data
+
+
 if "user" not in st.session_state:
     col1, col2, col3 = st.columns([1, 2, 1])
     
@@ -1396,71 +1466,190 @@ elif nav_option == "💬 Conversations":
                 # Add spacing for input
                 st.markdown('<div style="height: 20px;"></div>', unsafe_allow_html=True)
 
-                with st.form("manual_reply", clear_on_submit=True):
-                    reply_text = st.text_area("Message", placeholder="Type your reply...", height=80)
+                # Message input tabs
+                msg_tab1, msg_tab2, msg_tab3 = st.tabs(["💬 Text", "📎 Files", "🎤 Voice"])
+                
+                with msg_tab1:
+                    with st.form("manual_reply", clear_on_submit=True):
+                        reply_text = st.text_area("Message", placeholder="Type your reply...", height=80)
 
-                    col1, col2, col3, col4 = st.columns(4)
+                        col1, col2, col3, col4 = st.columns(4)
 
-                    with col1:
-                        send_clicked = st.form_submit_button("💬 Send", type="primary", use_container_width=True)
-                    with col2:
-                        catalog_clicked = st.form_submit_button("📚 Catalog", use_container_width=True)
-                    with col3:
-                        phone_clicked = st.form_submit_button("☎️ Contact", use_container_width=True)
-                    with col4:
-                        product_clicked = st.form_submit_button("📦 Product", use_container_width=True)
+                        with col1:
+                            send_clicked = st.form_submit_button("💬 Send", type="primary", use_container_width=True)
+                        with col2:
+                            catalog_clicked = st.form_submit_button("📚 Catalog", use_container_width=True)
+                        with col3:
+                            phone_clicked = st.form_submit_button("☎️ Contact", use_container_width=True)
+                        with col4:
+                            product_clicked = st.form_submit_button("📦 Product", use_container_width=True)
 
-                    quick_text = ""
-                    if catalog_clicked:
-                        link = selected_business.get("catalog_link", "")
-                        quick_text = f"Katalogimiz: {link}" if link else "Qaysi mahsulot katalogi kerak?"
-                    elif phone_clicked:
-                        p = selected_business.get("sales_phone", "")
-                        quick_text = f"Savdo: {p}" if p else "Telefon raqam qoldiring."
-                    elif product_clicked:
-                        quick_text = "Qaysi mahsulot sizni qiziqtiryapti?"
+                        quick_text = ""
+                        if catalog_clicked:
+                            link = selected_business.get("catalog_link", "")
+                            quick_text = f"Katalogimiz: {link}" if link else "Qaysi mahsulot katalogi kerak?"
+                        elif phone_clicked:
+                            p = selected_business.get("sales_phone", "")
+                            quick_text = f"Savdo: {p}" if p else "Telefon raqam qoldiring."
+                        elif product_clicked:
+                            quick_text = "Qaysi mahsulot sizni qiziqtiryapti?"
 
-                    final_text = quick_text or reply_text.strip()
+                        final_text = quick_text or reply_text.strip()
 
-                    if send_clicked or catalog_clicked or phone_clicked or product_clicked:
-                        if not final_text.strip():
-                            st.error("❌ Message cannot be empty.")
-                        else:
-                            if platform == "instagram":
-                                ok, result = send_instagram_dm_from_backend(
-                                    business_id=selected_business["id"],
-                                    customer_id=customer_id,
-                                    text=final_text.strip(),
-                                )
-                            elif platform == "telegram" and channel in ["telegram_bot_private", "telegram_bot_group"]:
-                                ok, result = send_telegram_bot_message(
-                                    chat_id=chat_id,
-                                    text=final_text.strip(),
-                                )
-                                if ok:
-                                    save_outbound_message(
-                                        business=selected_business,
+                        if send_clicked or catalog_clicked or phone_clicked or product_clicked:
+                            if not final_text.strip():
+                                st.error("❌ Message cannot be empty.")
+                            else:
+                                if platform == "instagram":
+                                    ok, result = send_instagram_dm_from_backend(
+                                        business_id=selected_business["id"],
                                         customer_id=customer_id,
                                         text=final_text.strip(),
-                                        platform="telegram",
-                                        channel=channel or "telegram_bot_private",
-                                        chat_id=chat_id,
-                                        raw_payload=result,
                                     )
-                            elif platform == "telegram" and channel == "telegram_user_private":
-                                ok, result = send_telegram_user_message_from_backend(
-                                    customer_id=customer_id,
-                                    text=final_text.strip(),
-                                )
-                            else:
-                                ok, result = False, {"error": "Unsupported channel"}
+                                elif platform == "telegram" and channel in ["telegram_bot_private", "telegram_bot_group"]:
+                                    ok, result = send_telegram_bot_message(
+                                        chat_id=chat_id,
+                                        text=final_text.strip(),
+                                    )
+                                    if ok:
+                                        save_outbound_message(
+                                            business=selected_business,
+                                            customer_id=customer_id,
+                                            text=final_text.strip(),
+                                            platform="telegram",
+                                            channel=channel or "telegram_bot_private",
+                                            chat_id=chat_id,
+                                            raw_payload=result,
+                                        )
+                                elif platform == "telegram" and channel == "telegram_user_private":
+                                    ok, result = send_telegram_user_message_from_backend(
+                                        customer_id=customer_id,
+                                        text=final_text.strip(),
+                                    )
+                                else:
+                                    ok, result = False, {"error": "Unsupported channel"}
 
-                            if ok:
-                                st.success("✅ Message sent!")
-                                time.sleep(0.5)
-                                st.rerun()
-                            else:
-                                st.error("❌ Failed to send.")
+                                if ok:
+                                    st.success("✅ Message sent!")
+                                    time.sleep(0.5)
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Failed to send.")
+                
+                with msg_tab2:
+                    st.markdown("**📎 Send Photo or Video**")
+                    uploaded_file = st.file_uploader(
+                        "Choose image or video",
+                        type=["jpg", "jpeg", "png", "gif", "mp4", "mov", "avi", "webm"],
+                        key=f"file_upload_{customer_id}"
+                    )
+                    
+                    file_caption = st.text_input("Caption (optional)", placeholder="Add a caption...")
+                    
+                    if uploaded_file:
+                        file_size_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
+                        st.info(f"📦 File: {uploaded_file.name} ({file_size_mb:.2f} MB)")
+                        
+                        if file_size_mb > 100:
+                            st.error("❌ File too large (max 100 MB)")
+                        else:
+                            if st.button("📤 Send File", type="primary", use_container_width=True, key=f"send_file_{customer_id}"):
+                                # Determine media type
+                                file_ext = uploaded_file.name.split(".")[-1].lower()
+                                if file_ext in ["jpg", "jpeg", "png", "gif"]:
+                                    media_type = "photo"
+                                else:
+                                    media_type = "video"
+                                
+                                # Convert file to base64 for sending
+                                file_bytes = uploaded_file.getvalue()
+                                file_base64 = base64.b64encode(file_bytes).decode()
+                                
+                                try:
+                                    if platform == "instagram":
+                                        # For Instagram, we'll need to upload to a service first
+                                        ok, result = send_instagram_file_from_backend(
+                                            business_id=selected_business["id"],
+                                            customer_id=customer_id,
+                                            caption=file_caption or f"Sent {media_type}",
+                                            media_type=media_type,
+                                            file_data=file_base64,
+                                            filename=uploaded_file.name,
+                                        )
+                                    elif platform == "telegram":
+                                        ok, result = send_telegram_file_from_backend(
+                                            customer_id=customer_id,
+                                            caption=file_caption or f"Sent {media_type}",
+                                            media_type=media_type,
+                                            file_data=file_base64,
+                                            filename=uploaded_file.name,
+                                            chat_id=chat_id,
+                                        )
+                                    else:
+                                        ok, result = False, {"error": "Unsupported platform"}
+                                    
+                                    if ok:
+                                        st.success("✅ File sent!")
+                                        time.sleep(0.5)
+                                        st.rerun()
+                                    else:
+                                        st.error(f"❌ Failed: {result.get('error', 'Unknown error')}")
+                                except Exception as e:
+                                    st.error(f"❌ Error: {str(e)}")
+                
+                with msg_tab3:
+                    st.markdown("**🎤 Send Voice Message**")
+                    
+                    voice_option = st.radio("Voice input method", ["Upload File", "Record Now"], horizontal=True)
+                    
+                    if voice_option == "Upload File":
+                        voice_file = st.file_uploader(
+                            "Upload voice message (MP3, OGG, WAV, M4A)",
+                            type=["mp3", "ogg", "wav", "m4a", "opus"],
+                            key=f"voice_upload_{customer_id}"
+                        )
+                        
+                        if voice_file:
+                            file_size_mb = len(voice_file.getvalue()) / (1024 * 1024)
+                            st.audio(voice_file)
+                            st.info(f"🎵 Voice: {voice_file.name} ({file_size_mb:.2f} MB)")
+                            
+                            if st.button("📤 Send Voice", type="primary", use_container_width=True, key=f"send_voice_{customer_id}"):
+                                if file_size_mb > 50:
+                                    st.error("❌ File too large (max 50 MB)")
+                                else:
+                                    file_bytes = voice_file.getvalue()
+                                    file_base64 = base64.b64encode(file_bytes).decode()
+                                    
+                                    try:
+                                        ok, result = send_telegram_voice_file_from_backend(
+                                            customer_id=customer_id,
+                                            file_data=file_base64,
+                                            filename=voice_file.name,
+                                            chat_id=chat_id,
+                                        )
+                                        
+                                        if ok:
+                                            st.success("✅ Voice message sent!")
+                                            time.sleep(0.5)
+                                            st.rerun()
+                                        else:
+                                            st.error(f"❌ Failed: {result.get('error', 'Unknown error')}")
+                                    except Exception as e:
+                                        st.error(f"❌ Error: {str(e)}")
+                    else:
+                        st.info("🎙️ Speak clearly for 1-60 seconds")
+                        st.warning("💡 Note: Recording requires browser microphone permission")
+                        st.markdown("""
+                        **How to record:**
+                        1. Click the microphone button below
+                        2. Speak your message (1-60 seconds)
+                        3. Stop recording when done
+                        4. Click Send
+                        """)
+                        
+                        # Placeholder for audio recording - requires webrtc-audio-processing
+                        st.info("📱 Use 'Upload File' tab to send recorded voice messages from your device")
 
 elif nav_option == "⚙️ Business Config":
     st.subheader("⚙️ Configuration")
