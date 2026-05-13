@@ -59,13 +59,6 @@ st.markdown("""
     padding-bottom: 12px;
     margin-bottom: 12px;
 }
-.client-row {
-    border: 1px solid rgba(120,120,120,0.15);
-    border-radius: 18px;
-    padding: 12px;
-    margin-bottom: 8px;
-    background: rgba(120,120,120,0.06);
-}
 .inbound-msg {
     background: rgba(229,231,235,0.22);
     border: 1px solid rgba(120,120,120,0.15);
@@ -98,6 +91,29 @@ st.markdown("""
     justify-content:center;
     font-weight:800;
     margin-right:10px;
+}
+.platform-badge {
+    display:inline-block;
+    padding:4px 9px;
+    border-radius:999px;
+    font-size:12px;
+    font-weight:700;
+    margin-left:6px;
+}
+.ig-badge {
+    background:rgba(225,29,72,0.12);
+    color:#e11d48;
+}
+.tg-badge {
+    background:rgba(14,165,233,0.13);
+    color:#0284c7;
+}
+.client-card {
+    border: 1px solid rgba(120,120,120,0.15);
+    border-radius: 18px;
+    padding: 12px;
+    margin-bottom: 8px;
+    background: rgba(120,120,120,0.06);
 }
 .stButton button {
     border-radius: 999px;
@@ -195,6 +211,7 @@ def get_user_businesses(user_email):
         .data
         or []
     )
+
     if not links:
         return []
 
@@ -215,6 +232,10 @@ def get_user_businesses(user_email):
         b["user_role"] = role_map.get(b["id"], "owner")
 
     return businesses
+
+
+def get_allowed_businesses():
+    return get_all_businesses() if is_admin else get_user_businesses(user_email)
 
 
 def update_business(business_id, data):
@@ -303,10 +324,6 @@ def get_message_count(platform=None):
         return 0
 
 
-def get_allowed_businesses():
-    return get_all_businesses() if is_admin else get_user_businesses(user_email)
-
-
 def telegram_webhook_url():
     return f"{PUBLIC_BASE_URL}/webhook/telegram"
 
@@ -337,42 +354,50 @@ def get_telegram_webhook_info():
         return response.ok, {"text": response.text}
 
 
-def get_instagram_conversations(business_ids, search_text="", limit=700):
+def get_social_conversations(business_ids, platform_filter="all", search_text="", limit=900):
     if not business_ids:
         return []
 
     try:
-        rows = (
+        query = (
             supabase.table("inbox_messages")
             .select("*")
-            .eq("platform", "instagram")
             .in_("business_id", business_ids)
             .order("created_at", desc=True)
             .limit(limit)
-            .execute()
-            .data
-            or []
         )
+
+        if platform_filter != "all":
+            query = query.eq("platform", platform_filter)
+
+        rows = query.execute().data or []
+
     except Exception as e:
-        st.error(f"Could not load inbox messages: {e}")
+        st.error(f"Could not load sales chats: {e}")
         return []
 
     conversations = {}
 
     for row in rows:
         business_id = row.get("business_id")
+        platform = row.get("platform", "instagram")
         customer_id = str(row.get("customer_id") or "").strip()
 
         if not business_id or not customer_id:
             continue
 
-        key = f"{business_id}::{customer_id}"
+        key = f"{platform}::{business_id}::{customer_id}"
+
+        fallback_name = f"{'Telegram' if platform == 'telegram' else 'Instagram'} Client {customer_id[-4:]}"
 
         if key not in conversations:
             conversations[key] = {
                 "business_id": business_id,
+                "platform": platform,
+                "channel": row.get("channel", ""),
                 "customer_id": customer_id,
-                "customer_name": row.get("customer_name") or f"Instagram Client {customer_id[-4:]}",
+                "chat_id": str(row.get("chat_id") or customer_id),
+                "customer_name": row.get("customer_name") or fallback_name,
                 "last_message": row.get("content", ""),
                 "last_message_at": row.get("created_at", ""),
                 "unread_count": 0,
@@ -390,18 +415,18 @@ def get_instagram_conversations(business_ids, search_text="", limit=700):
         q = search_text.lower().strip()
         results = [
             c for c in results
-            if q in f"{c.get('customer_id','')} {c.get('customer_name','')} {c.get('last_message','')}".lower()
+            if q in f"{c.get('customer_id','')} {c.get('customer_name','')} {c.get('last_message','')} {c.get('platform','')}".lower()
         ]
 
     return results
 
 
-def get_conversation_messages(business_id, customer_id, limit=250):
+def get_conversation_messages(business_id, customer_id, platform, limit=250):
     try:
         return (
             supabase.table("inbox_messages")
             .select("*")
-            .eq("platform", "instagram")
+            .eq("platform", platform)
             .eq("business_id", business_id)
             .eq("customer_id", str(customer_id))
             .order("created_at", desc=False)
@@ -415,12 +440,12 @@ def get_conversation_messages(business_id, customer_id, limit=250):
         return []
 
 
-def mark_conversation_read(business_id, customer_id):
+def mark_conversation_read(business_id, customer_id, platform):
     try:
         (
             supabase.table("inbox_messages")
             .update({"is_read": True})
-            .eq("platform", "instagram")
+            .eq("platform", platform)
             .eq("business_id", business_id)
             .eq("customer_id", str(customer_id))
             .eq("direction", "inbound")
@@ -428,6 +453,33 @@ def mark_conversation_read(business_id, customer_id):
         )
     except Exception:
         pass
+
+
+def save_outbound_message(business, customer_id, text, platform, channel, chat_id="", raw_payload=None):
+    data = {
+        "business_id": business.get("id"),
+        "instagram_business_id": business.get("instagram_business_id"),
+        "platform": platform,
+        "customer_id": str(customer_id),
+        "customer_name": f"{platform.title()} Client {str(customer_id)[-4:]}",
+        "chat_id": str(chat_id or customer_id),
+        "channel": channel,
+        "direction": "outbound",
+        "role": "assistant",
+        "content": text,
+        "external_message_id": "",
+        "raw_payload": raw_payload or {},
+        "is_read": True,
+    }
+
+    try:
+        supabase.table("inbox_messages").insert(data).execute()
+    except Exception:
+        fallback = dict(data)
+        fallback.pop("customer_name", None)
+        fallback.pop("chat_id", None)
+        fallback.pop("is_read", None)
+        supabase.table("inbox_messages").insert(fallback).execute()
 
 
 def send_instagram_dm_from_backend(business_id, customer_id, text):
@@ -440,6 +492,49 @@ def send_instagram_dm_from_backend(business_id, customer_id, text):
     response = requests.post(
         f"{BACKEND_URL}/dashboard/send-instagram-dm",
         json=payload,
+        headers={"x-dashboard-secret": DASHBOARD_SECRET},
+        timeout=30,
+    )
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {"text": response.text}
+
+    return response.ok, data
+
+
+def send_telegram_bot_message(chat_id, text):
+    if not TELEGRAM_BOT_TOKEN:
+        return False, {"error": "TELEGRAM_BOT_TOKEN is missing"}
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    response = requests.post(
+        url,
+        json={
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": False,
+        },
+        timeout=30,
+    )
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {"text": response.text}
+
+    return response.ok and data.get("ok", False), data
+
+
+def send_telegram_user_message_from_backend(customer_id, text):
+    response = requests.post(
+        f"{BACKEND_URL}/dashboard/send-telegram-user-message",
+        json={
+            "customer_id": str(customer_id),
+            "text": text,
+        },
         headers={"x-dashboard-secret": DASHBOARD_SECRET},
         timeout=30,
     )
@@ -498,7 +593,7 @@ with st.sidebar:
             "Menu",
             [
                 "📊 Sales Overview",
-                "💬 Instagram Chat",
+                "💬 Social Sales Chat",
                 "📦 Business Setup",
                 "➕ Add Account",
                 "📲 Telegram Setup",
@@ -511,7 +606,7 @@ with st.sidebar:
             "Menu",
             [
                 "📊 Sales Overview",
-                "💬 Instagram Chat",
+                "💬 Social Sales Chat",
                 "📦 Business Setup",
                 "📲 Telegram Setup",
             ],
@@ -526,7 +621,7 @@ with st.sidebar:
 st.markdown("""
 <div class="main-header">
     <h2 style="margin:0;">Milana Premium Social Sales Chat</h2>
-    <p style="margin:6px 0 0 0;">Instagram mijozlar bilan suhbat, savdo va tezkor javoblar uchun yagona panel</p>
+    <p style="margin:6px 0 0 0;">Instagram va Telegram mijozlar bilan savdo suhbatlari uchun yagona panel</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -536,19 +631,19 @@ def show_metrics():
 
     total_businesses = len(businesses)
     active_bots = sum(1 for b in businesses if b.get("bot_enabled"))
-    instagram_connected = sum(1 for b in businesses if b.get("access_token") or b.get("page_access_token"))
-    telegram_ready = 1 if TELEGRAM_BOT_TOKEN and TELEGRAM_BOT_USERNAME else 0
+    instagram_count = get_message_count("instagram")
+    telegram_count = get_message_count("telegram")
 
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{total_businesses}</div><div class="metric-label">Connected Sales Accounts</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{total_businesses}</div><div class="metric-label">Sales Accounts</div></div>', unsafe_allow_html=True)
     with c2:
         st.markdown(f'<div class="metric-card"><div class="metric-value">{active_bots}</div><div class="metric-label">Auto Reply Active</div></div>', unsafe_allow_html=True)
     with c3:
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{instagram_connected}</div><div class="metric-label">Instagram Connected</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{instagram_count}</div><div class="metric-label">Instagram Messages</div></div>', unsafe_allow_html=True)
     with c4:
-        st.markdown(f'<div class="metric-card"><div class="metric-value">{telegram_ready}</div><div class="metric-label">Telegram Ready</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="metric-card"><div class="metric-value">{telegram_count}</div><div class="metric-label">Telegram Messages</div></div>', unsafe_allow_html=True)
 
 
 def business_editor(business):
@@ -613,24 +708,6 @@ def business_editor(business):
         )
 
         st.divider()
-        st.subheader("📸 Instagram Connection")
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.text_input("Instagram Account ID", value=business.get("instagram_business_id", ""), disabled=True)
-            auto_reply_dms = st.toggle("Auto Reply Instagram DMs", value=bool(business.get("auto_reply_dms", True)), disabled="auto_reply_dms" not in business)
-
-        with col2:
-            st.text_input("Facebook Page ID", value=business.get("facebook_page_id", ""), disabled=True)
-            auto_reply_comments = st.toggle("Auto Reply Comments", value=bool(business.get("auto_reply_comments", True)), disabled="auto_reply_comments" not in business)
-
-        if business.get("access_token") or business.get("page_access_token"):
-            st.success("Instagram connected")
-        else:
-            st.warning("Instagram is not connected")
-
-        st.divider()
         st.subheader("📦 Products and Sales Knowledge")
 
         products = st.text_area("Products / Services", value=business.get("products", ""), height=100)
@@ -656,10 +733,6 @@ def business_editor(business):
         submitted = st.form_submit_button("💾 Save Milana Premium Setup", type="primary", use_container_width=True)
 
         if submitted:
-            if not business_name.strip():
-                st.error("Account name is required.")
-                return
-
             update_data = {
                 "business_name": business_name.strip(),
                 "business_type": business_type.strip(),
@@ -671,8 +744,6 @@ def business_editor(business):
                 "ai_reply_rules": ai_reply_rules.strip(),
                 "ai_max_tokens": int(max_tokens),
                 "ai_temperature": float(temperature),
-                "auto_reply_dms": auto_reply_dms,
-                "auto_reply_comments": auto_reply_comments,
                 "products": products.strip(),
                 "prices": prices.strip(),
                 "delivery_info": delivery.strip(),
@@ -699,17 +770,9 @@ if nav_option == "📊 Sales Overview":
     st.subheader("Sales Overview")
     show_metrics()
 
-    st.divider()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Instagram Messages", get_message_count("instagram"))
-    with col2:
-        st.metric("Telegram Messages", get_message_count("telegram"))
-
-
-elif nav_option == "💬 Instagram Chat":
-    st.subheader("💬 Milana Premium Instagram Chat")
+elif nav_option == "💬 Social Sales Chat":
+    st.subheader("💬 Milana Premium Social Sales Chat")
 
     businesses = get_allowed_businesses()
     business_map = {b.get("id"): b for b in businesses if b.get("id")}
@@ -718,35 +781,51 @@ elif nav_option == "💬 Instagram Chat":
     if not businesses:
         st.warning("No Milana Premium account found.")
     else:
-        top1, top2 = st.columns([2, 1])
+        top1, top2, top3 = st.columns([2, 1, 1])
+
         with top1:
-            search_text = st.text_input("Search Instagram clients", placeholder="Search by client, message, or ID")
+            search_text = st.text_input("Search clients", placeholder="Search by client, message, or ID")
+
         with top2:
+            platform_filter_label = st.selectbox("Platform", ["All", "Instagram", "Telegram"])
+            platform_filter = {
+                "All": "all",
+                "Instagram": "instagram",
+                "Telegram": "telegram",
+            }[platform_filter_label]
+
+        with top3:
             unread_only = st.toggle("Unread only", value=False)
 
-        conversations = get_instagram_conversations(business_ids, search_text=search_text)
+        conversations = get_social_conversations(
+            business_ids=business_ids,
+            platform_filter=platform_filter,
+            search_text=search_text,
+        )
 
         if unread_only:
             conversations = [c for c in conversations if c.get("unread_count", 0) > 0]
 
         if not conversations:
-            st.info("No Instagram conversations yet.")
+            st.info("No social sales conversations yet.")
         else:
-            left, right = st.columns([1.05, 2.4])
+            left, right = st.columns([1.08, 2.45])
 
             with left:
-                st.markdown("### Instagram Clients")
+                st.markdown("### Clients")
                 options = {}
 
                 for c in conversations:
-                    business = business_map.get(c["business_id"], {})
+                    platform = c.get("platform", "instagram")
                     unread = c.get("unread_count", 0)
                     unread_badge = f" 🔴 {unread}" if unread else ""
-                    preview = str(c.get("last_message", ""))[:34]
-                    label = f"👤 Client {str(c.get('customer_id'))[-4:]}{unread_badge}\n{preview}"
+                    preview = str(c.get("last_message", ""))[:38]
+                    icon = "📲" if platform == "telegram" else "📸"
+                    name = c.get("customer_name") or f"Client {str(c.get('customer_id'))[-4:]}"
+                    label = f"{icon} {name}{unread_badge}\n{preview}"
                     options[label] = c
 
-                selected_label = st.radio("Select Instagram chat", list(options.keys()), label_visibility="collapsed")
+                selected_label = st.radio("Select chat", list(options.keys()), label_visibility="collapsed")
                 selected_conversation = options[selected_label]
 
             with right:
@@ -757,18 +836,25 @@ elif nav_option == "💬 Instagram Chat":
                     st.stop()
 
                 customer_id = selected_conversation["customer_id"]
-                client_title = f"Instagram Client {str(customer_id)[-4:]}"
+                chat_id = selected_conversation.get("chat_id") or customer_id
+                platform = selected_conversation.get("platform", "instagram")
+                channel = selected_conversation.get("channel", "")
+                customer_name = selected_conversation.get("customer_name") or f"Client {str(customer_id)[-4:]}"
 
-                mark_conversation_read(selected_business["id"], customer_id)
-                messages = get_conversation_messages(selected_business["id"], customer_id)
+                mark_conversation_read(selected_business["id"], customer_id, platform)
+                messages = get_conversation_messages(selected_business["id"], customer_id, platform)
+
+                badge_class = "tg-badge" if platform == "telegram" else "ig-badge"
+                badge_text = "Telegram" if platform == "telegram" else "Instagram"
 
                 st.markdown('<div class="chat-shell">', unsafe_allow_html=True)
 
                 st.markdown(f"""
                 <div class="chat-top">
-                    <span class="avatar">IG</span>
-                    <b>{html.escape(client_title)}</b><br>
-                    <span class="small-muted">Milana Premium Instagram sales chat</span>
+                    <span class="avatar">{'TG' if platform == 'telegram' else 'IG'}</span>
+                    <b>{html.escape(customer_name)}</b>
+                    <span class="platform-badge {badge_class}">{badge_text}</span><br>
+                    <span class="small-muted">Milana Premium social sales chat</span>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -801,8 +887,9 @@ elif nav_option == "💬 Instagram Chat":
                                 unsafe_allow_html=True,
                             )
 
-                with st.form("manual_instagram_reply", clear_on_submit=True):
+                with st.form("manual_social_reply", clear_on_submit=True):
                     reply_text = st.text_area("Message", placeholder="Reply as Milana Premium...", height=90)
+
                     c1, c2, c3, c4 = st.columns(4)
 
                     with c1:
@@ -830,11 +917,37 @@ elif nav_option == "💬 Instagram Chat":
                         if not final_text.strip():
                             st.error("Message cannot be empty.")
                         else:
-                            ok, result = send_instagram_dm_from_backend(
-                                business_id=selected_business["id"],
-                                customer_id=customer_id,
-                                text=final_text.strip(),
-                            )
+                            if platform == "instagram":
+                                ok, result = send_instagram_dm_from_backend(
+                                    business_id=selected_business["id"],
+                                    customer_id=customer_id,
+                                    text=final_text.strip(),
+                                )
+
+                            elif platform == "telegram" and channel in ["telegram_bot_private", "telegram_bot_group", "private", "group", "supergroup"]:
+                                ok, result = send_telegram_bot_message(
+                                    chat_id=chat_id,
+                                    text=final_text.strip(),
+                                )
+                                if ok:
+                                    save_outbound_message(
+                                        business=selected_business,
+                                        customer_id=customer_id,
+                                        text=final_text.strip(),
+                                        platform="telegram",
+                                        channel=channel or "telegram_bot_private",
+                                        chat_id=chat_id,
+                                        raw_payload=result,
+                                    )
+
+                            elif platform == "telegram" and channel == "telegram_user_private":
+                                ok, result = send_telegram_user_message_from_backend(
+                                    customer_id=customer_id,
+                                    text=final_text.strip(),
+                                )
+
+                            else:
+                                ok, result = False, {"error": "Unsupported channel for manual reply", "channel": channel}
 
                             if ok:
                                 st.success("Sent.")
@@ -847,20 +960,23 @@ elif nav_option == "💬 Instagram Chat":
                 st.markdown("</div>", unsafe_allow_html=True)
 
 
-elif nav_option in ["📦 Business Setup"]:
+elif nav_option == "📦 Business Setup":
     businesses = get_allowed_businesses()
 
     if not businesses:
         st.warning("No Milana Premium account found.")
     else:
-        business = businesses[0] if len(businesses) == 1 else st.selectbox(
-            "Select Account",
-            {f"{b.get('business_name', 'Milana Premium')} | IG: {b.get('instagram_business_id', 'No ID')}": b for b in businesses},
-        )
-        if isinstance(business, str):
-            pass
+        if len(businesses) == 1:
+            business = businesses[0]
         else:
-            business_editor(business)
+            business_options = {
+                f"{b.get('business_name', 'Milana Premium')} | IG: {b.get('instagram_business_id', 'No ID')}": b
+                for b in businesses
+            }
+            selected = st.selectbox("Select Account", list(business_options.keys()))
+            business = business_options[selected]
+
+        business_editor(business)
 
 
 elif nav_option == "➕ Add Account" and is_admin:
@@ -916,27 +1032,50 @@ elif nav_option == "📲 Telegram Setup":
     st.subheader("📲 Telegram Setup")
 
     col1, col2, col3 = st.columns(3)
+
     with col1:
-        st.metric("Telegram Token", "OK" if TELEGRAM_BOT_TOKEN else "Missing")
+        st.metric("Telegram Bot Token", "OK" if TELEGRAM_BOT_TOKEN else "Missing")
+
     with col2:
         st.metric("Bot Username", f"@{TELEGRAM_BOT_USERNAME.replace('@', '')}" if TELEGRAM_BOT_USERNAME else "Missing")
+
     with col3:
         st.metric("Telegram Messages", get_message_count("telegram"))
 
     st.divider()
+
+    st.markdown("### Bot Webhook")
     st.code(telegram_webhook_url())
 
     col1, col2, col3 = st.columns(3)
+
     with col1:
-        if st.button("Set Telegram Webhook", use_container_width=True):
+        if st.button("Set Telegram Bot Webhook", use_container_width=True):
             ok, data = set_telegram_webhook()
             st.json(data)
+
     with col2:
-        if st.button("Check Webhook Info", use_container_width=True):
+        if st.button("Check Bot Webhook", use_container_width=True):
             ok, data = get_telegram_webhook_info()
             st.json(data)
+
     with col3:
-        st.link_button("Open Backend Check", f"{BACKEND_URL}/webhook/telegram", use_container_width=True)
+        st.link_button("Open Telegram Webhook Check", f"{BACKEND_URL}/webhook/telegram", use_container_width=True)
+
+    st.divider()
+
+    st.markdown("### Private Telegram Account")
+    st.info(
+        "Private Telegram account automation works only if the Telethon session file exists on the backend "
+        "and ENABLE_TELEGRAM_USER_CLIENT=true is set."
+    )
+
+    st.code(
+        "TELEGRAM_API_ID=...\n"
+        "TELEGRAM_API_HASH=...\n"
+        "TELEGRAM_USER_SESSION=milana_user_session\n"
+        "ENABLE_TELEGRAM_USER_CLIENT=true"
+    )
 
 
 elif nav_option == "👥 Managers" and is_admin:
