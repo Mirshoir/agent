@@ -553,6 +553,10 @@ async def telegram_webhook(request: Request):
 
         # Handle text messages
         text = normalize_text(message.get("text"))
+        media_type = None
+        media_url = None
+        media_file_id = None
+        
         if text:
             buffer_key = f"bot:{chat_id}:{customer_id}"
             buffer_message(MESSAGE_BUFFER, buffer_key, text)
@@ -607,9 +611,11 @@ async def telegram_webhook(request: Request):
             photos = message.get("photo", [])
             largest_photo = photos[-1] if photos else {}
             file_id = largest_photo.get("file_id")
-            caption = message.get("caption", "📸 Photo sent")
-
-            file_url = get_file_url(file_id)
+            caption = normalize_text(message.get("caption") or "📸 Photo")
+            
+            media_type = "photo"
+            media_file_id = file_id
+            media_url = get_file_url(file_id)
 
             save_telegram_message(
                 business=business,
@@ -621,18 +627,22 @@ async def telegram_webhook(request: Request):
                 channel=channel,
                 customer_name=customer_name,
                 chat_id=chat_id,
-                media_type="photo",
-                media_url=file_url,
-                media_file_id=file_id,
+                media_type=media_type,
+                media_url=media_url,
+                media_file_id=media_file_id,
             )
+            
+            log("Telegram photo saved", {"file_id": file_id, "url": media_url})
 
         # Handle videos
         elif message.get("video"):
             video = message.get("video", {})
             file_id = video.get("file_id")
-            caption = message.get("caption", "🎥 Video sent")
-
-            file_url = get_file_url(file_id)
+            caption = normalize_text(message.get("caption") or "🎥 Video")
+            
+            media_type = "video"
+            media_file_id = file_id
+            media_url = get_file_url(file_id)
 
             save_telegram_message(
                 business=business,
@@ -644,18 +654,22 @@ async def telegram_webhook(request: Request):
                 channel=channel,
                 customer_name=customer_name,
                 chat_id=chat_id,
-                media_type="video",
-                media_url=file_url,
-                media_file_id=file_id,
+                media_type=media_type,
+                media_url=media_url,
+                media_file_id=media_file_id,
             )
+            
+            log("Telegram video saved", {"file_id": file_id, "url": media_url})
 
         # Handle voice messages
         elif message.get("voice"):
             voice = message.get("voice", {})
             file_id = voice.get("file_id")
             duration = voice.get("duration", 0)
-
-            file_url = get_file_url(file_id)
+            
+            media_type = "voice"
+            media_file_id = file_id
+            media_url = get_file_url(file_id)
 
             save_telegram_message(
                 business=business,
@@ -667,13 +681,15 @@ async def telegram_webhook(request: Request):
                 channel=channel,
                 customer_name=customer_name,
                 chat_id=chat_id,
-                media_type="voice",
-                media_url=file_url,
-                media_file_id=file_id,
+                media_type=media_type,
+                media_url=media_url,
+                media_file_id=media_file_id,
             )
+            
+            log("Telegram voice saved", {"file_id": file_id, "url": media_url})
 
         else:
-            return JSONResponse({"status": "ignored_no_text"})
+            return JSONResponse({"status": "ignored_no_text_or_media"})
 
         return JSONResponse({"status": "ok"})
 
