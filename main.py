@@ -22,6 +22,7 @@ from telegram_bot import (
     stop_telegram_user_client,
     send_telegram_user_message,
     send_telegram_user_file,
+    send_telegram_user_voice_file,
     send_telegram_bot_message,
     save_telegram_message,
     get_active_business,
@@ -194,6 +195,18 @@ class DashboardImageFile(BaseModel):
     file_data: str
     filename: str = "image.jpg"
     mime_type: str = "image/jpeg"
+
+
+class DashboardVoiceFile(BaseModel):
+    business_id: str = ""
+    conversation_id: str = ""
+    platform: str
+    channel: str = ""
+    customer_id: str
+    chat_id: str = ""
+    file_data: str
+    filename: str = "voice.ogg"
+    mime_type: str = "audio/ogg"
 
 
 class BusinessSettingsUpdate(BaseModel):
@@ -1206,6 +1219,54 @@ def send_whatsapp_image_upload(to: str, file_bytes: bytes, filename: str, mime_t
     return send_res.ok, send_result, media_id
 
 
+def send_whatsapp_audio_upload(to: str, file_bytes: bytes, filename: str, mime_type: str, business: dict = None):
+    token = get_whatsapp_access_token(business)
+    phone_number_id = get_whatsapp_phone_number_id(business)
+
+    if not token or not phone_number_id:
+        return False, {"error": "Missing WhatsApp access token or phone number id"}, ""
+
+    upload_res = requests.post(
+        f"{GRAPH_FACEBOOK}/{phone_number_id}/media",
+        headers={"Authorization": f"Bearer {token}"},
+        data={
+            "messaging_product": "whatsapp",
+            "type": mime_type or "audio/ogg",
+        },
+        files={"file": (filename or "voice.ogg", file_bytes, mime_type or "audio/ogg")},
+        timeout=60,
+    )
+
+    upload_result = safe_json(upload_res)
+    log("WhatsApp audio upload", {"status": upload_res.status_code, "body": upload_result})
+
+    if not upload_res.ok:
+        return False, upload_result, ""
+
+    media_id = upload_result.get("id", "")
+    if not media_id:
+        return False, {"error": "WhatsApp audio upload returned no media id", "meta": upload_result}, ""
+
+    send_res = requests.post(
+        f"{GRAPH_FACEBOOK}/{phone_number_id}/messages",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "messaging_product": "whatsapp",
+            "to": normalize_id(to),
+            "type": "audio",
+            "audio": {"id": media_id},
+        },
+        timeout=30,
+    )
+
+    send_result = safe_json(send_res)
+    log("WhatsApp audio send", {"status": send_res.status_code, "body": send_result})
+    return send_res.ok, send_result, media_id
+
+
 def send_telegram_bot_photo_upload(chat_id: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = ""):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
@@ -1220,6 +1281,24 @@ def send_telegram_bot_photo_upload(chat_id: str, file_bytes: bytes, filename: st
         f"https://api.telegram.org/bot{token}/sendPhoto",
         data=data,
         files={"photo": (filename or "image.jpg", file_bytes, mime_type or "image/jpeg")},
+        timeout=60,
+    )
+
+
+def send_telegram_bot_voice_upload(chat_id: str, file_bytes: bytes, filename: str, mime_type: str):
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+
+    if not token:
+        return None
+
+    is_voice_note = "ogg" in (mime_type or "").lower() or str(filename or "").lower().endswith(".ogg")
+    method = "sendVoice" if is_voice_note else "sendAudio"
+    field = "voice" if is_voice_note else "audio"
+
+    return requests.post(
+        f"https://api.telegram.org/bot{token}/{method}",
+        data={"chat_id": chat_id},
+        files={field: (filename or "voice.ogg", file_bytes, mime_type or "audio/ogg")},
         timeout=60,
     )
 
@@ -2240,6 +2319,132 @@ async def dashboard_send_image_file(
             {
                 "status": "error",
                 "message": "Instagram image uploads need public media hosting. Add Supabase Storage/S3, then send the public URL through Instagram DM.",
+            },
+            status_code=400,
+        )
+
+    return JSONResponse({"status": "error", "message": "Unknown platform"}, status_code=400)
+
+
+@app.post("/dashboard/send-voice-file")
+async def dashboard_send_voice_file(
+        payload: DashboardVoiceFile,
+        x_dashboard_secret: str = Header(default=""),
+):
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    if not str(payload.mime_type or "").startswith("audio/"):
+        return JSONResponse({"status": "error", "message": "Only audio files are supported for voice notes"}, status_code=400)
+
+    try:
+        file_bytes = decode_upload_data(payload.file_data)
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
+
+    business = get_business_by_id(payload.business_id) if payload.business_id else get_active_business()
+    if not business:
+        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
+
+    customer_id = normalize_id(payload.customer_id)
+    chat_id = normalize_id(payload.chat_id or payload.customer_id)
+    platform = normalize_id(payload.platform).lower()
+    channel = normalize_id(payload.channel)
+
+    if not customer_id:
+        return JSONResponse({"status": "error", "message": "Missing customer_id"}, status_code=400)
+
+    if platform == "telegram" and channel == "telegram_user_private":
+        ok, result = await send_telegram_user_voice_file(
+            customer_id=customer_id,
+            file_bytes=file_bytes,
+            filename=payload.filename,
+        )
+
+        if ok:
+            save_telegram_message(
+                business=business,
+                customer_id=customer_id,
+                text="🎤 Voice message",
+                direction="outbound",
+                message_id=result.get("message_id", ""),
+                raw_payload=result,
+                channel="telegram_user_private",
+                customer_name=result.get("customer_name", customer_id),
+                chat_id=result.get("chat_id", chat_id),
+                media_type="voice",
+            )
+
+        return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
+
+    if platform == "telegram":
+        res = send_telegram_bot_voice_upload(
+            chat_id=chat_id,
+            file_bytes=file_bytes,
+            filename=payload.filename,
+            mime_type=payload.mime_type,
+        )
+        result = safe_json(res) if res is not None else {"error": "Send failed — no bot token configured"}
+        ok = res is not None and res.ok
+
+        if ok:
+            body = result.get("result", {}) if isinstance(result, dict) else {}
+            media_file_id = (
+                body.get("voice", {}).get("file_id")
+                or body.get("audio", {}).get("file_id")
+                or ""
+            )
+            save_telegram_message(
+                business=business,
+                customer_id=customer_id,
+                text="🎤 Voice message",
+                direction="outbound",
+                message_id=body.get("message_id", ""),
+                raw_payload=result,
+                channel=channel or "telegram_bot_private",
+                customer_name=customer_id,
+                chat_id=chat_id,
+                media_type="voice",
+                media_file_id=media_file_id,
+            )
+
+        return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
+
+    if platform == "whatsapp":
+        ok, result, media_id = send_whatsapp_audio_upload(
+            to=customer_id,
+            file_bytes=file_bytes,
+            filename=payload.filename,
+            mime_type=payload.mime_type,
+            business=business,
+        )
+
+        if ok:
+            save_inbox_message(
+                business=business,
+                platform="whatsapp",
+                sender_id=get_whatsapp_phone_number_id(business),
+                recipient_id=customer_id,
+                message_text="🎤 Voice message",
+                direction="outbound",
+                platform_message_id=result.get("messages", [{}])[0].get("id", ""),
+                raw_payload=result,
+                is_read=True,
+                media_type="voice",
+                media_url=get_whatsapp_media_proxy_url(media_id) if media_id else None,
+                channel=channel or "whatsapp",
+                file_name=payload.filename,
+                mime_type=payload.mime_type,
+                whatsapp_media_id=media_id,
+            )
+
+        return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
+
+    if platform == "instagram":
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": "Instagram voice uploads need public media hosting and a supported attachment URL.",
             },
             status_code=400,
         )
