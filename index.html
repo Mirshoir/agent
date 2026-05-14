@@ -1,0 +1,1321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Milana Premium · Sales Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ===== CSS Variables (Dark SaaS Theme) ===== */
+:root {
+  --bg-primary: #0f1117;
+  --bg-secondary: #161822;
+  --bg-tertiary: #1c1f2e;
+  --bg-card: #1a1d2b;
+  --bg-hover: #222537;
+  --bg-input: #12141e;
+  --border: #2a2d3e;
+  --border-light: #323550;
+  --text-primary: #e8eaed;
+  --text-secondary: #9aa0b4;
+  --text-muted: #5c6178;
+  --accent: #6366f1;
+  --accent-light: #818cf8;
+  --accent-dark: #4f46e5;
+  --accent-gradient: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  --success: #10b981;
+  --danger: #ef4444;
+  --warning: #f59e0b;
+  --info: #0ea5e9;
+  --instagram: #e4405f;
+  --telegram: #0088cc;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+  --shadow-md: 0 4px 12px rgba(0,0,0,0.4);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,0.5);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --transition: 0.2s cubic-bezier(0.4,0,0.2,1);
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { height:100%; overflow:hidden; }
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+  display:flex;
+  flex-direction:column;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width:6px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+::-webkit-scrollbar-thumb:hover { background:var(--border-light); }
+
+/* ===== Login Screen ===== */
+#login-screen {
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  height:100%;
+  padding:20px;
+}
+.login-card {
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:var(--radius-xl);
+  padding:48px 40px;
+  max-width:420px;
+  width:100%;
+  box-shadow:var(--shadow-lg);
+  text-align:center;
+}
+.login-card .logo { font-size:56px; margin-bottom:16px; }
+.login-card h1 {
+  font-size:32px; font-weight:800; letter-spacing:-0.02em;
+  background:var(--accent-gradient);
+  -webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;
+  background-clip:text;
+}
+.login-card p { color:var(--text-secondary); font-size:14px; margin:8px 0 32px; }
+.login-card input {
+  width:100%;
+  padding:14px 16px;
+  background:var(--bg-input);
+  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  color:var(--text-primary);
+  font-size:14px;
+  font-family:inherit;
+  outline:none;
+  transition:var(--transition);
+  margin-bottom:12px;
+}
+.login-card input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(99,102,241,0.15); }
+.login-card .btn {
+  width:100%;
+  padding:14px;
+  background:var(--accent-gradient);
+  color:#fff;
+  border:none;
+  border-radius:var(--radius-sm);
+  font-size:15px;
+  font-weight:600;
+  cursor:pointer;
+  transition:var(--transition);
+  font-family:inherit;
+  letter-spacing:0.02em;
+}
+.login-card .btn:hover { box-shadow:0 8px 24px rgba(99,102,241,0.4); transform:translateY(-1px); }
+.login-card .hint {
+  font-size:12px;
+  color:var(--text-muted);
+  margin-top:16px;
+  cursor:pointer;
+  text-decoration:underline;
+  opacity:0.7;
+}
+
+/* ===== Dashboard Layout ===== */
+#dashboard-screen {
+  display:none;
+  height:100%;
+  width:100%;
+}
+.dashboard-grid {
+  display:grid;
+  grid-template-columns:340px 1fr;
+  grid-template-rows:1fr;
+  height:100%;
+}
+
+/* Sidebar */
+.sidebar {
+  background:var(--bg-secondary);
+  border-right:1px solid var(--border);
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+}
+.sidebar-header {
+  padding:20px 20px 16px;
+  border-bottom:1px solid var(--border);
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+}
+.sidebar-header .brand { display:flex; align-items:center; gap:12px; }
+.sidebar-header .brand .icon { font-size:32px; }
+.sidebar-header .brand h2 { font-size:18px; font-weight:700; }
+.sidebar-header .brand span { font-size:11px; color:var(--text-muted); display:block; }
+
+.sidebar-actions { display:flex; gap:8px; }
+.sidebar-actions button {
+  width:36px; height:36px;
+  background:var(--bg-tertiary);
+  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  color:var(--text-secondary);
+  cursor:pointer;
+  font-size:16px;
+  transition:var(--transition);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+.sidebar-actions button:hover { border-color:var(--accent); color:var(--accent-light); }
+
+/* Stats Cards in Sidebar */
+.stats-row {
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:10px;
+  padding:16px 20px;
+  border-bottom:1px solid var(--border);
+}
+.stat-mini {
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  padding:12px;
+  text-align:center;
+}
+.stat-mini .value { font-size:22px; font-weight:700; color:var(--accent-light); }
+.stat-mini .label { font-size:10px; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.05em; margin-top:4px; }
+
+/* Search & Filter */
+.search-bar {
+  padding:12px 20px;
+  display:flex;
+  gap:8px;
+  border-bottom:1px solid var(--border);
+}
+.search-bar input {
+  flex:1;
+  padding:10px 14px;
+  background:var(--bg-input);
+  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  color:var(--text-primary);
+  font-size:13px;
+  font-family:inherit;
+  outline:none;
+  transition:var(--transition);
+}
+.search-bar input:focus { border-color:var(--accent); }
+.search-bar select {
+  padding:10px 8px;
+  background:var(--bg-input);
+  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  color:var(--text-primary);
+  font-size:12px;
+  font-family:inherit;
+  outline:none;
+  cursor:pointer;
+  min-width:90px;
+}
+.filter-row { padding:0 20px 12px; display:flex; align-items:center; gap:8px; }
+.filter-row label { font-size:12px; color:var(--text-muted); }
+.toggle-switch {
+  position:relative;
+  display:inline-block;
+  width:36px; height:20px;
+}
+.toggle-switch input { opacity:0; width:0; height:0; }
+.toggle-slider {
+  position:absolute;
+  cursor:pointer;
+  top:0; left:0; right:0; bottom:0;
+  background:var(--border-light);
+  border-radius:20px;
+  transition:var(--transition);
+}
+.toggle-slider:before {
+  content:"";
+  position:absolute;
+  height:14px; width:14px;
+  left:3px; bottom:3px;
+  background:#fff;
+  border-radius:50%;
+  transition:var(--transition);
+}
+input:checked + .toggle-slider { background:var(--accent); }
+input:checked + .toggle-slider:before { transform:translateX(16px); }
+
+/* Conversation List */
+.conversation-list {
+  flex:1;
+  overflow-y:auto;
+  padding:8px 12px;
+}
+.conversation-item {
+  display:flex;
+  align-items:center;
+  gap:12px;
+  padding:14px 12px;
+  border-radius:var(--radius-md);
+  cursor:pointer;
+  transition:var(--transition);
+  border:1px solid transparent;
+  margin-bottom:4px;
+}
+.conversation-item:hover { background:var(--bg-hover); border-color:var(--border); }
+.conversation-item.active { background:var(--bg-tertiary); border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+.conversation-item .avatar {
+  width:40px; height:40px;
+  border-radius:50%;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-weight:700;
+  font-size:14px;
+  flex-shrink:0;
+}
+.avatar-ig { background:linear-gradient(135deg, #f09433, #e6683c, #dc2743, #cc2366, #bc1888); color:#fff; }
+.avatar-tg { background:linear-gradient(135deg, #0088cc, #2aabee); color:#fff; }
+.conversation-item .info { flex:1; min-width:0; }
+.conversation-item .info .name { font-size:13px; font-weight:600; color:var(--text-primary); }
+.conversation-item .info .preview { font-size:11px; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-top:2px; }
+.conversation-item .meta { text-align:right; flex-shrink:0; }
+.conversation-item .meta .time { font-size:10px; color:var(--text-muted); }
+.conversation-item .meta .unread {
+  display:inline-block;
+  background:var(--danger);
+  color:#fff;
+  border-radius:50%;
+  width:20px; height:20px;
+  line-height:20px;
+  text-align:center;
+  font-size:10px;
+  font-weight:700;
+  margin-top:4px;
+}
+.empty-state {
+  text-align:center;
+  color:var(--text-muted);
+  padding:40px 20px;
+  font-size:13px;
+}
+.empty-state .icon { font-size:48px; margin-bottom:12px; opacity:0.5; }
+
+/* Chat Area */
+.chat-area {
+  display:flex;
+  flex-direction:column;
+  height:100%;
+  background:var(--bg-primary);
+}
+.chat-header {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:16px 24px;
+  border-bottom:1px solid var(--border);
+  background:var(--bg-secondary);
+}
+.chat-header .chat-user { display:flex; align-items:center; gap:12px; }
+.chat-header .chat-user .avatar { width:42px; height:42px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-weight:700; font-size:14px; }
+.chat-header .chat-user .name { font-weight:600; font-size:15px; }
+.chat-header .chat-user .platform { font-size:11px; color:var(--text-muted); }
+.chat-header .ai-toggle { display:flex; align-items:center; gap:8px; }
+.chat-header .ai-toggle span { font-size:12px; color:var(--text-secondary); }
+
+/* Messages Area */
+.messages-area {
+  flex:1;
+  overflow-y:auto;
+  padding:16px 24px;
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+.message {
+  display:flex;
+  max-width:75%;
+  animation:fadeIn 0.25s ease-out;
+}
+@keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+.message.inbound { align-self:flex-start; }
+.message.outbound { align-self:flex-end; }
+.message-bubble {
+  padding:12px 16px;
+  border-radius:var(--radius-md);
+  font-size:14px;
+  line-height:1.5;
+  word-wrap:break-word;
+}
+.message.inbound .message-bubble {
+  background:var(--bg-tertiary);
+  border:1px solid var(--border);
+  color:var(--text-primary);
+  border-bottom-left-radius:4px;
+}
+.message.outbound .message-bubble {
+  background:var(--accent-gradient);
+  color:#fff;
+  border-bottom-right-radius:4px;
+}
+.message-media {
+  max-width:280px;
+  max-height:350px;
+  border-radius:var(--radius-sm);
+  object-fit:cover;
+  cursor:pointer;
+}
+.message-audio { max-width:280px; }
+.message-time { font-size:10px; opacity:0.6; margin-top:6px; }
+.typing-indicator {
+  align-self:flex-start;
+  padding:12px 16px;
+  background:var(--bg-tertiary);
+  border:1px solid var(--border);
+  border-radius:var(--radius-md);
+  border-bottom-left-radius:4px;
+  display:flex;
+  gap:4px;
+}
+.typing-indicator span { width:7px; height:7px; background:var(--text-muted); border-radius:50%; animation:typing 1.4s infinite; }
+.typing-indicator span:nth-child(2) { animation-delay:0.2s; }
+.typing-indicator span:nth-child(3) { animation-delay:0.4s; }
+@keyframes typing { 0%,60%,100% { transform:translateY(0); opacity:0.4; } 30% { transform:translateY(-6px); opacity:1; } }
+
+/* Input Area */
+.input-area {
+  border-top:1px solid var(--border);
+  padding:16px 24px;
+  background:var(--bg-secondary);
+}
+.input-tabs { display:flex; gap:4px; margin-bottom:12px; }
+.input-tab {
+  padding:8px 18px;
+  background:transparent;
+  border:1px solid var(--border);
+  border-radius:var(--radius-sm) var(--radius-sm) 0 0;
+  color:var(--text-secondary);
+  cursor:pointer;
+  font-size:12px;
+  font-family:inherit;
+  font-weight:500;
+  transition:var(--transition);
+}
+.input-tab.active { background:var(--bg-tertiary); color:var(--text-primary); border-bottom-color:transparent; }
+.input-tab:hover { color:var(--text-primary); }
+.tab-content { display:none; }
+.tab-content.active { display:block; }
+
+.text-input-row { display:flex; gap:10px; align-items:flex-end; }
+.text-input-row textarea {
+  flex:1;
+  padding:12px 16px;
+  background:var(--bg-input);
+  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  color:var(--text-primary);
+  font-size:14px;
+  font-family:inherit;
+  resize:none;
+  outline:none;
+  min-height:44px;
+  max-height:120px;
+  transition:var(--transition);
+}
+.text-input-row textarea:focus { border-color:var(--accent); }
+.quick-btns { display:flex; gap:6px; margin-top:8px; flex-wrap:wrap; }
+.quick-btn {
+  padding:8px 14px;
+  background:var(--bg-tertiary);
+  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  color:var(--text-secondary);
+  cursor:pointer;
+  font-size:12px;
+  font-family:inherit;
+  font-weight:500;
+  transition:var(--transition);
+}
+.quick-btn:hover { border-color:var(--accent); color:var(--accent-light); }
+
+.file-upload-area {
+  border:2px dashed var(--border);
+  border-radius:var(--radius-md);
+  padding:24px;
+  text-align:center;
+  cursor:pointer;
+  transition:var(--transition);
+}
+.file-upload-area:hover { border-color:var(--accent); background:rgba(99,102,241,0.05); }
+.file-upload-area .icon { font-size:32px; margin-bottom:8px; }
+.file-upload-area p { font-size:12px; color:var(--text-muted); }
+.file-upload-area input[type="file"] { display:none; }
+.file-preview { margin-top:12px; }
+.file-preview img, .file-preview video { max-width:200px; max-height:200px; border-radius:var(--radius-sm); }
+.file-info { font-size:12px; color:var(--text-muted); margin-top:4px; }
+
+.voice-area { text-align:center; padding:16px; }
+.voice-area .record-btn {
+  width:64px; height:64px;
+  border-radius:50%;
+  background:var(--accent-gradient);
+  color:#fff;
+  border:none;
+  font-size:28px;
+  cursor:pointer;
+  transition:var(--transition);
+  box-shadow:0 4px 16px rgba(99,102,241,0.4);
+}
+.voice-area .record-btn:hover { box-shadow:0 8px 32px rgba(99,102,241,0.6); transform:scale(1.05); }
+.voice-area .record-btn.recording {
+  background:var(--danger);
+  animation:pulse 1.5s infinite;
+}
+@keyframes pulse { 0%,100% { box-shadow:0 0 0 0 rgba(239,68,68,0.4); } 50% { box-shadow:0 0 0 12px rgba(239,68,68,0); } }
+.voice-area .timer { font-size:20px; font-weight:700; font-family:'JetBrains Mono', monospace; color:var(--text-primary); margin-top:8px; }
+
+.btn-send {
+  padding:10px 24px;
+  background:var(--accent-gradient);
+  color:#fff;
+  border:none;
+  border-radius:var(--radius-sm);
+  font-size:14px;
+  font-weight:600;
+  cursor:pointer;
+  transition:var(--transition);
+  font-family:inherit;
+  white-space:nowrap;
+}
+.btn-send:hover { box-shadow:0 4px 16px rgba(99,102,241,0.4); }
+
+/* Modal */
+.modal-overlay {
+  display:none;
+  position:fixed;
+  top:0; left:0;
+  width:100%; height:100%;
+  background:rgba(0,0,0,0.7);
+  z-index:100;
+  align-items:center;
+  justify-content:center;
+  padding:20px;
+}
+.modal-overlay.open { display:flex; }
+.modal {
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:var(--radius-lg);
+  padding:32px;
+  max-width:600px;
+  width:100%;
+  max-height:85vh;
+  overflow-y:auto;
+  box-shadow:var(--shadow-lg);
+}
+.modal h3 { font-size:20px; font-weight:700; margin-bottom:20px; }
+.modal .form-group { margin-bottom:16px; }
+.modal .form-group label { display:block; font-size:12px; font-weight:600; color:var(--text-secondary); margin-bottom:6px; text-transform:uppercase; letter-spacing:0.05em; }
+.modal .form-group input,
+.modal .form-group textarea,
+.modal .form-group select {
+  width:100%;
+  padding:10px 14px;
+  background:var(--bg-input);
+  border:1px solid var(--border);
+  border-radius:var(--radius-sm);
+  color:var(--text-primary);
+  font-size:14px;
+  font-family:inherit;
+  outline:none;
+  transition:var(--transition);
+}
+.modal .form-group input:focus,
+.modal .form-group textarea:focus,
+.modal .form-group select:focus { border-color:var(--accent); }
+.modal .form-group textarea { min-height:80px; resize:vertical; }
+.modal .btn-row { display:flex; gap:10px; margin-top:20px; }
+.modal .btn-row button { flex:1; padding:12px; border-radius:var(--radius-sm); font-size:14px; font-weight:600; cursor:pointer; font-family:inherit; transition:var(--transition); border:none; }
+.btn-primary { background:var(--accent-gradient); color:#fff; }
+.btn-secondary { background:var(--bg-tertiary); color:var(--text-secondary); border:1px solid var(--border); }
+
+/* Toast */
+.toast-container {
+  position:fixed;
+  top:20px; right:20px;
+  z-index:200;
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+.toast {
+  padding:14px 20px;
+  border-radius:var(--radius-sm);
+  font-size:13px;
+  font-weight:500;
+  animation:slideInRight 0.3s ease-out;
+  box-shadow:var(--shadow-md);
+  max-width:380px;
+}
+.toast.success { background:#065f46; color:#d1fae5; border:1px solid #059669; }
+.toast.error { background:#7f1d1d; color:#fecaca; border:1px solid #dc2626; }
+@keyframes slideInRight { from { transform:translateX(100%); opacity:0; } to { transform:translateX(0); opacity:1; } }
+
+/* Responsive */
+@media (max-width:900px) {
+  .dashboard-grid { grid-template-columns:1fr; }
+  .sidebar { display:none; }
+  .sidebar.mobile-open { display:flex; position:fixed; top:0; left:0; width:100%; height:100%; z-index:50; }
+  .chat-area { width:100%; }
+  .chat-header { padding:12px 16px; }
+  .messages-area { padding:12px 16px; }
+  .input-area { padding:12px 16px; }
+  .message { max-width:90%; }
+  .mobile-back-btn {
+    display:flex !important;
+    align-items:center;
+    gap:4px;
+    padding:6px 12px;
+    background:var(--bg-tertiary);
+    border:1px solid var(--border);
+    border-radius:var(--radius-sm);
+    color:var(--text-secondary);
+    cursor:pointer;
+    font-size:12px;
+    font-family:inherit;
+  }
+}
+@media (min-width:901px) {
+  .mobile-back-btn { display:none !important; }
+}
+
+/* Loading Spinner */
+.spinner {
+  display:inline-block;
+  width:20px; height:20px;
+  border:2px solid var(--border);
+  border-top-color:var(--accent);
+  border-radius:50%;
+  animation:spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform:rotate(360deg); } }
+
+/* Misc */
+.noselect { user-select:none; }
+.hidden { display:none !important; }
+</style>
+</head>
+<body>
+
+<!-- ==================== LOGIN SCREEN ==================== -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="logo">💬</div>
+    <h1>Milana Premium</h1>
+    <p>Unified messaging platform for Instagram & Telegram</p>
+    <input type="text" id="login-email" placeholder="Email address" autocomplete="email">
+    <input type="password" id="login-secret" placeholder="Dashboard Secret" autocomplete="current-password">
+    <button class="btn" onclick="doLogin()">🚀 Sign In</button>
+    <p class="hint" onclick="fillDemo()">Use Dashboard Secret directly</p>
+  </div>
+</div>
+
+<!-- ==================== DASHBOARD SCREEN ==================== -->
+<div id="dashboard-screen">
+  <div class="dashboard-grid">
+    <!-- Sidebar -->
+    <div class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">
+          <span class="icon">💬</span>
+          <div><h2>Milana</h2><span>Sales Dashboard</span></div>
+        </div>
+        <div class="sidebar-actions">
+          <button onclick="toggleSettingsModal()" title="Settings">⚙️</button>
+          <button onclick="doLogout()" title="Sign Out">🚪</button>
+        </div>
+      </div>
+
+      <!-- Stats -->
+      <div class="stats-row" id="stats-row">
+        <div class="stat-mini"><div class="value" id="stat-accounts">-</div><div class="label">Accounts</div></div>
+        <div class="stat-mini"><div class="value" id="stat-active">-</div><div class="label">Active AI</div></div>
+        <div class="stat-mini"><div class="value" id="stat-ig">-</div><div class="label">Instagram</div></div>
+        <div class="stat-mini"><div class="value" id="stat-tg">-</div><div class="label">Telegram</div></div>
+      </div>
+
+      <!-- Search -->
+      <div class="search-bar">
+        <input type="text" id="conv-search" placeholder="🔍 Search chats..." oninput="debounceSearch()">
+        <select id="conv-platform" onchange="fetchConversations()">
+          <option value="all">All</option>
+          <option value="instagram">📸 IG</option>
+          <option value="telegram">📲 TG</option>
+        </select>
+      </div>
+      <div class="filter-row">
+        <label>Unread only</label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="unread-toggle" onchange="fetchConversations()">
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+
+      <!-- Conversation List -->
+      <div class="conversation-list" id="conversation-list">
+        <div class="empty-state"><div class="icon">💬</div><p>No conversations yet</p></div>
+      </div>
+    </div>
+
+    <!-- Chat Area -->
+    <div class="chat-area" id="chat-area">
+      <div class="chat-header" id="chat-header-placeholder" style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;">
+        <div style="text-align:center">
+          <div style="font-size:64px;margin-bottom:16px;opacity:0.3;">💬</div>
+          <p>Select a conversation to start messaging</p>
+        </div>
+      </div>
+      <div class="chat-header hidden" id="chat-header">
+        <div class="chat-user">
+          <div class="avatar avatar-ig" id="chat-avatar">IG</div>
+          <div>
+            <div class="name" id="chat-name">Customer</div>
+            <div class="platform" id="chat-platform">Instagram</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:12px;">
+          <button class="mobile-back-btn" onclick="closeChatMobile()">← Back</button>
+          <div class="ai-toggle">
+            <span>🤖 AI</span>
+            <label class="toggle-switch">
+              <input type="checkbox" id="ai-toggle" checked onchange="toggleAI()">
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="messages-area hidden" id="messages-area"></div>
+      <div class="input-area hidden" id="input-area">
+        <!-- Tabs -->
+        <div class="input-tabs">
+          <button class="input-tab active" onclick="switchTab('text')">💬 Text</button>
+          <button class="input-tab" onclick="switchTab('file')">📎 Media</button>
+          <button class="input-tab" onclick="switchTab('voice')">🎤 Voice</button>
+        </div>
+
+        <!-- Text Tab -->
+        <div class="tab-content active" id="tab-text">
+          <div class="text-input-row">
+            <textarea id="reply-text" placeholder="Type your message..." rows="1" onkeydown="handleEnter(event)"></textarea>
+            <button class="btn-send" onclick="sendTextMessage()">Send</button>
+          </div>
+          <div class="quick-btns">
+            <button class="quick-btn" onclick="sendQuick('catalog')">📚 Catalog</button>
+            <button class="quick-btn" onclick="sendQuick('contact')">☎️ Contact</button>
+            <button class="quick-btn" onclick="sendQuick('product')">📦 Product</button>
+          </div>
+        </div>
+
+        <!-- File Tab -->
+        <div class="tab-content" id="tab-file">
+          <div class="file-upload-area" onclick="document.getElementById('file-input').click()">
+            <div class="icon">📎</div>
+            <p>Click to upload photo or video (max 50MB)</p>
+            <input type="file" id="file-input" accept="image/*,video/*" onchange="handleFileSelect(event)">
+          </div>
+          <div class="file-preview" id="file-preview"></div>
+          <input type="text" id="file-caption" placeholder="Caption (optional)" style="width:100%;margin-top:8px;padding:10px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;font-family:inherit;outline:none;">
+          <button class="btn-send" style="margin-top:8px;width:100%;" onclick="sendFileMessage()">📤 Send Media</button>
+        </div>
+
+        <!-- Voice Tab -->
+        <div class="tab-content" id="tab-voice">
+          <div class="voice-area">
+            <button class="record-btn" id="record-btn" onclick="toggleRecording()">🎙️</button>
+            <div class="timer" id="voice-timer">00:00</div>
+            <p style="font-size:12px;color:var(--text-muted);margin-top:8px;">Click to start/stop recording</p>
+            <button class="btn-send" style="margin-top:12px;width:100%;" id="send-voice-btn" disabled onclick="sendVoiceMessage()">📤 Send Voice</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== SETTINGS MODAL ==================== -->
+<div class="modal-overlay" id="settings-modal">
+  <div class="modal">
+    <h3>⚙️ Business Settings</h3>
+    <div class="form-group"><label>Account Name</label><input type="text" id="set-name"></div>
+    <div class="form-group"><label>Business Type</label><input type="text" id="set-type"></div>
+    <div class="form-group"><label>Language</label>
+      <select id="set-language"><option value="uz">🇺🇿 Uzbek</option><option value="ru">🇷🇺 Russian</option><option value="en">🇬🇧 English</option></select>
+    </div>
+    <div class="form-group"><label>AI Model</label><input type="text" id="set-model" placeholder="mistral-small-latest"></div>
+    <div class="form-group"><label>Max Tokens</label><input type="number" id="set-tokens" min="50" max="500"></div>
+    <div class="form-group"><label>Temperature</label><input type="range" id="set-temp" min="0" max="1" step="0.1" style="width:100%;"><span id="temp-val">0.5</span></div>
+    <div class="form-group"><label>Catalog Link</label><input type="text" id="set-catalog"></div>
+    <div class="form-group"><label>Sales Phone</label><input type="text" id="set-phone"></div>
+    <div class="form-group"><label>Products</label><textarea id="set-products"></textarea></div>
+    <div class="form-group"><label>Prices</label><textarea id="set-prices"></textarea></div>
+    <div class="form-group"><label>Knowledge Base</label><textarea id="set-knowledge"></textarea></div>
+    <div class="btn-row">
+      <button class="btn-secondary" onclick="toggleSettingsModal()">Cancel</button>
+      <button class="btn-primary" onclick="saveBusinessSettings()">💾 Save Settings</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast Container -->
+<div class="toast-container" id="toast-container"></div>
+
+<script>
+// ==================== GLOBAL STATE ====================
+const API_URL = 'https://agent-1-xi6h.onrender.com';
+let STATE = {
+  secret: sessionStorage.getItem('x-dashboard-secret') || '',
+  businesses: [],
+  conversations: [],
+  selectedConversation: null,
+  messages: [],
+  aiEnabled: true,
+  activeTab: 'text',
+  recording: false,
+  mediaRecorder: null,
+  audioChunks: [],
+  voiceBlob: null,
+  voiceTimerInterval: null,
+  voiceSeconds: 0,
+  selectedFile: null,
+  selectedFileBase64: null,
+};
+
+// ==================== HELPERS ====================
+function toast(msg, type='success') {
+  const container = document.getElementById('toast-container');
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  container.appendChild(el);
+  setTimeout(() => { el.style.opacity='0'; el.style.transition='opacity 0.3s'; setTimeout(()=>el.remove(),300); }, 3500);
+}
+
+function apiHeaders() {
+  const h = { 'Content-Type': 'application/json' };
+  if (STATE.secret) h['x-dashboard-secret'] = STATE.secret;
+  return h;
+}
+
+async function apiGet(path, params={}) {
+  const qs = new URLSearchParams(params).toString();
+  const url = `${API_URL}${path}${qs ? '?'+qs : ''}`;
+  const res = await fetch(url, { headers: apiHeaders() });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function apiPost(path, params={}) {
+  const qs = new URLSearchParams(params).toString();
+  const url = `${API_URL}${path}${qs ? '?'+qs : ''}`;
+  const res = await fetch(url, { method:'POST', headers: apiHeaders() });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  try { return await res.json(); } catch { return { status:'ok' }; }
+}
+
+async function apiPostJSON(path, body={}) {
+  const url = `${API_URL}${path}`;
+  const res = await fetch(url, { method:'POST', headers: apiHeaders(), body: JSON.stringify(body) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  try { return await res.json(); } catch { return { status:'ok' }; }
+}
+
+function parseConversationId(id) {
+  const parts = (id||'').split('::');
+  if (parts.length >= 4) {
+    return { platform: parts[0], business_id: parts[1], channel: parts[2], customer_id: parts[3] };
+  }
+  return null;
+}
+
+function formatTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return ts;
+  const now = new Date();
+  const diff = now - d;
+  if (diff < 86400000 && d.getDate() === now.getDate()) {
+    return d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+  }
+  return d.toLocaleDateString([], { month:'short', day:'numeric' }) + ' ' + d.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit' });
+}
+
+let searchTimeout;
+function debounceSearch() { clearTimeout(searchTimeout); searchTimeout = setTimeout(fetchConversations, 400); }
+
+// ==================== AUTH ====================
+async function doLogin() {
+  const email = document.getElementById('login-email').value.trim();
+  const secret = document.getElementById('login-secret').value.trim();
+  if (!secret) { toast('Please enter your dashboard secret','error'); return; }
+
+  // Try API login first, fallback to direct secret
+  try {
+    const res = await fetch(`${API_URL}/api/auth/login?email=${encodeURIComponent(email)}&password=${encodeURIComponent(secret)}`, { method:'POST' });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.token) STATE.secret = data.token;
+      else if (data.status === 'ok') STATE.secret = secret;
+    } else {
+      STATE.secret = secret;
+    }
+  } catch { STATE.secret = secret; }
+
+  sessionStorage.setItem('x-dashboard-secret', STATE.secret);
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('dashboard-screen').style.display = 'block';
+  await Promise.all([fetchStats(), fetchConversations(), fetchBusinesses()]);
+  toast('Welcome to Milana Premium!');
+}
+
+function fillDemo() {
+  document.getElementById('login-email').value = 'manager@milana.uz';
+  document.getElementById('login-secret').focus();
+}
+
+function doLogout() {
+  sessionStorage.removeItem('x-dashboard-secret');
+  STATE.secret = '';
+  STATE.conversations = [];
+  STATE.selectedConversation = null;
+  STATE.messages = [];
+  document.getElementById('login-screen').style.display = 'flex';
+  document.getElementById('dashboard-screen').style.display = 'none';
+  document.getElementById('login-email').value = '';
+  document.getElementById('login-secret').value = '';
+}
+
+// ==================== API CALLS ====================
+async function fetchStats() {
+  try {
+    const data = await apiGet('/api/stats');
+    if (data.status === 'ok' && data.data) {
+      document.getElementById('stat-accounts').textContent = data.data.total_accounts || 0;
+      document.getElementById('stat-active').textContent = data.data.active_accounts || 0;
+      document.getElementById('stat-ig').textContent = (data.data.instagram_messages || 0).toLocaleString();
+      document.getElementById('stat-tg').textContent = (data.data.telegram_messages || 0).toLocaleString();
+    }
+  } catch (e) { console.error('Stats error:', e); }
+}
+
+async function fetchBusinesses() {
+  try {
+    const data = await apiGet('/api/businesses');
+    if (data.status === 'ok') STATE.businesses = data.data || [];
+  } catch (e) { console.error('Businesses error:', e); }
+}
+
+async function fetchConversations() {
+  const search = document.getElementById('conv-search').value.trim();
+  const platform = document.getElementById('conv-platform').value;
+  const unreadOnly = document.getElementById('unread-toggle').checked;
+  try {
+    const data = await apiGet('/api/conversations', { platform, search });
+    if (data.status === 'ok' && data.data) {
+      STATE.conversations = unreadOnly ? data.data.filter(c => c.unread_count > 0) : data.data;
+      renderConversationList();
+    }
+  } catch (e) { console.error('Conversations error:', e); }
+}
+
+async function fetchMessages(conversationId) {
+  try {
+    const data = await apiGet(`/api/conversation/${encodeURIComponent(conversationId)}`, { limit: 250 });
+    if (data.status === 'ok' && data.data) {
+      STATE.messages = data.data;
+      renderMessages();
+    }
+  } catch (e) { console.error('Messages error:', e); }
+}
+
+async function sendTextMessage() {
+  const text = document.getElementById('reply-text').value.trim();
+  if (!text || !STATE.selectedConversation) return;
+  const info = parseConversationId(STATE.selectedConversation.id);
+  if (!info) return toast('Invalid conversation','error');
+  try {
+    await apiPost('/api/send-message', {
+      conversation_id: STATE.selectedConversation.id,
+      text: text,
+      business_id: info.business_id,
+    });
+    document.getElementById('reply-text').value = '';
+    toast('Message sent!');
+    setTimeout(() => fetchMessages(STATE.selectedConversation.id), 800);
+  } catch (e) { toast('Send failed: ' + e.message, 'error'); }
+}
+
+async function sendQuick(type) {
+  if (!STATE.selectedConversation) return;
+  const info = parseConversationId(STATE.selectedConversation.id);
+  if (!info) return;
+  const business = STATE.businesses.find(b => b.id === info.business_id) || {};
+  let text = '';
+  if (type === 'catalog') text = business.catalog_link ? `Catalog: ${business.catalog_link}` : 'Which product catalog would you like?';
+  else if (type === 'contact') text = business.sales_phone ? `Sales: ${business.sales_phone}` : 'Please leave your phone number.';
+  else if (type === 'product') text = 'Which product are you interested in?';
+  if (!text) return;
+  try {
+    await apiPost('/api/send-message', { conversation_id: STATE.selectedConversation.id, text, business_id: info.business_id });
+    toast('Quick reply sent!');
+    setTimeout(() => fetchMessages(STATE.selectedConversation.id), 800);
+  } catch (e) { toast('Send failed: ' + e.message, 'error'); }
+}
+
+function handleEnter(e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTextMessage(); } }
+
+// ==================== FILE UPLOAD ====================
+function handleFileSelect(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  if (file.size > 50 * 1024 * 1024) { toast('File too large (max 50MB)', 'error'); return; }
+  STATE.selectedFile = file;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    STATE.selectedFileBase64 = e.target.result.split(',')[1] || e.target.result;
+    const preview = document.getElementById('file-preview');
+    if (file.type.startsWith('image/')) preview.innerHTML = `<img src="${e.target.result}" alt="Preview">`;
+    else if (file.type.startsWith('video/')) preview.innerHTML = `<video src="${e.target.result}" controls></video>`;
+    else preview.innerHTML = '';
+    document.getElementById('file-preview').insertAdjacentHTML('beforeend', `<div class="file-info">${file.name} (${(file.size/1024/1024).toFixed(2)} MB)</div>`);
+  };
+  reader.readAsDataURL(file);
+}
+
+async function sendFileMessage() {
+  if (!STATE.selectedFile || !STATE.selectedFileBase64 || !STATE.selectedConversation) return;
+  const info = parseConversationId(STATE.selectedConversation.id);
+  if (!info) return toast('Invalid conversation','error');
+  const caption = document.getElementById('file-caption').value.trim();
+  const mediaType = STATE.selectedFile.type.startsWith('video/') ? 'video' : 'photo';
+  try {
+    await apiPost('/api/send-file', {
+      conversation_id: STATE.selectedConversation.id,
+      caption: caption || `Sent ${mediaType}`,
+      media_type: mediaType,
+      file_data: STATE.selectedFileBase64,
+      filename: STATE.selectedFile.name,
+      business_id: info.business_id,
+    });
+    toast('Media sent!');
+    STATE.selectedFile = null;
+    STATE.selectedFileBase64 = null;
+    document.getElementById('file-preview').innerHTML = '';
+    document.getElementById('file-caption').value = '';
+    document.getElementById('file-input').value = '';
+    setTimeout(() => fetchMessages(STATE.selectedConversation.id), 1000);
+  } catch (e) { toast('Upload failed: ' + e.message, 'error'); }
+}
+
+// ==================== VOICE RECORDING ====================
+async function toggleRecording() {
+  if (!STATE.recording) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeTypes = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/webm', 'audio/mp4'];
+      let mimeType = '';
+      for (const mt of mimeTypes) { if (MediaRecorder.isTypeSupported(mt)) { mimeType = mt; break; } }
+      STATE.mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+      STATE.audioChunks = [];
+      STATE.mediaRecorder.ondataavailable = e => { if (e.data.size > 0) STATE.audioChunks.push(e.data); };
+      STATE.mediaRecorder.onstop = () => {
+        const blob = new Blob(STATE.audioChunks, { type: STATE.mediaRecorder.mimeType || 'audio/webm' });
+        STATE.voiceBlob = blob;
+        document.getElementById('send-voice-btn').disabled = false;
+        const audioURL = URL.createObjectURL(blob);
+        document.getElementById('voice-timer').insertAdjacentHTML('afterend', `<audio controls src="${audioURL}" style="width:100%;margin-top:8px;"></audio>`);
+        stream.getTracks().forEach(t => t.stop());
+      };
+      STATE.mediaRecorder.start();
+      STATE.recording = true;
+      STATE.voiceSeconds = 0;
+      document.getElementById('record-btn').classList.add('recording');
+      document.getElementById('record-btn').textContent = '⏹️';
+      document.getElementById('send-voice-btn').disabled = true;
+      STATE.voiceTimerInterval = setInterval(() => {
+        STATE.voiceSeconds++;
+        const m = Math.floor(STATE.voiceSeconds / 60).toString().padStart(2,'0');
+        const s = (STATE.voiceSeconds % 60).toString().padStart(2,'0');
+        document.getElementById('voice-timer').textContent = `${m}:${s}`;
+        if (STATE.voiceSeconds >= 300) toggleRecording();
+      }, 1000);
+    } catch (e) { toast('Microphone access denied', 'error'); }
+  } else {
+    if (STATE.mediaRecorder && STATE.mediaRecorder.state !== 'inactive') STATE.mediaRecorder.stop();
+    STATE.recording = false;
+    clearInterval(STATE.voiceTimerInterval);
+    document.getElementById('record-btn').classList.remove('recording');
+    document.getElementById('record-btn').textContent = '🎙️';
+  }
+}
+
+async function sendVoiceMessage() {
+  if (!STATE.voiceBlob || !STATE.selectedConversation) return;
+  const info = parseConversationId(STATE.selectedConversation.id);
+  if (!info) return toast('Invalid conversation','error');
+  const reader = new FileReader();
+  reader.onload = async function(e) {
+    const base64 = e.target.result.split(',')[1] || e.target.result;
+    try {
+      await apiPost('/api/send-voice', {
+        customer_id: info.customer_id,
+        file_data: base64,
+        filename: `voice_${Date.now()}.${STATE.mediaRecorder?.mimeType?.includes('ogg') ? 'ogg' : 'webm'}`,
+        chat_id: STATE.selectedConversation.chat_id || info.customer_id,
+      });
+      toast('Voice message sent!');
+      STATE.voiceBlob = null;
+      document.getElementById('send-voice-btn').disabled = true;
+      document.getElementById('voice-timer').textContent = '00:00';
+      const audioEl = document.querySelector('#tab-voice audio');
+      if (audioEl) audioEl.remove();
+      setTimeout(() => fetchMessages(STATE.selectedConversation.id), 1000);
+    } catch (e) { toast('Voice send failed: ' + e.message, 'error'); }
+  };
+  reader.readAsDataURL(STATE.voiceBlob);
+}
+
+// ==================== AI TOGGLE ====================
+async function toggleAI() {
+  if (!STATE.selectedConversation) return;
+  const info = parseConversationId(STATE.selectedConversation.id);
+  if (!info) return;
+  const enabled = document.getElementById('ai-toggle').checked;
+  try {
+    await apiPost('/api/chat-ai-toggle', {
+      business_id: info.business_id,
+      platform: info.platform,
+      channel: info.channel,
+      customer_id: info.customer_id,
+      enabled: enabled,
+    });
+    STATE.aiEnabled = enabled;
+    toast(`AI ${enabled ? 'enabled' : 'disabled'} for this chat`);
+  } catch (e) { toast('Toggle failed: ' + e.message, 'error'); }
+}
+
+// ==================== BUSINESS SETTINGS ====================
+function toggleSettingsModal() {
+  const modal = document.getElementById('settings-modal');
+  modal.classList.toggle('open');
+  if (modal.classList.contains('open') && STATE.businesses.length > 0) {
+    const b = STATE.businesses[0];
+    document.getElementById('set-name').value = b.business_name || '';
+    document.getElementById('set-type').value = b.business_type || '';
+    document.getElementById('set-language').value = b.language || 'uz';
+    document.getElementById('set-model').value = b.ai_model || 'mistral-small-latest';
+    document.getElementById('set-tokens').value = b.ai_max_tokens || 130;
+    document.getElementById('set-temp').value = b.ai_temperature || 0.5;
+    document.getElementById('temp-val').textContent = b.ai_temperature || 0.5;
+    document.getElementById('set-catalog').value = b.catalog_link || '';
+    document.getElementById('set-phone').value = b.sales_phone || '';
+    document.getElementById('set-products').value = b.products || '';
+    document.getElementById('set-prices').value = b.prices || '';
+    document.getElementById('set-knowledge').value = b.knowledge || '';
+  }
+}
+document.getElementById('set-temp').addEventListener('input', function() {
+  document.getElementById('temp-val').textContent = this.value;
+});
+
+async function saveBusinessSettings() {
+  if (STATE.businesses.length === 0) return toast('No business found','error');
+  const businessId = STATE.businesses[0].id;
+  const settings = {
+    business_name: document.getElementById('set-name').value.trim(),
+    business_type: document.getElementById('set-type').value.trim(),
+    language: document.getElementById('set-language').value,
+    ai_model: document.getElementById('set-model').value.trim(),
+    ai_max_tokens: parseInt(document.getElementById('set-tokens').value),
+    ai_temperature: parseFloat(document.getElementById('set-temp').value),
+    catalog_link: document.getElementById('set-catalog').value.trim(),
+    sales_phone: document.getElementById('set-phone').value.trim(),
+    products: document.getElementById('set-products').value.trim(),
+    prices: document.getElementById('set-prices').value.trim(),
+    knowledge: document.getElementById('set-knowledge').value.trim(),
+  };
+  try {
+    await apiPost('/api/business-settings', { business_id: businessId, settings: JSON.stringify(settings) });
+    toast('Settings saved!');
+    toggleSettingsModal();
+    await fetchBusinesses();
+  } catch (e) { toast('Save failed: ' + e.message, 'error'); }
+}
+
+// ==================== RENDER ====================
+function renderConversationList() {
+  const container = document.getElementById('conversation-list');
+  if (!STATE.conversations.length) {
+    container.innerHTML = '<div class="empty-state"><div class="icon">💬</div><p>No conversations found</p></div>';
+    return;
+  }
+  container.innerHTML = STATE.conversations.map(c => {
+    const name = c.customer_name || `Client ${(c.customer_id||'').slice(-4)}`;
+    const preview = (c.last_message || '').substring(0, 40);
+    const unread = c.unread_count > 0 ? `<span class="unread">${c.unread_count}</span>` : '';
+    const isActive = STATE.selectedConversation && STATE.selectedConversation.id === c.id;
+    const avatarClass = c.platform === 'telegram' ? 'avatar-tg' : 'avatar-ig';
+    const initials = (name.charAt(0) || 'C').toUpperCase();
+    return `
+      <div class="conversation-item ${isActive ? 'active' : ''}" onclick="selectConversation('${c.id.replace(/'/g,"\\'")}')">
+        <div class="avatar ${avatarClass}">${initials}</div>
+        <div class="info">
+          <div class="name">${escapeHTML(name)}</div>
+          <div class="preview">${escapeHTML(preview)}</div>
+        </div>
+        <div class="meta">
+          <div class="time">${formatTime(c.last_message_at)}</div>
+          ${unread}
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function escapeHTML(str) {
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+async function selectConversation(conversationId) {
+  STATE.selectedConversation = STATE.conversations.find(c => c.id === conversationId);
+  if (!STATE.selectedConversation) return;
+  renderConversationList();
+  document.getElementById('chat-header-placeholder').classList.add('hidden');
+  document.getElementById('chat-header').classList.remove('hidden');
+  document.getElementById('messages-area').classList.remove('hidden');
+  document.getElementById('input-area').classList.remove('hidden');
+
+  const info = parseConversationId(conversationId);
+  const platform = STATE.selectedConversation.platform || 'instagram';
+  document.getElementById('chat-avatar').className = `avatar ${platform === 'telegram' ? 'avatar-tg' : 'avatar-ig'}`;
+  document.getElementById('chat-avatar').textContent = platform === 'telegram' ? 'TG' : 'IG';
+  document.getElementById('chat-name').textContent = STATE.selectedConversation.customer_name || `Client ${(STATE.selectedConversation.customer_id||'').slice(-4)}`;
+  document.getElementById('chat-platform').textContent = platform === 'telegram' ? '📲 Telegram' : '📸 Instagram';
+
+  await fetchMessages(conversationId);
+
+  // Fetch AI state
+  if (info) {
+    try {
+      const data = await apiGet('/api/chat-ai-toggle', {
+        business_id: info.business_id,
+        platform: info.platform,
+        channel: info.channel,
+        customer_id: info.customer_id,
+        check: 'true'
+      });
+      STATE.aiEnabled = data.enabled !== false;
+    } catch { STATE.aiEnabled = true; }
+  }
+  document.getElementById('ai-toggle').checked = STATE.aiEnabled;
+
+  // Mobile: show chat area
+  if (window.innerWidth <= 900) {
+    document.getElementById('sidebar').classList.remove('mobile-open');
+  }
+}
+
+function closeChatMobile() {
+  STATE.selectedConversation = null;
+  document.getElementById('chat-header-placeholder').classList.remove('hidden');
+  document.getElementById('chat-header').classList.add('hidden');
+  document.getElementById('messages-area').classList.add('hidden');
+  document.getElementById('input-area').classList.add('hidden');
+  document.getElementById('sidebar').classList.add('mobile-open');
+}
+
+function renderMessages() {
+  const container = document.getElementById('messages-area');
+  if (!STATE.messages.length) {
+    container.innerHTML = '<div class="empty-state"><div class="icon">💬</div><p>No messages yet — start the conversation!</p></div>';
+    return;
+  }
+  container.innerHTML = STATE.messages.map(m => {
+    const direction = m.direction === 'outbound' ? 'outbound' : 'inbound';
+    const content = escapeHTML(m.content || '');
+    const time = formatTime(m.created_at);
+    let mediaHTML = '';
+    if (m.media_type === 'photo' && m.media_url) {
+      mediaHTML = `<img src="${escapeHTML(m.media_url)}" class="message-media" loading="lazy" onclick="window.open('${escapeHTML(m.media_url)}')" alt="Photo">`;
+    } else if (m.media_type === 'video' && m.media_url) {
+      mediaHTML = `<video controls class="message-media"><source src="${escapeHTML(m.media_url)}" type="video/mp4"></video>`;
+    } else if (m.media_type === 'voice' && m.media_url) {
+      mediaHTML = `<audio controls class="message-audio"><source src="${escapeHTML(m.media_url)}" type="audio/ogg"></audio>`;
+    }
+    const textDisplay = content && !['📸 Photo','🎥 Video','🎤 Voice message','📸 Photo sent','🎥 Video sent'].includes(content) ? `<div>${content}</div>` : '';
+    return `
+      <div class="message ${direction}">
+        <div class="message-bubble">
+          ${mediaHTML}
+          ${textDisplay}
+          <div class="message-time">${time}</div>
+        </div>
+      </div>`;
+  }).join('');
+  container.scrollTop = container.scrollHeight;
+}
+
+// ==================== TAB SWITCHING ====================
+function switchTab(tab) {
+  STATE.activeTab = tab;
+  document.querySelectorAll('.input-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.input-tab:nth-child(${tab==='text'?1:tab==='file'?2:3})`).classList.add('active');
+  document.getElementById(`tab-${tab}`).classList.add('active');
+}
+
+// ==================== INITIALIZATION ====================
+(function init() {
+  // Temp slider
+  const tempSlider = document.getElementById('set-temp');
+  if (tempSlider) tempSlider.addEventListener('input', function() {
+    document.getElementById('temp-val').textContent = this.value;
+  });
+
+  // Check if already logged in
+  if (STATE.secret) {
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('dashboard-screen').style.display = 'block';
+    Promise.all([fetchStats(), fetchConversations(), fetchBusinesses()]);
+  }
+
+  // Periodic refresh
+  setInterval(() => {
+    if (STATE.secret) {
+      fetchStats();
+      fetchConversations();
+      if (STATE.selectedConversation) fetchMessages(STATE.selectedConversation.id);
+    }
+  }, 15000);
+
+  // Close modal on overlay click
+  document.getElementById('settings-modal').addEventListener('click', function(e) {
+    if (e.target === this) toggleSettingsModal();
+  });
+
+  // Handle window resize
+  window.addEventListener('resize', () => {
+    if (window.innerWidth > 900) {
+      document.getElementById('sidebar').classList.remove('mobile-open');
+    }
+  });
+})();
+</script>
+</body>
+</html>
