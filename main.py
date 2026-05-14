@@ -7,11 +7,13 @@ import tempfile
 import requests
 from urllib.parse import urlencode
 from typing import Optional
+from datetime import datetime
 
 from pydantic import BaseModel
 from fastapi import FastAPI, Request, Header
 from fastapi.responses import PlainTextResponse, JSONResponse, RedirectResponse, Response, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from supabase import create_client
 
 from telegram_bot import (
@@ -37,6 +39,23 @@ app.add_middleware(
 
 app.include_router(telegram_router)
 
+# ============================================================================
+# SERVE REACT UI
+# ============================================================================
+try:
+    app.mount("/static", StaticFiles(directory="static", html=True), name="static")
+except Exception:
+    pass
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    """Serve React dashboard"""
+    try:
+        with open("static/Instaagent Dashboard.html", "r") as f:
+            return f.read()
+    except FileNotFoundError:
+        return "<h1>Dashboard not found. Please ensure static/Instaagent Dashboard.html exists.</h1>"
+
 
 @app.on_event("startup")
 async def startup_telegram_user_client():
@@ -48,9 +67,9 @@ async def shutdown_telegram_user_client():
     await stop_telegram_user_client()
 
 
-# ----------------------------------------------------------------------
+# ============================================================================
 # ENV
-# ----------------------------------------------------------------------
+# ============================================================================
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
@@ -97,9 +116,9 @@ processing_comment_ids = set()
 DEDUP_TTL_SECONDS = 60 * 60
 
 
-# ----------------------------------------------------------------------
+# ============================================================================
 # MODELS
-# ----------------------------------------------------------------------
+# ============================================================================
 class ManualInstagramReply(BaseModel):
     business_id: str
     customer_id: str
@@ -155,9 +174,9 @@ class ManualWhatsAppReply(BaseModel):
     text: str
 
 
-# ----------------------------------------------------------------------
-# HELPERS
-# ----------------------------------------------------------------------
+# ============================================================================
+# HELPERS - GENERAL
+# ============================================================================
 def log(title, data=None):
     print("\n" + "=" * 80)
     print(title)
@@ -221,9 +240,145 @@ def require_dashboard_secret(x_dashboard_secret: str):
     return bool(DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET)
 
 
-# ----------------------------------------------------------------------
+# ============================================================================
+# HELPERS - REACT UI SPECIFIC
+# ============================================================================
+def generate_avatar(name: str) -> dict:
+    """Generate avatar with initials and color for React UI"""
+    parts = str(name).strip().split()
+    if len(parts) >= 2:
+        initials = (parts[0][0] + parts[1][0]).upper()
+    else:
+        initials = (parts[0][:2] if parts[0] else "??").upper()
+    
+    hash_val = sum(ord(c) for c in name) % 8
+    colors = [
+        "linear-gradient(135deg,#e8a07a,#c75d3f)",
+        "linear-gradient(135deg,#7fa8d1,#3a6aa3)",
+        "linear-gradient(135deg,#d6b48a,#a07a4a)",
+        "linear-gradient(135deg,#d97b8a,#9b3f5a)",
+        "linear-gradient(135deg,#a8b899,#5d7548)",
+        "linear-gradient(135deg,#cfa8d6,#7e4f9b)",
+        "linear-gradient(135deg,#e3c87a,#a07e2a)",
+        "linear-gradient(135deg,#7a8aa8,#3f4f6f)",
+    ]
+    
+    return {
+        "initials": initials,
+        "color": colors[hash_val]
+    }
+
+
+def format_time(timestamp: str) -> str:
+    """Format ISO timestamp to relative time"""
+    try:
+        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        now = datetime.now(dt.tzinfo)
+        delta = now - dt
+        seconds = delta.total_seconds()
+        
+        if seconds < 60:
+            return "just now"
+        elif seconds < 3600:
+            minutes = int(seconds // 60)
+            return f"{minutes} min" if minutes != 1 else "1 min"
+        elif seconds < 86400:
+            hours = int(seconds // 3600)
+            return f"{hours} hr" if hours != 1 else "1 hr"
+        elif seconds < 604800:
+            days = int(seconds // 86400)
+            return "yesterday" if days == 1 else f"{days} days"
+        else:
+            weeks = int(seconds // 604800)
+            return f"{weeks} weeks" if weeks != 1 else "1 week"
+    except Exception:
+        return "unknown"
+
+
+def extract_date(timestamp: str) -> str:
+    """Extract date like 'March 2025' from ISO timestamp"""
+    try:
+        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        return dt.strftime('%B %Y')
+    except Exception:
+        return "unknown"
+
+
+def transform_message_to_react(row: dict) -> dict:
+    """Transform database message row to React UI format"""
+    message = {
+        'id': row.get('id', ''),
+        'side': 'out' if row['direction'] == 'outbound' else 'in',
+        'from': 'ai' if row['role'] == 'assistant' else 'user',
+        'time': format_time(row.get('created_at', '')),
+    }
+    
+    media_type = row.get('media_type')
+    content = row.get('content', '')
+    
+    if media_type:
+        message['type'] = 'media'
+        message['label'] = media_type
+        message['mediaCaption'] = content
+        message['mediaUrl'] = row.get('media_url', '')
+    else:
+        message['type'] = 'text'
+        message['text'] = content
+    
+    return message
+
+
+def transform_conversation_to_react(key: str, rows: list, business: dict = None) -> dict:
+    """Transform database rows to React conversation format"""
+    if not rows:
+        return None
+    
+    latest_row = rows[-1]
+    parts = key.split("::")
+    if len(parts) != 4:
+        return None
+        
+    platform, business_id, channel, customer_id = parts
+    
+    customer_name = latest_row.get('customer_name', f'Customer {customer_id[-4:]}')
+    
+    return {
+        'id': key,
+        'name': customer_name,
+        'handle': f'@{customer_id}',
+        'platform': platform,
+        'avatar': generate_avatar(customer_name),
+        'lang': business.get('language', 'uz') if business else 'uz',
+        'online': False,
+        'needsHuman': latest_row.get('needs_human', False),
+        'aiOn': latest_row.get('ai_enabled', True),
+        'unread': sum(1 for r in rows if r.get('direction') == 'inbound' and not r.get('is_read', False)),
+        'lastTime': format_time(latest_row.get('created_at', '')),
+        'lastFromMe': latest_row.get('direction') == 'outbound',
+        'preview': latest_row.get('content', '')[:60],
+        'lastAt': extract_date(latest_row.get('created_at', '')),
+        'tags': ['Customer'],
+        'customerSince': extract_date(rows[0].get('created_at', '')),
+        'location': 'Unknown',
+        'summary': f"Total messages: {len(rows)}",
+        'kpis': {
+            'orders': 0,
+            'ltv': '0',
+            'last': '—',
+            'conv': '—'
+        },
+        'orders': [],
+        'suggestions': [
+            'Salom! Qanday yordam kerak?',
+            'Katalogni ko\'ring',
+            'Qanday mahsulot xohlaysiz?',
+        ],
+    }
+
+
+# ============================================================================
 # DATABASE
-# ----------------------------------------------------------------------
+# ============================================================================
 def get_all_businesses():
     result = supabase.table("businesses").select("*").order("created_at", desc=True).execute()
     return result.data or []
@@ -442,9 +597,9 @@ def get_message_count(platform=None):
         return 0
 
 
-# ----------------------------------------------------------------------
+# ============================================================================
 # AI
-# ----------------------------------------------------------------------
+# ============================================================================
 def build_business_context(business: dict) -> str:
     return f"""
 Business name:
@@ -605,9 +760,9 @@ Extra safety rules:
         return "Xabaringiz qabul qilindi 😊"
 
 
-# ----------------------------------------------------------------------
+# ============================================================================
 # INSTAGRAM
-# ----------------------------------------------------------------------
+# ============================================================================
 def get_business_access_token(business: dict):
     return business.get("page_access_token") or business.get("access_token") or ""
 
@@ -896,9 +1051,9 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     reply_to_comment(access_token, comment_id, reply_text, business)
 
 
-# ----------------------------------------------------------------------
+# ============================================================================
 # WHATSAPP
-# ----------------------------------------------------------------------
+# ============================================================================
 def get_whatsapp_access_token(business: dict = None):
     if business:
         return business.get("whatsapp_access_token") or WHATSAPP_ACCESS_TOKEN
@@ -1060,7 +1215,7 @@ async def process_whatsapp_message(change: dict):
             if msg_type == "text":
                 reply_text = get_ai_reply(text, business)
             elif media_type:
-                reply_text = "Rasm/video qabul qilindi 😊 Qaysi mahsulot bo‘yicha yordam kerak?"
+                reply_text = "Rasm/video qabul qilindi 😊 Qaysi mahsulot bo'yicha yordam kerak?"
             else:
                 reply_text = get_ai_reply(text, business)
 
@@ -1090,9 +1245,9 @@ async def process_whatsapp_message(change: dict):
             processing_message_ids.discard(message_id)
 
 
-# ----------------------------------------------------------------------
+# ============================================================================
 # OAUTH
-# ----------------------------------------------------------------------
+# ============================================================================
 def exchange_instagram_code_for_token(code: str):
     res = requests.post(
         "https://api.instagram.com/oauth/access_token",
@@ -1184,9 +1339,9 @@ def upsert_business(
     return supabase.table("businesses").upsert(insert_data, on_conflict="instagram_business_id").execute().data
 
 
-# ----------------------------------------------------------------------
-# API ROUTES
-# ----------------------------------------------------------------------
+# ============================================================================
+# API ROUTES - HOME & HEALTH
+# ============================================================================
 @app.head("/")
 async def head_home():
     return PlainTextResponse("", status_code=200)
@@ -1213,72 +1368,380 @@ async def home():
 
 @app.get("/api/health")
 async def api_health():
-    return {"status": "ok", "version": "4.0.0-whatsapp-media"}
+    return {"status": "ok", "version": "5.0.0-react-integrated"}
 
 
-@app.get("/connect")
-async def connect():
-    return RedirectResponse("/connect-instagram")
+# ============================================================================
+# API ROUTES - V2 (REACT UI)
+# ============================================================================
 
-
-@app.get("/connect-instagram")
-async def connect_instagram():
-    params = {
-        "client_id": META_APP_ID,
-        "redirect_uri": INSTAGRAM_REDIRECT_URI,
-        "scope": "instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments",
-        "response_type": "code",
-        "state": secrets.token_urlsafe(16),
-    }
-    auth_url = "https://www.instagram.com/oauth/authorize?" + urlencode(params)
-    return RedirectResponse(auth_url)
-
-
-@app.get("/auth/instagram/callback")
-async def instagram_callback(request: Request):
-    code = request.query_params.get("code")
-    if not code:
-        return PlainTextResponse("Missing Instagram code", status_code=400)
-
+@app.get("/api/v2/conversations")
+async def get_conversations_v2(
+    platform: str = "all",
+    search: str = "",
+    x_dashboard_secret: str = Header(default=""),
+):
+    """Get all conversations in React UI format"""
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
     try:
-        token_data = exchange_instagram_code_for_token(code)
-        short_lived_token = token_data.get("access_token")
-        user_id = normalize_id(token_data.get("user_id"))
-
-        if not short_lived_token or not user_id:
-            raise ValueError("Missing access_token or user_id")
-
-        access_token = exchange_for_long_lived_token(short_lived_token)
-        user_info = get_instagram_user(access_token)
-        username = user_info.get("username") or f"instagram_{user_id}"
-
-        upsert_business(user_id, username, access_token, oauth_provider="instagram_direct")
-
-        return RedirectResponse(f"{DASHBOARD_URL}?connected=success")
-
+        query = supabase.table("inbox_messages").select("*").order("created_at", desc=True).limit(900)
+        
+        if platform != "all":
+            query = query.eq("platform", platform)
+        
+        result = query.execute()
+        rows = result.data or []
+        
+        conversations_map = {}
+        for row in rows:
+            business_id = row.get("business_id")
+            platform_name = row.get("platform", "instagram")
+            channel = row.get("channel", "")
+            customer_id = str(row.get("customer_id") or "").strip()
+            
+            if not business_id or not customer_id:
+                continue
+            
+            key = f"{platform_name}::{business_id}::{channel}::{customer_id}"
+            
+            if key not in conversations_map:
+                conversations_map[key] = []
+            
+            conversations_map[key].append(row)
+        
+        conversations = []
+        for key, conv_rows in conversations_map.items():
+            conv = transform_conversation_to_react(key, sorted(conv_rows, key=lambda x: x.get('created_at', '')))
+            if conv:
+                conversations.append(conv)
+        
+        if search.strip():
+            q = search.lower().strip()
+            conversations = [
+                c for c in conversations
+                if q in f"{c['name']} {c['handle']} {c['preview']}".lower()
+            ]
+        
+        return {
+            'status': 'ok',
+            'count': len(conversations),
+            'data': conversations
+        }
+    
     except Exception as e:
-        log("Instagram OAuth error", str(e))
-        return PlainTextResponse(f"Instagram OAuth error: {str(e)}", status_code=500)
+        log("Error fetching conversations", str(e))
+        return JSONResponse(
+            {"status": "error", "message": str(e)},
+            status_code=500
+        )
 
 
-@app.get("/connect-facebook")
-async def connect_facebook():
-    params = {
-        "client_id": META_APP_ID,
-        "redirect_uri": FACEBOOK_REDIRECT_URI,
-        "scope": "pages_show_list,pages_read_engagement,pages_manage_metadata,pages_messaging,instagram_basic,instagram_manage_messages,instagram_manage_comments",
-        "response_type": "code",
-        "state": secrets.token_urlsafe(16),
-    }
-    auth_url = f"https://www.facebook.com/{GRAPH_VERSION}/dialog/oauth?" + urlencode(params)
-    return RedirectResponse(auth_url)
+@app.get("/api/v2/conversation/{conversation_id}/messages")
+async def get_conversation_messages_v2(
+    conversation_id: str,
+    limit: int = 250,
+    x_dashboard_secret: str = Header(default=""),
+):
+    """Get all messages for a conversation"""
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        parts = conversation_id.split("::")
+        if len(parts) != 4:
+            return JSONResponse(
+                {"error": "Invalid conversation ID format"},
+                status_code=400
+            )
+        
+        platform, business_id, channel, customer_id = parts
+        
+        query = (
+            supabase.table("inbox_messages")
+            .select("*")
+            .eq("platform", platform)
+            .eq("business_id", business_id)
+            .eq("customer_id", str(customer_id))
+        )
+        
+        if channel:
+            query = query.eq("channel", channel)
+        
+        result = query.order("created_at", desc=False).limit(limit).execute()
+        rows = result.data or []
+        
+        messages = [transform_message_to_react(row) for row in rows]
+        
+        try:
+            supabase.table("inbox_messages").update({"is_read": True}).eq(
+                "platform", platform
+            ).eq("business_id", business_id).eq(
+                "customer_id", str(customer_id)
+            ).eq("direction", "inbound").execute()
+        except Exception:
+            pass
+        
+        return {
+            'status': 'ok',
+            'count': len(messages),
+            'data': messages
+        }
+    
+    except Exception as e:
+        log("Error fetching conversation messages", str(e))
+        return JSONResponse(
+            {"status": "error", "message": str(e)},
+            status_code=500
+        )
 
 
-@app.get("/auth/facebook/callback")
-async def facebook_callback(request: Request):
-    return PlainTextResponse("Facebook callback available.", status_code=200)
+@app.post("/api/v2/send-message")
+async def send_message_v2(
+    request: Request,
+    x_dashboard_secret: str = Header(default=""),
+):
+    """Send a message via the React UI"""
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        payload = await request.json()
+        conversation_id = payload.get("conversation_id")
+        text = payload.get("text", "").strip()
+        
+        if not conversation_id or not text:
+            return JSONResponse(
+                {"error": "Missing conversation_id or text"},
+                status_code=400
+            )
+        
+        parts = conversation_id.split("::")
+        if len(parts) != 4:
+            return JSONResponse(
+                {"error": "Invalid conversation ID format"},
+                status_code=400
+            )
+        
+        platform, business_id, channel, customer_id = parts
+        
+        business = get_business_by_id(business_id)
+        if not business:
+            return JSONResponse(
+                {"error": "Business not found"},
+                status_code=404
+            )
+        
+        ok = False
+        result = {}
+        
+        if platform == "instagram":
+            access_token = get_business_access_token(business)
+            if not access_token:
+                return JSONResponse(
+                    {"error": "Instagram access token not configured"},
+                    status_code=400
+                )
+            
+            ok, result = send_instagram_dm(access_token, customer_id, text, business)
+        
+        elif platform == "telegram":
+            res = send_telegram_bot_message(customer_id, text)
+            if res:
+                ok = res.ok
+                try:
+                    result = res.json()
+                except Exception:
+                    result = {"text": res.text}
+            else:
+                result = {"error": "Send failed"}
+        
+        elif platform == "whatsapp":
+            res = send_whatsapp_text(customer_id, text, business)
+            if res:
+                ok = res.ok
+                try:
+                    result = res.json()
+                except Exception:
+                    result = {"text": res.text}
+            else:
+                result = {"error": "Send failed"}
+        
+        else:
+            return JSONResponse(
+                {"error": "Unknown platform"},
+                status_code=400
+            )
+        
+        if not ok:
+            log("Message send failed", result)
+            return JSONResponse(
+                {"error": "Failed to send message", "details": result},
+                status_code=400
+            )
+        
+        save_inbox_message(
+            business=business,
+            platform=platform,
+            sender_id=business_id,
+            recipient_id=customer_id,
+            message_text=text,
+            direction="outbound",
+            platform_message_id=result.get("message_id") or result.get("messages", [{}])[0].get("id", ""),
+            raw_payload=result,
+            channel=channel,
+        )
+        
+        return {'status': 'ok', 'data': result}
+    
+    except Exception as e:
+        log("Error sending message", str(e))
+        return JSONResponse(
+            {"status": "error", "message": str(e)},
+            status_code=500
+        )
 
 
+@app.post("/api/v2/conversation/{conversation_id}/ai-toggle")
+async def toggle_ai_v2(
+    conversation_id: str,
+    request: Request,
+    x_dashboard_secret: str = Header(default=""),
+):
+    """Toggle AI for a specific conversation"""
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        parts = conversation_id.split("::")
+        if len(parts) != 4:
+            return JSONResponse(
+                {"error": "Invalid conversation ID format"},
+                status_code=400
+            )
+        
+        platform, business_id, channel, customer_id = parts
+        
+        payload = await request.json()
+        enabled = payload.get("enabled", True)
+        
+        set_chat_ai_enabled(
+            business_id=business_id,
+            platform=platform,
+            channel=channel or "",
+            customer_id=customer_id,
+            enabled=bool(enabled)
+        )
+        
+        return {
+            'status': 'ok',
+            'conversation_id': conversation_id,
+            'ai_enabled': enabled
+        }
+    
+    except Exception as e:
+        log("Error toggling AI", str(e))
+        return JSONResponse(
+            {"status": "error", "message": str(e)},
+            status_code=500
+        )
+
+
+@app.get("/api/v2/conversation/{conversation_id}")
+async def get_conversation_details_v2(
+    conversation_id: str,
+    x_dashboard_secret: str = Header(default=""),
+):
+    """Get full conversation details"""
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        parts = conversation_id.split("::")
+        if len(parts) != 4:
+            return JSONResponse(
+                {"error": "Invalid conversation ID format"},
+                status_code=400
+            )
+        
+        platform, business_id, channel, customer_id = parts
+        
+        business = get_business_by_id(business_id)
+        
+        query = (
+            supabase.table("inbox_messages")
+            .select("*")
+            .eq("platform", platform)
+            .eq("business_id", business_id)
+            .eq("customer_id", str(customer_id))
+        )
+        
+        if channel:
+            query = query.eq("channel", channel)
+        
+        result = query.order("created_at", desc=False).execute()
+        rows = result.data or []
+        
+        conv = transform_conversation_to_react(
+            conversation_id,
+            sorted(rows, key=lambda x: x.get('created_at', '')),
+            business
+        )
+        
+        if not conv:
+            return JSONResponse(
+                {"error": "Conversation not found"},
+                status_code=404
+            )
+        
+        conv['messages'] = [transform_message_to_react(row) for row in rows]
+        
+        return {
+            'status': 'ok',
+            'data': conv
+        }
+    
+    except Exception as e:
+        log("Error fetching conversation details", str(e))
+        return JSONResponse(
+            {"status": "error", "message": str(e)},
+            status_code=500
+        )
+
+
+@app.get("/api/v2/stats")
+async def get_stats_v2(
+    x_dashboard_secret: str = Header(default=""),
+):
+    """Get dashboard statistics"""
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    
+    try:
+        return {
+            'status': 'ok',
+            'data': {
+                'total_messages': get_message_count(),
+                'instagram_messages': get_message_count('instagram'),
+                'telegram_messages': get_message_count('telegram'),
+                'whatsapp_messages': get_message_count('whatsapp'),
+                'active_conversations': 0,
+                'needing_human': 0,
+            }
+        }
+    
+    except Exception as e:
+        log("Error getting stats", str(e))
+        return JSONResponse(
+            {"status": "error", "message": str(e)},
+            status_code=500
+        )
+
+
+# ============================================================================
+# WEBHOOK ROUTES
+# ============================================================================
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     mode = request.query_params.get("hub.mode")
@@ -1370,6 +1833,75 @@ async def get_whatsapp_media(media_id: str):
     )
 
 
+# ============================================================================
+# OAUTH ROUTES
+# ============================================================================
+@app.get("/connect")
+async def connect():
+    return RedirectResponse("/connect-instagram")
+
+
+@app.get("/connect-instagram")
+async def connect_instagram():
+    params = {
+        "client_id": META_APP_ID,
+        "redirect_uri": INSTAGRAM_REDIRECT_URI,
+        "scope": "instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments",
+        "response_type": "code",
+        "state": secrets.token_urlsafe(16),
+    }
+    auth_url = "https://www.instagram.com/oauth/authorize?" + urlencode(params)
+    return RedirectResponse(auth_url)
+
+
+@app.get("/auth/instagram/callback")
+async def instagram_callback(request: Request):
+    code = request.query_params.get("code")
+    if not code:
+        return PlainTextResponse("Missing Instagram code", status_code=400)
+
+    try:
+        token_data = exchange_instagram_code_for_token(code)
+        short_lived_token = token_data.get("access_token")
+        user_id = normalize_id(token_data.get("user_id"))
+
+        if not short_lived_token or not user_id:
+            raise ValueError("Missing access_token or user_id")
+
+        access_token = exchange_for_long_lived_token(short_lived_token)
+        user_info = get_instagram_user(access_token)
+        username = user_info.get("username") or f"instagram_{user_id}"
+
+        upsert_business(user_id, username, access_token, oauth_provider="instagram_direct")
+
+        return RedirectResponse(f"{DASHBOARD_URL}?connected=success")
+
+    except Exception as e:
+        log("Instagram OAuth error", str(e))
+        return PlainTextResponse(f"Instagram OAuth error: {str(e)}", status_code=500)
+
+
+@app.get("/connect-facebook")
+async def connect_facebook():
+    params = {
+        "client_id": META_APP_ID,
+        "redirect_uri": FACEBOOK_REDIRECT_URI,
+        "scope": "pages_show_list,pages_read_engagement,pages_manage_metadata,pages_messaging,instagram_basic,instagram_manage_messages,instagram_manage_comments",
+        "response_type": "code",
+        "state": secrets.token_urlsafe(16),
+    }
+    auth_url = f"https://www.facebook.com/{GRAPH_VERSION}/dialog/oauth?" + urlencode(params)
+    return RedirectResponse(auth_url)
+
+
+@app.get("/auth/facebook/callback")
+async def facebook_callback(request: Request):
+    return PlainTextResponse("Facebook callback available.", status_code=200)
+
+
+# ============================================================================
+# DASHBOARD ROUTES (LEGACY + V2)
+# ============================================================================
 @app.post("/dashboard/send-whatsapp-message")
 async def dashboard_send_whatsapp_message(
     payload: ManualWhatsAppReply,
@@ -1631,6 +2163,9 @@ async def debug_whatsapp():
     }
 
 
+# ============================================================================
+# INFO ROUTES
+# ============================================================================
 @app.get("/privacy")
 async def privacy():
     return PlainTextResponse(
