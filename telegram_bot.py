@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import asyncio
 import requests
@@ -8,7 +9,6 @@ from supabase import create_client
 
 try:
     from telethon import TelegramClient, events
-    from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 except Exception:
     TelegramClient = None
     events = None
@@ -16,18 +16,24 @@ except Exception:
 
 telegram_router = APIRouter()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "").lower().replace("@", "")
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL")
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "")
 
-TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID")
-TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
+TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID", "")
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 TELEGRAM_USER_SESSION = os.getenv("TELEGRAM_USER_SESSION", "milana_user_session")
 ENABLE_TELEGRAM_USER_CLIENT = os.getenv("ENABLE_TELEGRAM_USER_CLIENT", "false").lower() == "true"
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+
+if not SUPABASE_URL:
+    raise RuntimeError("Missing SUPABASE_URL")
+
+if not SUPABASE_SERVICE_KEY:
+    raise RuntimeError("Missing SUPABASE_SERVICE_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
@@ -36,6 +42,15 @@ USER_MESSAGE_BUFFER = {}
 PROCESSED_BOT_MESSAGES = {}
 PROCESSED_USER_MESSAGES = {}
 TELEGRAM_USER_CLIENT = None
+
+OPTIONAL_INBOX_COLUMNS = [
+    "customer_name",
+    "chat_id",
+    "is_read",
+    "media_type",
+    "media_url",
+    "media_file_id",
+]
 
 
 def log(title, data=None):
@@ -55,7 +70,7 @@ def already_processed(cache, event_id, ttl=3600):
         return False
 
     now = time.time()
-    expired = [k for k, v in cache.items() if now - v > ttl]
+    expired = [key for key, value in cache.items() if now - value > ttl]
 
     for key in expired:
         cache.pop(key, None)
@@ -65,6 +80,44 @@ def already_processed(cache, event_id, ttl=3600):
 
     cache[event_id] = now
     return False
+
+
+def safe_json(response):
+    if response is None:
+        return {}
+    try:
+        return response.json()
+    except Exception:
+        return {"text": getattr(response, "text", "")}
+
+
+def insert_inbox_message(data):
+    payload = dict(data)
+    removed = []
+
+    for _ in range(len(OPTIONAL_INBOX_COLUMNS) + 2):
+        try:
+            return supabase.table("inbox_messages").insert(payload).execute()
+        except Exception as exc:
+            message = str(exc)
+            match = re.search(r"Could not find the '([^']+)' column", message)
+            missing_column = match.group(1) if match else ""
+
+            if missing_column and missing_column in payload:
+                payload.pop(missing_column, None)
+                removed.append(missing_column)
+                continue
+
+            removable = next((key for key in OPTIONAL_INBOX_COLUMNS if key in payload), None)
+            if removable:
+                payload.pop(removable, None)
+                removed.append(removable)
+                continue
+
+            raise
+
+    log("Inserted Telegram message with fallback columns removed", removed)
+    return None
 
 
 def is_chat_ai_enabled(platform, channel, customer_id, business_id=None):
@@ -80,15 +133,14 @@ def is_chat_ai_enabled(platform, channel, customer_id, business_id=None):
         if business_id:
             query = query.eq("business_id", business_id)
 
-        result = query.limit(1).execute()
-        rows = result.data or []
+        rows = query.limit(1).execute().data or []
 
         if not rows:
             return True
 
         return bool(rows[0].get("ai_enabled", True))
-    except Exception as e:
-        log("Could not check chat AI setting", str(e))
+    except Exception as exc:
+        log("Could not check chat AI setting", str(exc))
         return True
 
 
@@ -137,7 +189,7 @@ Knowledge:
 """
 
 
-def get_recent_chat_history(customer_id: str, platform="telegram", channel=None, limit=10):
+def get_recent_chat_history(customer_id, platform="telegram", channel=None, limit=10):
     try:
         query = (
             supabase.table("inbox_messages")
@@ -149,16 +201,10 @@ def get_recent_chat_history(customer_id: str, platform="telegram", channel=None,
         if channel:
             query = query.eq("channel", channel)
 
-        result = (
-            query.order("created_at", desc=False)
-            .limit(limit)
-            .execute()
-        )
+        return query.order("created_at", desc=False).limit(limit).execute().data or []
 
-        return result.data or []
-
-    except Exception as e:
-        log("Could not load Telegram history", str(e))
+    except Exception as exc:
+        log("Could not load Telegram history", str(exc))
         return []
 
 
@@ -181,7 +227,6 @@ Business info:
 {build_business_context(business)}
 
 IMPORTANT BEHAVIOR RULES:
-
 - Speak naturally like a real Telegram sales manager.
 - Keep answers short and comfortable.
 - Usually 1-3 short sentences.
@@ -201,7 +246,6 @@ IMPORTANT BEHAVIOR RULES:
 - Do not mention AI, bot, automation, prompt, database, or API.
 
 CATALOG RULE:
-
 - Do NOT offer catalog automatically.
 - Do NOT send catalog in greeting.
 - Do NOT ask "Do you want to see catalog?" in greeting.
@@ -210,19 +254,6 @@ CATALOG RULE:
 - If customer only says hello, greet and ask what they need.
 - If customer asks what you sell, answer briefly and ask what product interests them.
 - One main idea per message.
-
-GOOD EXAMPLE:
-Customer: Assalomu alaykum
-Assistant:
-Va alaykum assalom! 😊
-Milana Premiumga xush kelibsiz! Qanday yordam kerak?
-
-GOOD EXAMPLE:
-Customer: Katalog bormi?
-Assistant:
-Ha albatta 😊
-Mana katalogimiz:
-{business.get("catalog_link", "")}
 """
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -243,7 +274,7 @@ Mana katalogimiz:
     }
 
     try:
-        res = requests.post(
+        response = requests.post(
             "https://api.mistral.ai/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -253,13 +284,13 @@ Mana katalogimiz:
             timeout=30,
         )
 
-        log("Telegram Mistral response", {"status": res.status_code, "body": res.text})
+        log("Telegram Mistral response", {"status": response.status_code, "body": response.text})
 
-        if not res.ok:
+        if not response.ok:
             return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada javob beradi."
 
         reply = (
-            res.json()
+            response.json()
             .get("choices", [{}])[0]
             .get("message", {})
             .get("content", "")
@@ -268,8 +299,8 @@ Mana katalogimiz:
 
         return reply[:1500] if reply else "Assalomu alaykum 😊 Qanday yordam kerak?"
 
-    except Exception as e:
-        log("Telegram AI error", str(e))
+    except Exception as exc:
+        log("Telegram AI error", str(exc))
         return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada javob beradi."
 
 
@@ -298,8 +329,8 @@ def save_telegram_message(
             "channel": channel,
             "direction": direction,
             "role": "user" if direction == "inbound" else "assistant",
-            "content": text,
-            "external_message_id": str(message_id),
+            "content": text or "",
+            "external_message_id": str(message_id or ""),
             "raw_payload": raw_payload or {},
             "is_read": False if direction == "inbound" else True,
             "media_type": media_type,
@@ -307,19 +338,11 @@ def save_telegram_message(
             "media_file_id": media_file_id,
         }
 
-        try:
-            supabase.table("inbox_messages").insert(data).execute()
-        except Exception:
-            fallback = dict(data)
-            fallback.pop("customer_name", None)
-            fallback.pop("chat_id", None)
-            fallback.pop("is_read", None)
-            supabase.table("inbox_messages").insert(fallback).execute()
-
+        insert_inbox_message(data)
         log("Telegram inbox message saved", data)
 
-    except Exception as e:
-        log("Could not save Telegram message", str(e))
+    except Exception as exc:
+        log("Could not save Telegram message", str(exc))
 
 
 def send_telegram_bot_message(chat_id, text, reply_to_message_id=None):
@@ -327,29 +350,28 @@ def send_telegram_bot_message(chat_id, text, reply_to_message_id=None):
         log("Missing TELEGRAM_BOT_TOKEN")
         return None
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-
     payload = {
         "chat_id": chat_id,
-        "text": text,
+        "text": text[:4096],
         "disable_web_page_preview": False,
     }
 
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
 
-    res = requests.post(url, json=payload, timeout=30)
+    response = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json=payload,
+        timeout=30,
+    )
 
-    log("Telegram bot send result", {"status": res.status_code, "body": res.text})
-
-    return res
+    log("Telegram bot send result", {"status": response.status_code, "body": response.text})
+    return response
 
 
 def send_telegram_photo(chat_id, photo_file_id, caption="", reply_to_message_id=None):
     if not TELEGRAM_BOT_TOKEN:
         return None
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
 
     payload = {
         "chat_id": chat_id,
@@ -362,16 +384,18 @@ def send_telegram_photo(chat_id, photo_file_id, caption="", reply_to_message_id=
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
 
-    res = requests.post(url, json=payload, timeout=30)
-    log("Telegram photo send result", {"status": res.status_code})
-    return res
+    response = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+        json=payload,
+        timeout=30,
+    )
+    log("Telegram photo send result", {"status": response.status_code, "body": response.text})
+    return response
 
 
 def send_telegram_video(chat_id, video_file_id, caption="", reply_to_message_id=None):
     if not TELEGRAM_BOT_TOKEN:
         return None
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo"
 
     payload = {
         "chat_id": chat_id,
@@ -384,16 +408,18 @@ def send_telegram_video(chat_id, video_file_id, caption="", reply_to_message_id=
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
 
-    res = requests.post(url, json=payload, timeout=30)
-    log("Telegram video send result", {"status": res.status_code})
-    return res
+    response = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo",
+        json=payload,
+        timeout=30,
+    )
+    log("Telegram video send result", {"status": response.status_code, "body": response.text})
+    return response
 
 
 def send_telegram_voice(chat_id, voice_file_id, reply_to_message_id=None):
     if not TELEGRAM_BOT_TOKEN:
         return None
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVoice"
 
     payload = {
         "chat_id": chat_id,
@@ -403,31 +429,33 @@ def send_telegram_voice(chat_id, voice_file_id, reply_to_message_id=None):
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
 
-    res = requests.post(url, json=payload, timeout=30)
-    log("Telegram voice send result", {"status": res.status_code})
-    return res
+    response = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVoice",
+        json=payload,
+        timeout=30,
+    )
+    log("Telegram voice send result", {"status": response.status_code, "body": response.text})
+    return response
 
 
 def get_file_url(file_id):
-    if not TELEGRAM_BOT_TOKEN:
+    if not TELEGRAM_BOT_TOKEN or not file_id:
         return None
 
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile"
-        res = requests.get(
-            url,
+        response = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
             params={"file_id": file_id},
             timeout=30,
         )
 
-        if res.ok:
-            file_info = res.json().get("result", {})
-            file_path = file_info.get("file_path")
+        if response.ok:
+            file_path = response.json().get("result", {}).get("file_path")
             if file_path:
                 return f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
 
-    except Exception as e:
-        log("Could not get Telegram file URL", str(e))
+    except Exception as exc:
+        log("Could not get Telegram file URL", str(exc))
 
     return None
 
@@ -458,8 +486,8 @@ def buffer_message(buffer_store, buffer_key, text):
     buffer_store[buffer_key]["last_time"] = current_time
 
 
-def pop_buffer_if_ready(buffer_store, buffer_key, wait_seconds=2):
-    time.sleep(wait_seconds + 1)
+async def pop_buffer_if_ready(buffer_store, buffer_key, wait_seconds=2):
+    await asyncio.sleep(wait_seconds + 0.25)
 
     if buffer_key not in buffer_store:
         return None
@@ -470,9 +498,7 @@ def pop_buffer_if_ready(buffer_store, buffer_key, wait_seconds=2):
         return None
 
     combined_text = "\n".join(buffer_store[buffer_key]["texts"]).strip()
-
     del buffer_store[buffer_key]
-
     return combined_text
 
 
@@ -483,22 +509,27 @@ async def telegram_webhook_check():
 
 @telegram_router.get("/telegram/set-webhook")
 async def set_telegram_webhook():
-    webhook_url = f"{PUBLIC_BASE_URL}/webhook/telegram"
+    if not TELEGRAM_BOT_TOKEN:
+        return JSONResponse({"ok": False, "error": "Missing TELEGRAM_BOT_TOKEN"}, status_code=400)
 
-    res = requests.get(
+    if not PUBLIC_BASE_URL:
+        return JSONResponse({"ok": False, "error": "Missing PUBLIC_BASE_URL"}, status_code=400)
+
+    webhook_url = f"{PUBLIC_BASE_URL.rstrip('/')}/webhook/telegram"
+
+    response = requests.get(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
         params={"url": webhook_url},
         timeout=30,
     )
 
-    return JSONResponse(res.json())
+    return JSONResponse(safe_json(response), status_code=response.status_code)
 
 
 @telegram_router.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
     try:
         update = await request.json()
-
         log("TELEGRAM BOT WEBHOOK RECEIVED", update)
 
         message = (
@@ -519,7 +550,7 @@ async def telegram_webhook(request: Request):
 
         chat_id = chat.get("id")
         chat_type = chat.get("type", "private")
-        customer_id = user.get("id")
+        customer_id = user.get("id") or chat_id
         message_id = message.get("message_id")
 
         event_id = f"bot:{chat_id}:{customer_id}:{message_id}"
@@ -528,13 +559,11 @@ async def telegram_webhook(request: Request):
             return JSONResponse({"status": "duplicate"})
 
         business = get_active_business()
-
         if not business:
             return JSONResponse({"status": "no_business"})
 
         if chat_type in ["group", "supergroup"]:
             mention = f"@{TELEGRAM_BOT_USERNAME}"
-
             replied_to_bot = (
                 message.get("reply_to_message", {})
                 .get("from", {})
@@ -544,24 +573,16 @@ async def telegram_webhook(request: Request):
             if mention not in (message.get("text") or "").lower() and not replied_to_bot:
                 return JSONResponse({"status": "ignored_group_message"})
 
-        if chat_type in ["group", "supergroup"]:
-            channel = "telegram_bot_group"
-        else:
-            channel = "telegram_bot_private"
-
+        channel = "telegram_bot_group" if chat_type in ["group", "supergroup"] else "telegram_bot_private"
         customer_name = build_customer_name(user)
 
-        # Handle text messages
         text = normalize_text(message.get("text"))
-        media_type = None
-        media_url = None
-        media_file_id = None
-        
+
         if text:
             buffer_key = f"bot:{chat_id}:{customer_id}"
             buffer_message(MESSAGE_BUFFER, buffer_key, text)
 
-            combined_text = pop_buffer_if_ready(MESSAGE_BUFFER, buffer_key, wait_seconds=2)
+            combined_text = await pop_buffer_if_ready(MESSAGE_BUFFER, buffer_key, wait_seconds=2)
 
             if not combined_text:
                 return JSONResponse({"status": "waiting_more_messages"})
@@ -588,7 +609,7 @@ async def telegram_webhook(request: Request):
                 channel=channel,
             )
 
-            send_telegram_bot_message(
+            send_result = send_telegram_bot_message(
                 chat_id=chat_id,
                 text=reply,
                 reply_to_message_id=message_id if chat_type in ["group", "supergroup"] else None,
@@ -599,23 +620,18 @@ async def telegram_webhook(request: Request):
                 customer_id=customer_id,
                 text=reply,
                 direction="outbound",
-                message_id="",
-                raw_payload={},
+                message_id=safe_json(send_result).get("result", {}).get("message_id", ""),
+                raw_payload=safe_json(send_result),
                 channel=channel,
                 customer_name=customer_name,
                 chat_id=chat_id,
             )
 
-        # Handle photos
         elif message.get("photo"):
             photos = message.get("photo", [])
             largest_photo = photos[-1] if photos else {}
             file_id = largest_photo.get("file_id")
             caption = normalize_text(message.get("caption") or "📸 Photo")
-            
-            media_type = "photo"
-            media_file_id = file_id
-            media_url = get_file_url(file_id)
 
             save_telegram_message(
                 business=business,
@@ -627,22 +643,15 @@ async def telegram_webhook(request: Request):
                 channel=channel,
                 customer_name=customer_name,
                 chat_id=chat_id,
-                media_type=media_type,
-                media_url=media_url,
-                media_file_id=media_file_id,
+                media_type="photo",
+                media_url=get_file_url(file_id),
+                media_file_id=file_id,
             )
-            
-            log("Telegram photo saved", {"file_id": file_id, "url": media_url})
 
-        # Handle videos
         elif message.get("video"):
             video = message.get("video", {})
             file_id = video.get("file_id")
             caption = normalize_text(message.get("caption") or "🎥 Video")
-            
-            media_type = "video"
-            media_file_id = file_id
-            media_url = get_file_url(file_id)
 
             save_telegram_message(
                 business=business,
@@ -654,22 +663,15 @@ async def telegram_webhook(request: Request):
                 channel=channel,
                 customer_name=customer_name,
                 chat_id=chat_id,
-                media_type=media_type,
-                media_url=media_url,
-                media_file_id=media_file_id,
+                media_type="video",
+                media_url=get_file_url(file_id),
+                media_file_id=file_id,
             )
-            
-            log("Telegram video saved", {"file_id": file_id, "url": media_url})
 
-        # Handle voice messages
         elif message.get("voice"):
             voice = message.get("voice", {})
             file_id = voice.get("file_id")
             duration = voice.get("duration", 0)
-            
-            media_type = "voice"
-            media_file_id = file_id
-            media_url = get_file_url(file_id)
 
             save_telegram_message(
                 business=business,
@@ -681,29 +683,44 @@ async def telegram_webhook(request: Request):
                 channel=channel,
                 customer_name=customer_name,
                 chat_id=chat_id,
-                media_type=media_type,
-                media_url=media_url,
-                media_file_id=media_file_id,
+                media_type="voice",
+                media_url=get_file_url(file_id),
+                media_file_id=file_id,
             )
-            
-            log("Telegram voice saved", {"file_id": file_id, "url": media_url})
+
+        elif message.get("document"):
+            document = message.get("document", {})
+            file_id = document.get("file_id")
+            caption = normalize_text(message.get("caption") or document.get("file_name") or "📎 Document")
+
+            save_telegram_message(
+                business=business,
+                customer_id=customer_id,
+                text=caption,
+                direction="inbound",
+                message_id=message_id,
+                raw_payload=update,
+                channel=channel,
+                customer_name=customer_name,
+                chat_id=chat_id,
+                media_type="file",
+                media_url=get_file_url(file_id),
+                media_file_id=file_id,
+            )
 
         else:
             return JSONResponse({"status": "ignored_no_text_or_media"})
 
         return JSONResponse({"status": "ok"})
 
-    except Exception as e:
-        log("Telegram bot webhook error", str(e))
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+    except Exception as exc:
+        log("Telegram bot webhook error", str(exc))
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
 async def process_telegram_user_event(event):
     try:
-        if event.out:
-            return
-
-        if not event.is_private:
+        if event.out or not event.is_private:
             return
 
         text = normalize_text(event.raw_text)
@@ -718,44 +735,28 @@ async def process_telegram_user_event(event):
             return
 
         business = get_active_business()
-
         if not business:
             log("No active business for Telegram private user account")
             return
 
-        customer_name_parts = []
-
+        name_parts = []
         if getattr(sender, "first_name", None):
-            customer_name_parts.append(sender.first_name)
-
+            name_parts.append(sender.first_name)
         if getattr(sender, "last_name", None):
-            customer_name_parts.append(sender.last_name)
+            name_parts.append(sender.last_name)
 
-        customer_name = " ".join(customer_name_parts).strip()
-
+        customer_name = " ".join(name_parts).strip()
         if getattr(sender, "username", None):
             customer_name = f"{customer_name} (@{sender.username})".strip()
-
         customer_name = customer_name or sender_id
 
-        # Handle text
         if text:
             buffer_key = f"user:{chat_id}:{sender_id}"
             buffer_message(USER_MESSAGE_BUFFER, buffer_key, text)
 
-            await asyncio.sleep(3)
-
-            if buffer_key not in USER_MESSAGE_BUFFER:
+            combined_text = await pop_buffer_if_ready(USER_MESSAGE_BUFFER, buffer_key, wait_seconds=2)
+            if not combined_text:
                 return
-
-            latest_time = USER_MESSAGE_BUFFER[buffer_key]["last_time"]
-
-            if time.time() - latest_time < 2:
-                return
-
-            combined_text = "\n".join(USER_MESSAGE_BUFFER[buffer_key]["texts"]).strip()
-
-            del USER_MESSAGE_BUFFER[buffer_key]
 
             save_telegram_message(
                 business=business,
@@ -801,10 +802,8 @@ async def process_telegram_user_event(event):
                 chat_id=chat_id,
             )
 
-        # Handle media
         elif event.media:
             media_type = None
-            file_id = None
             caption = "📎 Media sent"
 
             if hasattr(event.media, "photo"):
@@ -812,13 +811,15 @@ async def process_telegram_user_event(event):
                 caption = "📸 Photo"
             elif hasattr(event.media, "document"):
                 doc = event.media.document
-                if hasattr(doc, "mime_type"):
-                    if "video" in doc.mime_type:
-                        media_type = "video"
-                        caption = "🎥 Video"
-                    elif "audio" in doc.mime_type:
-                        media_type = "voice"
-                        caption = "🎤 Voice"
+                mime_type = getattr(doc, "mime_type", "") or ""
+                if "video" in mime_type:
+                    media_type = "video"
+                    caption = "🎥 Video"
+                elif "audio" in mime_type:
+                    media_type = "voice"
+                    caption = "🎤 Voice"
+                else:
+                    media_type = "file"
 
             if media_type:
                 save_telegram_message(
@@ -837,8 +838,8 @@ async def process_telegram_user_event(event):
                     media_type=media_type,
                 )
 
-    except Exception as e:
-        log("Telegram user account event error", str(e))
+    except Exception as exc:
+        log("Telegram user account event error", str(exc))
 
 
 async def send_telegram_user_message(customer_id, text):
@@ -868,8 +869,8 @@ async def send_telegram_user_message(customer_id, text):
             "customer_name": sender_name or str(customer_id),
         }
 
-    except Exception as e:
-        return False, {"error": str(e)}
+    except Exception as exc:
+        return False, {"error": str(exc)}
 
 
 async def start_telegram_user_client():
@@ -922,8 +923,8 @@ async def start_telegram_user_client():
 
         return TELEGRAM_USER_CLIENT
 
-    except Exception as e:
-        log("Telegram private user client startup error", str(e))
+    except Exception as exc:
+        log("Telegram private user client startup error", str(exc))
         try:
             await TELEGRAM_USER_CLIENT.disconnect()
         except Exception:
