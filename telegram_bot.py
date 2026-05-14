@@ -42,6 +42,7 @@ USER_MESSAGE_BUFFER = {}
 PROCESSED_BOT_MESSAGES = {}
 PROCESSED_USER_MESSAGES = {}
 TELEGRAM_USER_CLIENT = None
+TELEGRAM_BOT_ID = None
 
 OPTIONAL_INBOX_COLUMNS = [
     "customer_name",
@@ -89,6 +90,63 @@ def safe_json(response):
         return response.json()
     except Exception:
         return {"text": getattr(response, "text", "")}
+
+
+def get_telegram_bot_id():
+    global TELEGRAM_BOT_ID
+
+    if TELEGRAM_BOT_ID:
+        return TELEGRAM_BOT_ID
+
+    if not TELEGRAM_BOT_TOKEN:
+        return None
+
+    try:
+        response = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe",
+            timeout=15,
+        )
+        data = safe_json(response)
+        if response.ok and data.get("ok"):
+            TELEGRAM_BOT_ID = str(data.get("result", {}).get("id") or "")
+            return TELEGRAM_BOT_ID or None
+    except Exception as exc:
+        log("Could not resolve Telegram bot id", str(exc))
+
+    return None
+
+
+def is_own_or_any_bot_user(user):
+    if not user:
+        return False
+
+    user_id = str(user.get("id") or "")
+    username = normalize_text(user.get("username")).lower().replace("@", "")
+    bot_id = get_telegram_bot_id()
+
+    return (
+        bool(user.get("is_bot"))
+        or bool(bot_id and user_id == bot_id)
+        or bool(TELEGRAM_BOT_USERNAME and username == TELEGRAM_BOT_USERNAME)
+    )
+
+
+def is_telegram_bot_authored_message(message):
+    if not message:
+        return True
+
+    if is_own_or_any_bot_user(message.get("from") or {}):
+        return True
+
+    if is_own_or_any_bot_user(message.get("via_bot") or {}):
+        return True
+
+    # Posts from channels/anonymous admins do not represent a customer DM.
+    # Treat them as non-customer events so the sales bot never talks to itself.
+    if message.get("sender_chat"):
+        return True
+
+    return False
 
 
 def insert_inbox_message(data):
@@ -532,17 +590,12 @@ async def telegram_webhook(request: Request):
         update = await request.json()
         log("TELEGRAM BOT WEBHOOK RECEIVED", update)
 
-        message = (
-            update.get("message")
-            or update.get("edited_message")
-            or update.get("channel_post")
-            or {}
-        )
+        message = update.get("message") or update.get("edited_message") or {}
 
         if not message:
             return JSONResponse({"status": "ignored"})
 
-        if message.get("from", {}).get("is_bot"):
+        if is_telegram_bot_authored_message(message):
             return JSONResponse({"status": "ignored_bot"})
 
         chat = message.get("chat", {})
@@ -725,6 +778,21 @@ async def process_telegram_user_event(event):
 
         text = normalize_text(event.raw_text)
         sender = await event.get_sender()
+        if (
+            getattr(sender, "bot", False)
+            or getattr(sender, "is_self", False)
+            or str(getattr(sender, "id", "")) == str(get_telegram_bot_id() or "")
+            or (
+                TELEGRAM_BOT_USERNAME
+                and normalize_text(getattr(sender, "username", "")).lower().replace("@", "") == TELEGRAM_BOT_USERNAME
+            )
+        ):
+            log("Ignored Telegram user-client bot/self message", {
+                "sender_id": getattr(sender, "id", None),
+                "username": getattr(sender, "username", None),
+            })
+            return
+
         sender_id = str(sender.id)
         chat_id = str(event.chat_id)
         message_id = str(event.id)
