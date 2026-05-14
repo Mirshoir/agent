@@ -605,6 +605,28 @@ def set_chat_ai_enabled(business_id, platform, channel, customer_id, enabled):
     ).execute()
 
 
+def mark_conversation_read_in_db(conversation_id: str):
+    parts = conversation_id.split("::")
+    if len(parts) != 4:
+        raise ValueError("Invalid conversation ID")
+
+    platform, business_id, channel, customer_id = parts
+
+    query = (
+        supabase.table("inbox_messages")
+        .update({"is_read": True})
+        .eq("platform", platform)
+        .eq("business_id", business_id)
+        .eq("customer_id", str(customer_id))
+        .eq("direction", "inbound")
+    )
+
+    if channel:
+        query = query.eq("channel", channel)
+
+    return query.execute()
+
+
 def save_inbox_message(
         business: dict,
         platform: str,
@@ -2549,10 +2571,32 @@ async def api_get_conversation_messages(conversation_id: str, limit: int = 250,
 
         messages = query.order("created_at", desc=False).limit(limit).execute().data or []
 
+        try:
+            mark_conversation_read_in_db(conversation_id)
+        except Exception as exc:
+            log("Could not mark conversation read", str(exc))
+
         return {"status": "ok", "count": len(messages), "data": messages}
 
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.post("/api/conversation/{conversation_id}/read")
+async def api_mark_conversation_read(
+        conversation_id: str,
+        x_dashboard_secret: str = Header(default=""),
+):
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    try:
+        mark_conversation_read_in_db(conversation_id)
+        return {"status": "ok"}
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
 @app.post("/api/send-message")
