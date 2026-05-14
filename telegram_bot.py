@@ -1036,6 +1036,44 @@ async def send_telegram_user_file(customer_id, file_bytes, filename, caption="")
         return False, {"error": str(exc)}
 
 
+async def send_telegram_user_voice_file(customer_id, file_bytes, filename):
+    global TELEGRAM_USER_CLIENT
+
+    if not TELEGRAM_USER_CLIENT:
+        return False, {"error": "Telegram private user client is not running"}
+
+    try:
+        entity = await TELEGRAM_USER_CLIENT.get_entity(int(customer_id))
+        file_obj = io.BytesIO(file_bytes)
+        file_obj.name = filename or "voice.ogg"
+
+        sent = await TELEGRAM_USER_CLIENT.send_file(
+            entity,
+            file=file_obj,
+            voice_note=True,
+        )
+
+        sender_name = str(customer_id)
+
+        try:
+            if hasattr(entity, "first_name") or hasattr(entity, "last_name"):
+                sender_name = f"{getattr(entity, 'first_name', '')} {getattr(entity, 'last_name', '')}".strip()
+                if getattr(entity, "username", None):
+                    sender_name = f"{sender_name} (@{entity.username})".strip()
+        except Exception:
+            pass
+
+        return True, {
+            "message_id": getattr(sent, "id", ""),
+            "customer_id": str(customer_id),
+            "chat_id": str(customer_id),
+            "customer_name": sender_name or str(customer_id),
+        }
+
+    except Exception as exc:
+        return False, {"error": str(exc)}
+
+
 async def start_telegram_user_client():
     global TELEGRAM_USER_CLIENT
 
