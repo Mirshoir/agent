@@ -140,7 +140,9 @@ class ManualInstagramMedia(BaseModel):
 
 
 class ManualTelegramMessage(BaseModel):
+    business_id: str = ""
     customer_id: str
+    chat_id: str = ""
     text: str
 
 
@@ -1556,15 +1558,15 @@ async def send_message_v2(
             ok, result = send_instagram_dm(access_token, customer_id, text, business)
 
         elif platform == "telegram":
-            res = send_telegram_bot_message(customer_id, text)
-            if res:
-                ok = res.ok
-                try:
-                    result = res.json()
-                except Exception:
-                    result = {"text": res.text}
+            if channel == "telegram_user_private":
+                ok, result = await send_telegram_user_message(customer_id=customer_id, text=text)
             else:
-                result = {"error": "Send failed"}
+                res = send_telegram_bot_message(customer_id, text)
+                if res:
+                    ok = res.ok
+                    result = safe_json(res)
+                else:
+                    result = {"error": "Send failed"}
 
         elif platform == "whatsapp":
             res = send_whatsapp_text(customer_id, text, business)
@@ -1951,6 +1953,48 @@ async def dashboard_send_whatsapp_message(
     return JSONResponse({"status": "ok", "meta": result}, status_code=200)
 
 
+@app.post("/dashboard/send-telegram-user-message")
+async def dashboard_send_telegram_user_message(
+        payload: ManualTelegramMessage,
+        x_dashboard_secret: str = Header(default=""),
+):
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    business = get_business_by_id(payload.business_id) if payload.business_id else get_active_business()
+    if not business:
+        return JSONResponse({"status": "error", "message": "No active business"}, status_code=404)
+
+    customer_id = normalize_id(payload.customer_id)
+    text = (payload.text or "").strip()
+
+    if not customer_id or not text:
+        return JSONResponse({"status": "error", "message": "Missing customer_id or text"}, status_code=400)
+
+    ok, result = await send_telegram_user_message(
+        customer_id=customer_id,
+        text=text,
+    )
+
+    if ok:
+        save_telegram_message(
+            business=business,
+            customer_id=customer_id,
+            text=text,
+            direction="outbound",
+            message_id=result.get("message_id", ""),
+            raw_payload=result,
+            channel="telegram_user_private",
+            customer_name=result.get("customer_name", customer_id),
+            chat_id=result.get("chat_id", payload.chat_id or customer_id),
+        )
+
+    return JSONResponse(
+        {"status": "ok" if ok else "error", "meta": result},
+        status_code=200 if ok else 400,
+    )
+
+
 @app.get("/api/businesses")
 async def api_get_businesses(x_dashboard_secret: str = Header(default="")):
     if require_dashboard_secret(x_dashboard_secret):
@@ -2082,14 +2126,17 @@ async def api_send_message(
                 business=business,
             )
         elif platform == "telegram":
-            # send_telegram_bot_message returns a requests.Response object, not a tuple
-            res = send_telegram_bot_message(chat_id=customer_id, text=text)
-            if res is not None:
-                ok = res.ok
-                result = safe_json(res)
+            if channel == "telegram_user_private":
+                ok, result = await send_telegram_user_message(customer_id=customer_id, text=text)
             else:
-                ok = False
-                result = {"error": "Send failed — no bot token configured"}
+                # send_telegram_bot_message returns a requests.Response object, not a tuple
+                res = send_telegram_bot_message(chat_id=customer_id, text=text)
+                if res is not None:
+                    ok = res.ok
+                    result = safe_json(res)
+                else:
+                    ok = False
+                    result = {"error": "Send failed — no bot token configured"}
         elif platform == "whatsapp":
             res = send_whatsapp_text(customer_id, text, business)
             ok = res is not None and res.ok
