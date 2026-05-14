@@ -1,0 +1,23 @@
+# render.yaml - Render deployment config
+services:
+  - type: web
+    name: instaagent
+    env: python
+    plan: free
+    
+    # Build command - use custom script to bypass Rust compilation
+    buildCommand: bash build.sh
+    
+    # Start command
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    
+    # Environment variables (set these in Render dashboard)
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      
+    # Timeout settings
+    maxShutdownDelay: 30
+    
+    # Health check
+    healthCheckPath: /api/health
