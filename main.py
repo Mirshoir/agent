@@ -26,7 +26,6 @@ from telegram_bot import (
     get_active_business,
 )
 
-
 app = FastAPI()
 
 app.add_middleware(
@@ -46,6 +45,7 @@ try:
     app.mount("/static", StaticFiles(directory="static", html=True), name="static")
 except Exception:
     pass
+
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
@@ -250,7 +250,7 @@ def generate_avatar(name: str) -> dict:
         initials = (parts[0][0] + parts[1][0]).upper()
     else:
         initials = (parts[0][:2] if parts[0] else "??").upper()
-    
+
     hash_val = sum(ord(c) for c in name) % 8
     colors = [
         "linear-gradient(135deg,#e8a07a,#c75d3f)",
@@ -262,7 +262,7 @@ def generate_avatar(name: str) -> dict:
         "linear-gradient(135deg,#e3c87a,#a07e2a)",
         "linear-gradient(135deg,#7a8aa8,#3f4f6f)",
     ]
-    
+
     return {
         "initials": initials,
         "color": colors[hash_val]
@@ -276,7 +276,7 @@ def format_time(timestamp: str) -> str:
         now = datetime.now(dt.tzinfo)
         delta = now - dt
         seconds = delta.total_seconds()
-        
+
         if seconds < 60:
             return "just now"
         elif seconds < 3600:
@@ -312,10 +312,10 @@ def transform_message_to_react(row: dict) -> dict:
         'from': 'ai' if row['role'] == 'assistant' else 'user',
         'time': format_time(row.get('created_at', '')),
     }
-    
+
     media_type = row.get('media_type')
     content = row.get('content', '')
-    
+
     if media_type:
         message['type'] = 'media'
         message['label'] = media_type
@@ -324,7 +324,7 @@ def transform_message_to_react(row: dict) -> dict:
     else:
         message['type'] = 'text'
         message['text'] = content
-    
+
     return message
 
 
@@ -332,16 +332,16 @@ def transform_conversation_to_react(key: str, rows: list, business: dict = None)
     """Transform database rows to React conversation format"""
     if not rows:
         return None
-    
+
     latest_row = rows[-1]
     parts = key.split("::")
     if len(parts) != 4:
         return None
-        
+
     platform, business_id, channel, customer_id = parts
-    
+
     customer_name = latest_row.get('customer_name', f'Customer {customer_id[-4:]}')
-    
+
     return {
         'id': key,
         'name': customer_name,
@@ -396,7 +396,8 @@ def get_business(instagram_business_id: str):
     instagram_business_id = normalize_id(instagram_business_id)
     if not instagram_business_id:
         return None
-    result = supabase.table("businesses").select("*").eq("instagram_business_id", instagram_business_id).limit(1).execute()
+    result = supabase.table("businesses").select("*").eq("instagram_business_id", instagram_business_id).limit(
+        1).execute()
     return result.data[0] if result.data else None
 
 
@@ -535,22 +536,22 @@ def set_chat_ai_enabled(business_id, platform, channel, customer_id, enabled):
 
 
 def save_inbox_message(
-    business: dict,
-    platform: str,
-    sender_id: str,
-    recipient_id: str,
-    message_text: str,
-    direction: str,
-    platform_message_id: str = "",
-    raw_payload: dict = None,
-    customer_name: str = "",
-    is_read: bool = False,
-    media_type: Optional[str] = None,
-    media_url: Optional[str] = None,
-    channel: str = "",
-    file_name: Optional[str] = None,
-    mime_type: Optional[str] = None,
-    whatsapp_media_id: Optional[str] = None,
+        business: dict,
+        platform: str,
+        sender_id: str,
+        recipient_id: str,
+        message_text: str,
+        direction: str,
+        platform_message_id: str = "",
+        raw_payload: dict = None,
+        customer_name: str = "",
+        is_read: bool = False,
+        media_type: Optional[str] = None,
+        media_url: Optional[str] = None,
+        channel: str = "",
+        file_name: Optional[str] = None,
+        mime_type: Optional[str] = None,
+        whatsapp_media_id: Optional[str] = None,
 ):
     try:
         customer_id = sender_id if direction == "inbound" else recipient_id
@@ -578,7 +579,8 @@ def save_inbox_message(
         try:
             supabase.table("inbox_messages").insert(data).execute()
         except Exception:
-            for optional_key in ["customer_name", "is_read", "media_type", "media_url", "file_name", "mime_type", "whatsapp_media_id"]:
+            for optional_key in ["customer_name", "is_read", "media_type", "media_url", "file_name", "mime_type",
+                                 "whatsapp_media_id"]:
                 data.pop(optional_key, None)
             supabase.table("inbox_messages").insert(data).execute()
 
@@ -812,7 +814,8 @@ def send_instagram_dm(access_token: str, recipient_id: str, text: str, business:
     return res.ok, safe_json(res)
 
 
-def send_instagram_media(access_token: str, recipient_id: str, media_type: str, media_url: str, caption: str = "", business: dict = None):
+def send_instagram_media(access_token: str, recipient_id: str, media_type: str, media_url: str, caption: str = "",
+                         business: dict = None):
     recipient_id = normalize_id(recipient_id)
     if not access_token or not recipient_id or not media_url:
         return None
@@ -1290,12 +1293,12 @@ def get_instagram_user(access_token: str):
 
 
 def upsert_business(
-    instagram_business_id: str,
-    username: str,
-    access_token: str,
-    oauth_provider: str = "instagram_direct",
-    facebook_page_id: str = "",
-    facebook_page_name: str = "",
+        instagram_business_id: str,
+        username: str,
+        access_token: str,
+        oauth_provider: str = "instagram_direct",
+        facebook_page_id: str = "",
+        facebook_page_name: str = "",
 ):
     instagram_business_id = normalize_id(instagram_business_id)
     facebook_page_id = normalize_id(facebook_page_id)
@@ -1377,59 +1380,59 @@ async def api_health():
 
 @app.get("/api/v2/conversations")
 async def get_conversations_v2(
-    platform: str = "all",
-    search: str = "",
-    x_dashboard_secret: str = Header(default=""),
+        platform: str = "all",
+        search: str = "",
+        x_dashboard_secret: str = Header(default=""),
 ):
     """Get all conversations in React UI format"""
     if require_dashboard_secret(x_dashboard_secret):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    
+
     try:
         query = supabase.table("inbox_messages").select("*").order("created_at", desc=True).limit(900)
-        
+
         if platform != "all":
             query = query.eq("platform", platform)
-        
+
         result = query.execute()
         rows = result.data or []
-        
+
         conversations_map = {}
         for row in rows:
             business_id = row.get("business_id")
             platform_name = row.get("platform", "instagram")
             channel = row.get("channel", "")
             customer_id = str(row.get("customer_id") or "").strip()
-            
+
             if not business_id or not customer_id:
                 continue
-            
+
             key = f"{platform_name}::{business_id}::{channel}::{customer_id}"
-            
+
             if key not in conversations_map:
                 conversations_map[key] = []
-            
+
             conversations_map[key].append(row)
-        
+
         conversations = []
         for key, conv_rows in conversations_map.items():
             conv = transform_conversation_to_react(key, sorted(conv_rows, key=lambda x: x.get('created_at', '')))
             if conv:
                 conversations.append(conv)
-        
+
         if search.strip():
             q = search.lower().strip()
             conversations = [
                 c for c in conversations
                 if q in f"{c['name']} {c['handle']} {c['preview']}".lower()
             ]
-        
+
         return {
             'status': 'ok',
             'count': len(conversations),
             'data': conversations
         }
-    
+
     except Exception as e:
         log("Error fetching conversations", str(e))
         return JSONResponse(
@@ -1440,14 +1443,14 @@ async def get_conversations_v2(
 
 @app.get("/api/v2/conversation/{conversation_id}/messages")
 async def get_conversation_messages_v2(
-    conversation_id: str,
-    limit: int = 250,
-    x_dashboard_secret: str = Header(default=""),
+        conversation_id: str,
+        limit: int = 250,
+        x_dashboard_secret: str = Header(default=""),
 ):
     """Get all messages for a conversation"""
     if require_dashboard_secret(x_dashboard_secret):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    
+
     try:
         parts = conversation_id.split("::")
         if len(parts) != 4:
@@ -1455,9 +1458,9 @@ async def get_conversation_messages_v2(
                 {"error": "Invalid conversation ID format"},
                 status_code=400
             )
-        
+
         platform, business_id, channel, customer_id = parts
-        
+
         query = (
             supabase.table("inbox_messages")
             .select("*")
@@ -1465,15 +1468,15 @@ async def get_conversation_messages_v2(
             .eq("business_id", business_id)
             .eq("customer_id", str(customer_id))
         )
-        
+
         if channel:
             query = query.eq("channel", channel)
-        
+
         result = query.order("created_at", desc=False).limit(limit).execute()
         rows = result.data or []
-        
+
         messages = [transform_message_to_react(row) for row in rows]
-        
+
         try:
             supabase.table("inbox_messages").update({"is_read": True}).eq(
                 "platform", platform
@@ -1482,13 +1485,13 @@ async def get_conversation_messages_v2(
             ).eq("direction", "inbound").execute()
         except Exception:
             pass
-        
+
         return {
             'status': 'ok',
             'count': len(messages),
             'data': messages
         }
-    
+
     except Exception as e:
         log("Error fetching conversation messages", str(e))
         return JSONResponse(
@@ -1499,43 +1502,43 @@ async def get_conversation_messages_v2(
 
 @app.post("/api/v2/send-message")
 async def send_message_v2(
-    request: Request,
-    x_dashboard_secret: str = Header(default=""),
+        request: Request,
+        x_dashboard_secret: str = Header(default=""),
 ):
     """Send a message via the React UI"""
     if require_dashboard_secret(x_dashboard_secret):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    
+
     try:
         payload = await request.json()
         conversation_id = payload.get("conversation_id")
         text = payload.get("text", "").strip()
-        
+
         if not conversation_id or not text:
             return JSONResponse(
                 {"error": "Missing conversation_id or text"},
                 status_code=400
             )
-        
+
         parts = conversation_id.split("::")
         if len(parts) != 4:
             return JSONResponse(
                 {"error": "Invalid conversation ID format"},
                 status_code=400
             )
-        
+
         platform, business_id, channel, customer_id = parts
-        
+
         business = get_business_by_id(business_id)
         if not business:
             return JSONResponse(
                 {"error": "Business not found"},
                 status_code=404
             )
-        
+
         ok = False
         result = {}
-        
+
         if platform == "instagram":
             access_token = get_business_access_token(business)
             if not access_token:
@@ -1543,9 +1546,9 @@ async def send_message_v2(
                     {"error": "Instagram access token not configured"},
                     status_code=400
                 )
-            
+
             ok, result = send_instagram_dm(access_token, customer_id, text, business)
-        
+
         elif platform == "telegram":
             res = send_telegram_bot_message(customer_id, text)
             if res:
@@ -1556,7 +1559,7 @@ async def send_message_v2(
                     result = {"text": res.text}
             else:
                 result = {"error": "Send failed"}
-        
+
         elif platform == "whatsapp":
             res = send_whatsapp_text(customer_id, text, business)
             if res:
@@ -1567,20 +1570,20 @@ async def send_message_v2(
                     result = {"text": res.text}
             else:
                 result = {"error": "Send failed"}
-        
+
         else:
             return JSONResponse(
                 {"error": "Unknown platform"},
                 status_code=400
             )
-        
+
         if not ok:
             log("Message send failed", result)
             return JSONResponse(
                 {"error": "Failed to send message", "details": result},
                 status_code=400
             )
-        
+
         save_inbox_message(
             business=business,
             platform=platform,
@@ -1592,9 +1595,9 @@ async def send_message_v2(
             raw_payload=result,
             channel=channel,
         )
-        
+
         return {'status': 'ok', 'data': result}
-    
+
     except Exception as e:
         log("Error sending message", str(e))
         return JSONResponse(
@@ -1605,14 +1608,14 @@ async def send_message_v2(
 
 @app.post("/api/v2/conversation/{conversation_id}/ai-toggle")
 async def toggle_ai_v2(
-    conversation_id: str,
-    request: Request,
-    x_dashboard_secret: str = Header(default=""),
+        conversation_id: str,
+        request: Request,
+        x_dashboard_secret: str = Header(default=""),
 ):
     """Toggle AI for a specific conversation"""
     if require_dashboard_secret(x_dashboard_secret):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    
+
     try:
         parts = conversation_id.split("::")
         if len(parts) != 4:
@@ -1620,12 +1623,12 @@ async def toggle_ai_v2(
                 {"error": "Invalid conversation ID format"},
                 status_code=400
             )
-        
+
         platform, business_id, channel, customer_id = parts
-        
+
         payload = await request.json()
         enabled = payload.get("enabled", True)
-        
+
         set_chat_ai_enabled(
             business_id=business_id,
             platform=platform,
@@ -1633,13 +1636,13 @@ async def toggle_ai_v2(
             customer_id=customer_id,
             enabled=bool(enabled)
         )
-        
+
         return {
             'status': 'ok',
             'conversation_id': conversation_id,
             'ai_enabled': enabled
         }
-    
+
     except Exception as e:
         log("Error toggling AI", str(e))
         return JSONResponse(
@@ -1650,13 +1653,13 @@ async def toggle_ai_v2(
 
 @app.get("/api/v2/conversation/{conversation_id}")
 async def get_conversation_details_v2(
-    conversation_id: str,
-    x_dashboard_secret: str = Header(default=""),
+        conversation_id: str,
+        x_dashboard_secret: str = Header(default=""),
 ):
     """Get full conversation details"""
     if require_dashboard_secret(x_dashboard_secret):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    
+
     try:
         parts = conversation_id.split("::")
         if len(parts) != 4:
@@ -1664,11 +1667,11 @@ async def get_conversation_details_v2(
                 {"error": "Invalid conversation ID format"},
                 status_code=400
             )
-        
+
         platform, business_id, channel, customer_id = parts
-        
+
         business = get_business_by_id(business_id)
-        
+
         query = (
             supabase.table("inbox_messages")
             .select("*")
@@ -1676,32 +1679,32 @@ async def get_conversation_details_v2(
             .eq("business_id", business_id)
             .eq("customer_id", str(customer_id))
         )
-        
+
         if channel:
             query = query.eq("channel", channel)
-        
+
         result = query.order("created_at", desc=False).execute()
         rows = result.data or []
-        
+
         conv = transform_conversation_to_react(
             conversation_id,
             sorted(rows, key=lambda x: x.get('created_at', '')),
             business
         )
-        
+
         if not conv:
             return JSONResponse(
                 {"error": "Conversation not found"},
                 status_code=404
             )
-        
+
         conv['messages'] = [transform_message_to_react(row) for row in rows]
-        
+
         return {
             'status': 'ok',
             'data': conv
         }
-    
+
     except Exception as e:
         log("Error fetching conversation details", str(e))
         return JSONResponse(
@@ -1712,12 +1715,12 @@ async def get_conversation_details_v2(
 
 @app.get("/api/v2/stats")
 async def get_stats_v2(
-    x_dashboard_secret: str = Header(default=""),
+        x_dashboard_secret: str = Header(default=""),
 ):
     """Get dashboard statistics"""
     if require_dashboard_secret(x_dashboard_secret):
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    
+
     try:
         return {
             'status': 'ok',
@@ -1730,7 +1733,7 @@ async def get_stats_v2(
                 'needing_human': 0,
             }
         }
-    
+
     except Exception as e:
         log("Error getting stats", str(e))
         return JSONResponse(
@@ -1904,8 +1907,8 @@ async def facebook_callback(request: Request):
 # ============================================================================
 @app.post("/dashboard/send-whatsapp-message")
 async def dashboard_send_whatsapp_message(
-    payload: ManualWhatsAppReply,
-    x_dashboard_secret: str = Header(default=""),
+        payload: ManualWhatsAppReply,
+        x_dashboard_secret: str = Header(default=""),
 ):
     if require_dashboard_secret(x_dashboard_secret):
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
@@ -2004,7 +2007,7 @@ async def api_get_conversations(platform: str = "all", search: str = "", x_dashb
             q = search.lower().strip()
             results = [
                 c for c in results
-                if q in f"{c.get('customer_id','')} {c.get('customer_name','')} {c.get('last_message','')}".lower()
+                if q in f"{c.get('customer_id', '')} {c.get('customer_name', '')} {c.get('last_message', '')}".lower()
             ]
 
         return {"status": "ok", "count": len(results), "data": results}
@@ -2014,7 +2017,8 @@ async def api_get_conversations(platform: str = "all", search: str = "", x_dashb
 
 
 @app.get("/api/conversation/{conversation_id}")
-async def api_get_conversation_messages(conversation_id: str, limit: int = 250, x_dashboard_secret: str = Header(default="")):
+async def api_get_conversation_messages(conversation_id: str, limit: int = 250,
+                                        x_dashboard_secret: str = Header(default="")):
     if require_dashboard_secret(x_dashboard_secret):
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
 
@@ -2046,10 +2050,10 @@ async def api_get_conversation_messages(conversation_id: str, limit: int = 250, 
 
 @app.post("/api/send-message")
 async def api_send_message(
-    conversation_id: str,
-    text: str,
-    business_id: str = "",
-    x_dashboard_secret: str = Header(default=""),
+        conversation_id: str,
+        text: str,
+        business_id: str = "",
+        x_dashboard_secret: str = Header(default=""),
 ):
     if require_dashboard_secret(x_dashboard_secret):
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
@@ -2061,6 +2065,9 @@ async def api_send_message(
         if not business:
             return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
 
+        ok = False
+        result = {}
+
         if platform == "instagram":
             ok, result = send_instagram_dm(
                 access_token=get_business_access_token(business),
@@ -2069,7 +2076,14 @@ async def api_send_message(
                 business=business,
             )
         elif platform == "telegram":
-            ok, result = send_telegram_bot_message(chat_id=customer_id, text=text)
+            # send_telegram_bot_message returns a requests.Response object, not a tuple
+            res = send_telegram_bot_message(chat_id=customer_id, text=text)
+            if res is not None:
+                ok = res.ok
+                result = safe_json(res)
+            else:
+                ok = False
+                result = {"error": "Send failed — no bot token configured"}
         elif platform == "whatsapp":
             res = send_whatsapp_text(customer_id, text, business)
             ok = res is not None and res.ok
@@ -2085,7 +2099,9 @@ async def api_send_message(
                 recipient_id=customer_id,
                 message_text=text,
                 direction="outbound",
-                platform_message_id=(result.get("message_id") or result.get("messages", [{}])[0].get("id", "")) if isinstance(result, dict) else "",
+                platform_message_id=(
+                            result.get("message_id") or result.get("messages", [{}])[0].get("id", "")) if isinstance(
+                    result, dict) else "",
                 raw_payload=result,
                 is_read=True,
                 channel=channel,
@@ -2099,12 +2115,12 @@ async def api_send_message(
 
 @app.post("/api/chat-ai-toggle")
 async def api_toggle_chat_ai(
-    business_id: str,
-    platform: str,
-    channel: str,
-    customer_id: str,
-    enabled: bool,
-    x_dashboard_secret: str = Header(default=""),
+        business_id: str,
+        platform: str,
+        channel: str,
+        customer_id: str,
+        enabled: bool,
+        x_dashboard_secret: str = Header(default=""),
 ):
     if require_dashboard_secret(x_dashboard_secret):
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
