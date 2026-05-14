@@ -2,9 +2,10 @@ import os
 import re
 import time
 import asyncio
+import io
 import requests
-from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi import APIRouter, Request, Header
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from supabase import create_client
 
 try:
@@ -28,6 +29,7 @@ ENABLE_TELEGRAM_USER_CLIENT = os.getenv("ENABLE_TELEGRAM_USER_CLIENT", "false").
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
 
 if not SUPABASE_URL:
     raise RuntimeError("Missing SUPABASE_URL")
@@ -531,6 +533,19 @@ def build_customer_name(user):
     return full_name or str(user.get("id", ""))
 
 
+def telegram_user_media_mime(message):
+    file_info = getattr(message, "file", None)
+    mime_type = getattr(file_info, "mime_type", "") if file_info else ""
+
+    if mime_type:
+        return mime_type
+
+    if getattr(message, "photo", None):
+        return "image/jpeg"
+
+    return "application/octet-stream"
+
+
 def buffer_message(buffer_store, buffer_key, text):
     current_time = time.time()
 
@@ -582,6 +597,44 @@ async def set_telegram_webhook():
     )
 
     return JSONResponse(safe_json(response), status_code=response.status_code)
+
+
+@telegram_router.get("/api/telegram-user-media/{customer_id}/{message_id}")
+async def get_telegram_user_media(
+    customer_id: str,
+    message_id: str,
+    token: str = "",
+    x_dashboard_secret: str = Header(default=""),
+):
+    if DASHBOARD_SECRET and token != DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    if not TELEGRAM_USER_CLIENT:
+        return JSONResponse(
+            {"status": "error", "message": "Telegram private user client is not running"},
+            status_code=503,
+        )
+
+    try:
+        entity = await TELEGRAM_USER_CLIENT.get_entity(int(customer_id))
+        message = await TELEGRAM_USER_CLIENT.get_messages(entity, ids=int(message_id))
+
+        if not message or not getattr(message, "media", None):
+            return JSONResponse({"status": "error", "message": "Telegram media not found"}, status_code=404)
+
+        media_bytes = await TELEGRAM_USER_CLIENT.download_media(message, file=bytes)
+        if not media_bytes:
+            return JSONResponse({"status": "error", "message": "Telegram media download failed"}, status_code=404)
+
+        return Response(
+            content=media_bytes,
+            media_type=telegram_user_media_mime(message),
+            headers={"Cache-Control": "private, max-age=3600"},
+        )
+
+    except Exception as exc:
+        log("Telegram user media proxy error", str(exc))
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
 @telegram_router.post("/webhook/telegram")
@@ -818,7 +871,46 @@ async def process_telegram_user_event(event):
             customer_name = f"{customer_name} (@{sender.username})".strip()
         customer_name = customer_name or sender_id
 
-        if text:
+        if event.media:
+            media_type = None
+            caption = text or "📎 Media sent"
+
+            if hasattr(event.media, "photo"):
+                media_type = "photo"
+                caption = text or "📸 Photo"
+            elif hasattr(event.media, "document"):
+                doc = event.media.document
+                mime_type = getattr(doc, "mime_type", "") or ""
+                if "video" in mime_type:
+                    media_type = "video"
+                    caption = text or "🎥 Video"
+                elif "audio" in mime_type:
+                    media_type = "voice"
+                    caption = text or "🎤 Voice"
+                else:
+                    media_type = "file"
+
+            if media_type:
+                save_telegram_message(
+                    business=business,
+                    customer_id=sender_id,
+                    text=caption,
+                    direction="inbound",
+                    message_id=message_id,
+                    raw_payload={
+                        "chat_id": chat_id,
+                        "sender_id": sender_id,
+                        "message_id": message_id,
+                        "source": "telethon_user_account",
+                        "media_proxy": f"/api/telegram-user-media/{sender_id}/{message_id}",
+                    },
+                    channel="telegram_user_private",
+                    customer_name=customer_name,
+                    chat_id=chat_id,
+                    media_type=media_type,
+                )
+
+        elif text:
             buffer_key = f"user:{chat_id}:{sender_id}"
             buffer_message(USER_MESSAGE_BUFFER, buffer_key, text)
 
@@ -870,42 +962,6 @@ async def process_telegram_user_event(event):
                 chat_id=chat_id,
             )
 
-        elif event.media:
-            media_type = None
-            caption = "📎 Media sent"
-
-            if hasattr(event.media, "photo"):
-                media_type = "photo"
-                caption = "📸 Photo"
-            elif hasattr(event.media, "document"):
-                doc = event.media.document
-                mime_type = getattr(doc, "mime_type", "") or ""
-                if "video" in mime_type:
-                    media_type = "video"
-                    caption = "🎥 Video"
-                elif "audio" in mime_type:
-                    media_type = "voice"
-                    caption = "🎤 Voice"
-                else:
-                    media_type = "file"
-
-            if media_type:
-                save_telegram_message(
-                    business=business,
-                    customer_id=sender_id,
-                    text=caption,
-                    direction="inbound",
-                    message_id=message_id,
-                    raw_payload={
-                        "chat_id": chat_id,
-                        "source": "telethon_user_account",
-                    },
-                    channel="telegram_user_private",
-                    customer_name=customer_name,
-                    chat_id=chat_id,
-                    media_type=media_type,
-                )
-
     except Exception as exc:
         log("Telegram user account event error", str(exc))
 
@@ -919,6 +975,45 @@ async def send_telegram_user_message(customer_id, text):
     try:
         entity = await TELEGRAM_USER_CLIENT.get_entity(int(customer_id))
         sent = await TELEGRAM_USER_CLIENT.send_message(entity, text)
+
+        sender_name = str(customer_id)
+
+        try:
+            if hasattr(entity, "first_name") or hasattr(entity, "last_name"):
+                sender_name = f"{getattr(entity, 'first_name', '')} {getattr(entity, 'last_name', '')}".strip()
+                if getattr(entity, "username", None):
+                    sender_name = f"{sender_name} (@{entity.username})".strip()
+        except Exception:
+            pass
+
+        return True, {
+            "message_id": getattr(sent, "id", ""),
+            "customer_id": str(customer_id),
+            "chat_id": str(customer_id),
+            "customer_name": sender_name or str(customer_id),
+        }
+
+    except Exception as exc:
+        return False, {"error": str(exc)}
+
+
+async def send_telegram_user_file(customer_id, file_bytes, filename, caption=""):
+    global TELEGRAM_USER_CLIENT
+
+    if not TELEGRAM_USER_CLIENT:
+        return False, {"error": "Telegram private user client is not running"}
+
+    try:
+        entity = await TELEGRAM_USER_CLIENT.get_entity(int(customer_id))
+        file_obj = io.BytesIO(file_bytes)
+        file_obj.name = filename or "image.jpg"
+
+        sent = await TELEGRAM_USER_CLIENT.send_file(
+            entity,
+            file=file_obj,
+            caption=caption or "",
+            force_document=False,
+        )
 
         sender_name = str(customer_id)
 
