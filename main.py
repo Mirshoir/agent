@@ -26,23 +26,34 @@ from telegram_bot import (
     get_active_business,
 )
 
+def env_list(name: str, default: str = ""):
+    return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
+
+
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://127.0.0.1:4173",
-        "http://localhost:4173",
-        "https://instaagent.streamlit.app",
-        "https://agent-1-xi6h.onrender.com",
-    ],
-    allow_origin_regex=r"https://.*\.onrender\.com",
+    allow_origins=env_list(
+        "CORS_ORIGINS",
+        "http://127.0.0.1:4173,http://localhost:4173,https://instaagent.streamlit.app,https://agent-1-xi6h.onrender.com",
+    ),
+    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX") or None,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 app.include_router(telegram_router)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    return response
 
 # ============================================================================
 # SERVE REACT UI
@@ -246,6 +257,10 @@ def already_processed(cache: dict, event_id: str) -> bool:
 
 def require_dashboard_secret(x_dashboard_secret: str):
     return bool(DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET)
+
+
+def require_dashboard_media_secret(token: str = "", x_dashboard_secret: str = ""):
+    return bool(DASHBOARD_SECRET and token != DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET)
 
 
 # ============================================================================
@@ -1811,7 +1826,14 @@ async def receive_webhook(request: Request):
 
 
 @app.get("/api/whatsapp/media/{media_id}")
-async def get_whatsapp_media(media_id: str):
+async def get_whatsapp_media(
+        media_id: str,
+        token: str = "",
+        x_dashboard_secret: str = Header(default=""),
+):
+    if require_dashboard_media_secret(token, x_dashboard_secret):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
     token = WHATSAPP_ACCESS_TOKEN
     if not token:
         return JSONResponse({"error": "Missing WHATSAPP_ACCESS_TOKEN"}, status_code=400)
@@ -2215,14 +2237,20 @@ async def api_get_stats(x_dashboard_secret: str = Header(default="")):
 
 
 @app.get("/debug/businesses")
-async def debug_businesses():
+async def debug_businesses(x_dashboard_secret: str = Header(default="")):
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
     result = supabase.table("businesses").select("*").order("created_at", desc=True).execute()
     rows = [sanitize_business_row(r) for r in (result.data or [])]
     return {"count": len(rows), "businesses": rows}
 
 
 @app.get("/debug/whatsapp")
-async def debug_whatsapp():
+async def debug_whatsapp(x_dashboard_secret: str = Header(default="")):
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
     return {
         "has_whatsapp_access_token": bool(WHATSAPP_ACCESS_TOKEN),
         "whatsapp_access_token_preview": safe_token(WHATSAPP_ACCESS_TOKEN),
