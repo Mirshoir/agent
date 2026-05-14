@@ -4,3 +4,10 @@ requests
 python-dotenv
 supabase
 telethon
+# Add these lines to your requirements.txt:
+fastapi==0.104.1
+uvicorn==0.24.0
+python-multipart==0.0.6
+pydantic==2.5.0
+requests==2.31.0
+supabase==2.3.4
