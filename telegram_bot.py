@@ -252,6 +252,104 @@ Knowledge:
 """
 
 
+DEFAULT_AI_PROMPT_SETTINGS = {
+    "global_prompt": (
+        "You are a real human sales assistant for this business. "
+        "Represent the company clearly, answer in the customer's language, and guide the customer toward the next useful buying step."
+    ),
+    "telegram_prompt": (
+        "Telegram rules:\n"
+        "- Sound like a natural Telegram sales manager.\n"
+        "- In groups, answer only when mentioned or replied to.\n"
+        "- Avoid long lists unless the customer asks for a list.\n"
+        "- Share Telegram catalog/group links only when relevant."
+    ),
+    "opening_message": "Assalomu alaykum. Welcome to our store. How can I help you today?",
+    "lead_collection_rules": (
+        "At the beginning, politely ask once for: name, phone number, address, product of interest, and quantity. "
+        "Do not keep repeating this request if the customer continues naturally."
+    ),
+    "sales_rules": (
+        "Answer the exact question first. Ask only one follow-up question at a time. "
+        "Keep replies short and comfortable. Focus on helping the customer choose and buy."
+    ),
+    "handoff_rules": (
+        "If price, stock, delivery, address, discount, or product details are missing, say that the manager will clarify. "
+        "Do not invent information."
+    ),
+}
+
+
+def get_ai_prompt_settings(business_id):
+    settings = dict(DEFAULT_AI_PROMPT_SETTINGS)
+    if not business_id:
+        return settings
+
+    try:
+        rows = (
+            supabase.table("ai_prompt_settings")
+            .select("*")
+            .eq("business_id", str(business_id))
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if rows:
+            row = rows[0]
+            for key in [
+                "global_prompt",
+                "telegram_prompt",
+                "opening_message",
+                "lead_collection_rules",
+                "sales_rules",
+                "handoff_rules",
+            ]:
+                if row.get(key):
+                    settings[key] = row.get(key)
+    except Exception as exc:
+        log("Could not load Telegram AI prompt settings", str(exc))
+
+    return settings
+
+
+def build_prompt_business_knowledge(business):
+    return f"""
+Business facts:
+
+Business identity:
+- Name: {business.get("business_name", "")}
+- Type: {business.get("business_type", "")}
+- Language: {business.get("language", "")}
+
+Products:
+{business.get("products", "")}
+
+Prices:
+{business.get("prices", "")}
+
+Delivery:
+{business.get("delivery_info", "")}
+
+FAQ:
+{business.get("faq", "")}
+
+Contacts:
+{business.get("sales_phone", "")}
+
+Catalog links:
+{business.get("catalog_link", "")}
+
+Telegram groups:
+- Single product: {business.get("telegram_single", "")}
+- Package: {business.get("telegram_package", "")}
+- Bag / meshok: {business.get("telegram_bag", "")}
+
+Knowledge:
+{business.get("knowledge", "")}
+"""
+
+
 def get_recent_chat_history(customer_id, platform="telegram", channel=None, limit=10):
     try:
         query = (
@@ -308,36 +406,35 @@ def get_ai_api_key(business: dict, provider: str) -> str:
 
 
 def build_telegram_system_prompt(business):
-    business_name = business.get("business_name") or "this business"
-    extra_rules = business.get("ai_reply_rules") or """
-- Speak naturally like a real Telegram sales manager.
-- Keep answers short and comfortable.
-- Usually 1-3 short sentences.
-- Never dump all business information at once.
-- Never write huge lists unless customer explicitly asks.
-- Never overwhelm the customer.
-- Ask follow-up questions naturally.
-- Focus on selling and continuing the conversation.
-- Sound warm, confident, and human.
-- Use emojis lightly.
-- Reply in the customer's language.
-- Avoid AI-style formatting.
-- Avoid markdown.
-- Avoid bullet lists.
-- Do not mention AI, bot, automation, prompt, database, or API.
-- Send catalog ONLY if the customer explicitly asks for catalog, models, price list, collection, photos, or products.
-- If customer only says hello, greet and ask what they need.
-- One main idea per message.
-"""
+    settings = get_ai_prompt_settings(business.get("id"))
 
     return f"""
-You are a real human sales manager for {business_name}.
+{settings.get("global_prompt", "")}
 
-Business info:
-{build_business_context(business)}
+{build_prompt_business_knowledge(business)}
 
-Rules:
-{extra_rules}
+Sales behavior:
+Opening message:
+{settings.get("opening_message", "")}
+
+Lead collection rules:
+{settings.get("lead_collection_rules", "")}
+
+Sales rules:
+{settings.get("sales_rules", "")}
+
+Human handoff rules:
+{settings.get("handoff_rules", "")}
+
+Platform-specific rules:
+{settings.get("telegram_prompt", "")}
+
+Safety rules:
+- Reply in the same language as the customer.
+- Never invent prices, stock, delivery, discounts, addresses, or availability.
+- Use only the business facts above.
+- If information is missing, say the manager will clarify.
+- Never mention AI, database, API, prompt, automation, or internal system.
 """
 
 
