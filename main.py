@@ -91,6 +91,9 @@ async def shutdown_telegram_user_client():
 # ============================================================================
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -551,6 +554,62 @@ def update_business(business_id, data):
     return supabase.table("businesses").update(data).eq("id", business_id).execute()
 
 
+ALLOWED_BUSINESS_SETTINGS = {
+    "business_name",
+    "business_type",
+    "language",
+    "tone",
+    "bot_enabled",
+    "auto_reply_dms",
+    "auto_reply_comments",
+    "products",
+    "prices",
+    "delivery_info",
+    "working_hours",
+    "faq",
+    "catalog_link",
+    "sales_phone",
+    "knowledge",
+    "telegram_single",
+    "telegram_package",
+    "telegram_bag",
+    "ai_model",
+    "ai_temperature",
+    "ai_max_tokens",
+    "ai_reply_rules",
+    "mistral_api_key",
+    "openai_api_key",
+    "gemini_api_key",
+    "anthropic_api_key",
+}
+
+
+def clean_business_settings(settings: dict) -> dict:
+    cleaned = {}
+    for key, value in (settings or {}).items():
+        if key not in ALLOWED_BUSINESS_SETTINGS:
+            continue
+
+        if key == "ai_temperature":
+            try:
+                cleaned[key] = max(0.0, min(1.0, float(value)))
+            except Exception:
+                continue
+        elif key == "ai_max_tokens":
+            try:
+                cleaned[key] = max(50, min(1000, int(value)))
+            except Exception:
+                continue
+        elif key in {"bot_enabled", "auto_reply_dms", "auto_reply_comments"}:
+            cleaned[key] = bool(value)
+        elif key.endswith("_api_key"):
+            cleaned[key] = str(value or "").strip()
+        else:
+            cleaned[key] = str(value or "").strip()
+
+    return cleaned
+
+
 def sanitize_business_row(row: dict):
     if not row:
         return None
@@ -785,17 +844,44 @@ def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
     return reply_text[:1000]
 
 
-def get_ai_reply(user_text: str, business: dict):
-    try:
-        api_key = business.get("mistral_api_key") or MISTRAL_API_KEY
-        if not api_key:
-            return "Xabaringiz qabul qilindi 😊"
+AI_DEFAULT_MODELS = {
+    "mistral": "mistral-small-latest",
+    "openai": "gpt-4o-mini",
+    "gemini": "gemini-1.5-flash",
+    "anthropic": "claude-3-5-haiku-latest",
+}
 
-        model = business.get("ai_model") or "mistral-small-latest"
-        temperature = float(business.get("ai_temperature", 0.5) or 0.5)
-        max_tokens = int(business.get("ai_max_tokens", 130) or 130)
 
-        extra_rules = business.get("ai_reply_rules") or """
+def infer_ai_provider(model: str) -> str:
+    model = str(model or "").lower()
+    if model.startswith(("gpt-", "o1", "o3", "o4")):
+        return "openai"
+    if model.startswith("gemini"):
+        return "gemini"
+    if model.startswith("claude"):
+        return "anthropic"
+    return "mistral"
+
+
+def get_ai_provider(business: dict) -> str:
+    provider = str(business.get("ai_provider") or "").strip().lower()
+    if provider in AI_DEFAULT_MODELS:
+        return provider
+    return infer_ai_provider(business.get("ai_model"))
+
+
+def get_ai_api_key(business: dict, provider: str) -> str:
+    if provider == "openai":
+        return business.get("openai_api_key") or OPENAI_API_KEY
+    if provider == "gemini":
+        return business.get("gemini_api_key") or GEMINI_API_KEY
+    if provider == "anthropic":
+        return business.get("anthropic_api_key") or ANTHROPIC_API_KEY
+    return business.get("mistral_api_key") or MISTRAL_API_KEY or ""
+
+
+def build_sales_system_prompt(business: dict) -> str:
+    extra_rules = business.get("ai_reply_rules") or """
 - Keep answers short and comfortable.
 - Usually 1-3 short sentences.
 - Do not send raw catalog links.
@@ -805,7 +891,7 @@ def get_ai_reply(user_text: str, business: dict):
 - Sound natural like a real sales manager.
 """
 
-        system_prompt = f"""
+    return f"""
 You are a real sales manager for this business.
 
 Business Information:
@@ -826,31 +912,132 @@ Extra safety rules:
 - Never mention AI, database, API, prompt, or internal system.
 """
 
+
+def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
+    provider = get_ai_provider(business)
+    model = business.get("ai_model") or AI_DEFAULT_MODELS[provider]
+    api_key = get_ai_api_key(business, provider)
+    temperature = float(business.get("ai_temperature", 0.5) or 0.5)
+    max_tokens = int(business.get("ai_max_tokens", 130) or 130)
+
+    if not api_key:
+        log("Missing AI API key", {"provider": provider, "model": model})
+        return ""
+
+    if provider in {"mistral", "openai"}:
+        url = "https://api.mistral.ai/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        if provider == "openai":
+            url = "https://api.openai.com/v1/chat/completions"
+
         res = requests.post(
-            "https://api.mistral.ai/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            url,
+            headers=headers,
             json={
                 "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text},
-                ],
+                "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
             },
             timeout=30,
         )
-
-        log("Mistral response", {"status": res.status_code, "body": res.text})
-
+        log(log_label, {"provider": provider, "model": model, "status": res.status_code, "body": res.text[:1000]})
         if not res.ok:
-            return "Xabaringiz qabul qilindi 😊"
+            return ""
+        return (
+            res.json()
+            .get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+            .strip()
+        )
 
-        reply = res.json()["choices"][0]["message"]["content"]
+    if provider == "gemini":
+        system_text = "\n\n".join(m["content"] for m in messages if m.get("role") == "system")
+        contents = [
+            {
+                "role": "model" if m.get("role") == "assistant" else "user",
+                "parts": [{"text": m.get("content", "")}],
+            }
+            for m in messages
+            if m.get("role") != "system" and m.get("content")
+        ]
+        res = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+            params={"key": api_key},
+            json={
+                "systemInstruction": {"parts": [{"text": system_text}]},
+                "contents": contents,
+                "generationConfig": {
+                    "temperature": temperature,
+                    "maxOutputTokens": max_tokens,
+                },
+            },
+            timeout=30,
+        )
+        log(log_label, {"provider": provider, "model": model, "status": res.status_code, "body": res.text[:1000]})
+        if not res.ok:
+            return ""
+        parts = (
+            res.json()
+            .get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [])
+        )
+        return "\n".join(part.get("text", "") for part in parts).strip()
+
+    if provider == "anthropic":
+        system_text = "\n\n".join(m["content"] for m in messages if m.get("role") == "system")
+        anthropic_messages = [
+            {
+                "role": "assistant" if m.get("role") == "assistant" else "user",
+                "content": m.get("content", ""),
+            }
+            for m in messages
+            if m.get("role") != "system" and m.get("content")
+        ]
+        res = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "system": system_text,
+                "messages": anthropic_messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            timeout=30,
+        )
+        log(log_label, {"provider": provider, "model": model, "status": res.status_code, "body": res.text[:1000]})
+        if not res.ok:
+            return ""
+        return "\n".join(
+            block.get("text", "")
+            for block in res.json().get("content", [])
+            if block.get("type") == "text"
+        ).strip()
+
+    return ""
+
+
+def get_ai_reply(user_text: str, business: dict):
+    try:
+        reply = call_ai_chat(
+            [
+                {"role": "system", "content": build_sales_system_prompt(business)},
+                {"role": "user", "content": user_text},
+            ],
+            business,
+            "AI response",
+        )
         return reply.strip() if reply else "Xabaringiz qabul qilindi 😊"
 
     except Exception as e:
-        log("Mistral error", str(e))
+        log("AI error", str(e))
         return "Xabaringiz qabul qilindi 😊"
 
 
@@ -2480,7 +2667,8 @@ async def api_get_businesses(x_dashboard_secret: str = Header(default="")):
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
 
     result = supabase.table("businesses").select("*").order("created_at", desc=True).execute()
-    return {"status": "ok", "count": len(result.data or []), "data": result.data or []}
+    rows = [sanitize_business_row(row) for row in (result.data or [])]
+    return {"status": "ok", "count": len(rows), "data": rows}
 
 
 @app.get("/api/conversations")
@@ -2692,7 +2880,11 @@ async def api_update_business_settings(body: BusinessSettingsUpdate, x_dashboard
     if not business:
         return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
 
-    update_business(body.business_id, body.settings)
+    settings = clean_business_settings(body.settings)
+    if not settings:
+        return JSONResponse({"status": "error", "message": "No valid settings to update"}, status_code=400)
+
+    update_business(body.business_id, settings)
     return {"status": "ok", "message": "Settings updated"}
 
 
