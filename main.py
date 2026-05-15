@@ -1846,7 +1846,11 @@ async def home():
 
 @app.get("/api/health")
 async def api_health():
-    return {"status": "ok", "version": "5.0.0-react-integrated"}
+    return {
+        "status": "ok",
+        "version": "5.1.0-telegram-voice",
+        "ffmpeg": bool(shutil.which("ffmpeg")),
+    }
 
 
 # ============================================================================
