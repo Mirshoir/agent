@@ -4,6 +4,8 @@ import time
 import secrets
 import base64
 import tempfile
+import shutil
+import subprocess
 import requests
 from urllib.parse import urlencode
 from typing import Optional
@@ -272,6 +274,68 @@ def decode_upload_data(file_data: str, max_bytes: int = 10 * 1024 * 1024):
         raise ValueError("File is too large. Maximum upload size is 10 MB.")
 
     return decoded
+
+
+def transcode_to_telegram_voice(file_bytes: bytes, filename: str = "", mime_type: str = ""):
+    """
+    Telegram native voice notes should be OGG/Opus. Browser recordings usually
+    arrive as WebM, which Telegram clients display as a downloadable file.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required to convert browser recordings into Telegram voice notes")
+
+    suffix = ".webm"
+    if "." in str(filename or ""):
+        suffix = "." + str(filename).rsplit(".", 1)[-1].lower()
+
+    input_path = ""
+    output_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as source:
+            source.write(file_bytes)
+            input_path = source.name
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as target:
+            output_path = target.name
+
+        subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                input_path,
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "48000",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "32k",
+                "-application",
+                "voip",
+                "-f",
+                "ogg",
+                output_path,
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=45,
+        )
+
+        with open(output_path, "rb") as converted:
+            return converted.read(), "voice.ogg", "audio/ogg"
+
+    finally:
+        for path in [input_path, output_path]:
+            if path:
+                try:
+                    os.unlink(path)
+                except Exception:
+                    pass
 
 
 def cleanup_dedup_cache():
@@ -1500,14 +1564,10 @@ def send_telegram_bot_voice_upload(chat_id: str, file_bytes: bytes, filename: st
     if not token:
         return None
 
-    is_voice_note = "ogg" in (mime_type or "").lower() or str(filename or "").lower().endswith(".ogg")
-    method = "sendVoice" if is_voice_note else "sendAudio"
-    field = "voice" if is_voice_note else "audio"
-
     return requests.post(
-        f"https://api.telegram.org/bot{token}/{method}",
+        f"https://api.telegram.org/bot{token}/sendVoice",
         data={"chat_id": chat_id},
-        files={field: (filename or "voice.ogg", file_bytes, mime_type or "audio/ogg")},
+        files={"voice": (filename or "voice.ogg", file_bytes, mime_type or "audio/ogg")},
         timeout=60,
     )
 
@@ -2424,6 +2484,25 @@ async def dashboard_send_image_file(
         file_bytes = decode_upload_data(payload.file_data)
     except ValueError as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
+
+    if normalize_id(payload.platform).lower() in {"telegram", "whatsapp"}:
+        try:
+            file_bytes, converted_filename, converted_mime_type = transcode_to_telegram_voice(
+                file_bytes=file_bytes,
+                filename=payload.filename,
+                mime_type=payload.mime_type,
+            )
+            payload.filename = converted_filename
+            payload.mime_type = converted_mime_type
+        except Exception as exc:
+            log("Voice transcode failed", str(exc))
+            return JSONResponse(
+                {
+                    "status": "error",
+                    "message": "Could not convert recording into Telegram voice format. Make sure ffmpeg is installed on the server.",
+                },
+                status_code=500,
+            )
 
     business = get_business_by_id(payload.business_id) if payload.business_id else get_active_business()
     if not business:
