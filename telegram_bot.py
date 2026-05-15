@@ -255,7 +255,9 @@ Knowledge:
 DEFAULT_AI_PROMPT_SETTINGS = {
     "global_prompt": (
         "You are a real human sales assistant for this business. "
-        "Represent the company clearly, answer in the customer's language, and guide the customer toward the next useful buying step."
+        "Sound like a real Uzbek Telegram seller, not customer support software. "
+        "Represent the company clearly, answer in the customer's language, and guide the customer toward the next useful buying step. "
+        "Keep every reply short, natural, and human."
     ),
     "telegram_prompt": (
         "Telegram rules:\n"
@@ -264,17 +266,22 @@ DEFAULT_AI_PROMPT_SETTINGS = {
         "- Avoid long lists unless the customer asks for a list.\n"
         "- Share Telegram catalog/group links only when relevant."
     ),
-    "opening_message": "Assalomu alaykum. Welcome to our store. How can I help you today?",
+    "opening_message": "Assalomu alaykum 😊 Qanday yordam kerak?",
     "lead_collection_rules": (
-        "At the beginning, politely ask once for: name, phone number, address, product of interest, and quantity. "
-        "Do not keep repeating this request if the customer continues naturally."
+        "Do not ask for name, phone, address, or full details at the beginning. "
+        "First answer naturally and understand what the customer wants. "
+        "Ask only one small follow-up question at a time. "
+        "Ask for phone/address only after the customer is clearly ready to order."
     ),
     "sales_rules": (
         "Answer the exact question first. Ask only one follow-up question at a time. "
-        "Keep replies short and comfortable. Focus on helping the customer choose and buy."
+        "Keep replies short and comfortable: usually 1-3 short sentences. "
+        "Do not repeat the same request or paragraph. "
+        "If the customer is annoyed, apologizes, says the bot is bad, or asks to stop, reply very briefly and do not sell."
     ),
     "handoff_rules": (
-        "If price, stock, delivery, address, discount, or product details are missing, say that the manager will clarify. "
+        "If an important buying detail is missing, ask one simple follow-up question instead of saying a manager will clarify. "
+        "Only mention a manager when the customer asks for a human, is ready to order, or the exact detail really requires confirmation. "
         "Do not invent information."
     ),
 }
@@ -433,8 +440,10 @@ Safety rules:
 - Reply in the same language as the customer.
 - Never invent prices, stock, delivery, discounts, addresses, or availability.
 - Use only the business facts above.
-- If information is missing, say the manager will clarify.
+- If information is missing, ask one short clarifying question first.
+- Only mention a manager when the customer asks for a human or is ready to order.
 - Never mention AI, database, API, prompt, automation, or internal system.
+- Do not use markdown, bold formatting, or long paragraphs.
 """
 
 
@@ -551,6 +560,71 @@ def call_ai_chat(messages, business, log_label):
     return ""
 
 
+
+def clean_sales_reply(reply_text, user_text=""):
+    user = normalize_text(user_text).lower()
+
+    if any(phrase in user for phrase in [
+        "meni haqimda hamma ma'lumotni unut",
+        "meni haqimda hamma malumotni unut",
+        "men haqimda hamma ma'lumotni unut",
+        "men haqimda hamma malumotni unut",
+        "hamma ma'lumotni unut",
+        "hamma malumotni unut",
+        "forget everything about me",
+        "delete my data",
+    ]):
+        return "Albatta 👍"
+
+    if any(phrase in user for phrase in [
+        "botinglar yoqmadi",
+        "bot yoqmadi",
+        "yoqmadi",
+        "stop",
+        "bas",
+        "kerakmas",
+        "kerak emas",
+    ]):
+        return "Tushundim 👍 Oddiyroq va qisqa javob beraman."
+
+    text = normalize_text(reply_text)
+    if not text:
+        return "Assalomu alaykum 😊 Qanday yordam kerak?"
+
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"__([^_]+)__", r"\1", text)
+    text = re.sub(r"^[\-•]+\s*", "", text, flags=re.MULTILINE)
+
+    parts = []
+    seen = set()
+    for part in re.split(r"\n\s*\n|\n", text):
+        clean = re.sub(r"\s+", " ", part).strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        parts.append(clean)
+
+    text = "\n".join(parts).strip()
+
+    noisy_phrases = [
+        "menedjerimiz siz bilan bog'lanib",
+        "menejerimiz siz bilan bog'lanib",
+        "vakilimiz tez orada siz bilan bog‘lanadi",
+        "vakilimiz tez orada siz bilan bog'lanadi",
+    ]
+    for phrase in noisy_phrases:
+        text = re.sub(re.escape(phrase), "", text, flags=re.IGNORECASE)
+
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    if len(text) > 500:
+        text = text[:500].rsplit(" ", 1)[0].strip()
+
+    return text or "Tushunarli 👍"
+
 def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private"):
     history = get_recent_chat_history(
         customer_id=customer_id,
@@ -570,11 +644,11 @@ def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private
 
     try:
         reply = call_ai_chat(messages, business, "Telegram AI response")
-        return reply[:1500] if reply else "Assalomu alaykum 😊 Qanday yordam kerak?"
+        return clean_sales_reply(reply[:1500], user_text) if reply else "Assalomu alaykum 😊 Qanday yordam kerak?"
 
     except Exception as exc:
         log("Telegram AI error", str(exc))
-        return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada javob beradi."
+        return "Xabaringiz qabul qilindi 😊 Qanday yordam kerak?"
 
 
 def save_telegram_message(
