@@ -40,9 +40,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=env_list(
         "CORS_ORIGINS",
-        "https://agent-rust-delta.vercel.app,https://agent-psi-liard.vercel.app,http://localhost:5173,http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:5173,https://instaagent.streamlit.app,https://agent-1-xi6h.onrender.com",
+        "https://agent-kqwah9x4f-mirshoir-s-projects.vercel.app,https://agent-rust-delta.vercel.app,https://agent-psi-liard.vercel.app,http://localhost:5173,http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:5173,https://instaagent.streamlit.app,https://agent-1-xi6h.onrender.com",
     ),
-    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX") or None,
+    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX", r"https://.*\.vercel\.app"),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -2203,10 +2203,13 @@ async def get_stats_v2(
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     try:
+        businesses = get_all_businesses()
         return {
             'status': 'ok',
             'data': {
                 'total_messages': get_message_count(),
+                'total_accounts': len(businesses),
+                'active_accounts': sum(1 for b in businesses if b.get("bot_enabled")),
                 'instagram_messages': get_message_count('instagram'),
                 'telegram_messages': get_message_count('telegram'),
                 'whatsapp_messages': get_message_count('whatsapp'),
