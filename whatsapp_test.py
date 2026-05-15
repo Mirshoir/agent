@@ -3,16 +3,24 @@ import time
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
-import uvicorn
 
 app = FastAPI()
 
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
-WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "EAAXHWuBXZCp0BRSh17y3lX5lqfmbNOGYtlFPcAlMXl8ZAKmBBV25ApVm7bW8c3pCprJoGbs7u895gXRoR0u9XkLBCEsO9CC1e6v4YWaBwX3yxmEZBB8szgSCCTRZAjgviJv8FgwJi7KrJzPWtFqZAfB4VGzKykzYk3xuuJ4JJZAYNvMb60wn5Jq2TxWfbu7QZDZD")
-WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "65748392018475")
-GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v21.0")
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
+WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
+WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
+WHATSAPP_BUSINESS_ACCOUNT_ID = os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID", "")
+GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v25.0")
 
 PROCESSED_MESSAGES = {}
+
+
+def log(title, data=None):
+    print("\n" + "=" * 80)
+    print(title)
+    if data is not None:
+        print(data)
+    print("=" * 80 + "\n")
 
 
 def already_processed(message_id: str, ttl: int = 3600) -> bool:
@@ -34,7 +42,14 @@ def already_processed(message_id: str, ttl: int = 3600) -> bool:
 
 @app.get("/")
 def home():
-    return {"status": "WhatsApp backend is running"}
+    return {
+        "status": "WhatsApp backend is running",
+        "has_verify_token": bool(VERIFY_TOKEN),
+        "has_whatsapp_access_token": bool(WHATSAPP_ACCESS_TOKEN),
+        "has_phone_number_id": bool(WHATSAPP_PHONE_NUMBER_ID),
+        "has_business_account_id": bool(WHATSAPP_BUSINESS_ACCOUNT_ID),
+        "graph_version": GRAPH_VERSION,
+    }
 
 
 @app.get("/webhook")
@@ -45,18 +60,21 @@ async def verify_webhook(request: Request):
     token = params.get("hub.verify_token")
     challenge = params.get("hub.challenge")
 
-    print("VERIFY REQUEST:", params)
+    log("VERIFY REQUEST", params)
 
     if mode == "subscribe" and token == VERIFY_TOKEN:
-        return PlainTextResponse(challenge)
+        return PlainTextResponse(challenge or "")
 
     return PlainTextResponse("Verification failed", status_code=403)
 
 
 def send_whatsapp_text(to_phone: str, text: str):
     if not WHATSAPP_ACCESS_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
-        print("Missing WhatsApp env variables")
-        return False
+        log(
+            "WHATSAPP SEND ERROR",
+            "Missing WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID",
+        )
+        return False, {"error": "Missing WhatsApp env variables"}
 
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
 
@@ -75,40 +93,60 @@ def send_whatsapp_text(to_phone: str, text: str):
         "Content-Type": "application/json",
     }
 
-    res = requests.post(url, headers=headers, json=payload, timeout=30)
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=30)
 
-    print("SEND RESULT:", res.status_code, res.text)
+        try:
+            result = res.json()
+        except Exception:
+            result = {"raw": res.text}
 
-    return res.ok
+        log("WHATSAPP SEND RESULT", {"status": res.status_code, "body": result})
+        return res.ok, result
+
+    except Exception as e:
+        log("WHATSAPP SEND EXCEPTION", str(e))
+        return False, {"error": str(e)}
 
 
 @app.post("/webhook")
 async def receive_webhook(request: Request):
     data = await request.json()
 
-    print("\n========== WHATSAPP WEBHOOK RECEIVED ==========")
-    print(data)
-    print("==============================================\n")
+    log("WHATSAPP WEBHOOK RECEIVED", data)
 
     if data.get("object") != "whatsapp_business_account":
-        return JSONResponse({"status": "ignored"})
+        return JSONResponse({"status": "ignored", "object": data.get("object")})
 
     for entry in data.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
+
+            if "statuses" in value:
+                log("WHATSAPP STATUS UPDATE", value.get("statuses"))
+                continue
+
             messages = value.get("messages", [])
+            contacts = value.get("contacts", [])
 
             for message in messages:
-                message_id = message.get("id")
+                message_id = message.get("id", "")
 
                 if already_processed(message_id):
-                    print("Duplicate message ignored:", message_id)
+                    log("DUPLICATE MESSAGE IGNORED", message_id)
                     continue
 
-                from_phone = message.get("from")
-                msg_type = message.get("type")
+                from_phone = message.get("from", "")
+                msg_type = message.get("type", "")
+                customer_name = from_phone
 
-                text = ""
+                if contacts:
+                    customer_name = (
+                        contacts[0]
+                        .get("profile", {})
+                        .get("name")
+                        or from_phone
+                    )
 
                 if msg_type == "text":
                     text = message.get("text", {}).get("body", "")
@@ -132,16 +170,17 @@ async def receive_webhook(request: Request):
                 else:
                     text = f"Unsupported message type: {msg_type}"
 
-                print("FROM:", from_phone)
-                print("MESSAGE:", text)
+                log(
+                    "CUSTOMER MESSAGE",
+                    {
+                        "from": from_phone,
+                        "name": customer_name,
+                        "type": msg_type,
+                        "text": text,
+                    },
+                )
 
-                reply = f"Message received: {text}"
-
+                reply = f"✅ WhatsApp backend received your message: {text}"
                 send_whatsapp_text(from_phone, reply)
 
     return JSONResponse({"status": "ok"})
-
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run("whatsapp_backend:app", host="0.0.0.0", port=port)
