@@ -9,24 +9,15 @@ app = FastAPI()
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
-WHATSAPP_BUSINESS_ACCOUNT_ID = os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID", "")
 GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v25.0")
 
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
 
-BUSINESS_NAME = os.getenv("BUSINESS_NAME", "AiAgent")
-BUSINESS_INFO = os.getenv(
-    "BUSINESS_INFO",
-    """
-You are a helpful WhatsApp sales assistant.
-Reply shortly, naturally, and politely.
-Ask follow-up questions when needed.
-Do not mention that you are AI.
-""",
-)
+CATALOG_LINK = os.getenv("CATALOG_LINK", "Catalog link will be shared soon.")
 
 PROCESSED_MESSAGES = {}
+CHAT_MEMORY = {}
 
 
 def log(title, data=None):
@@ -54,17 +45,33 @@ def already_processed(message_id: str, ttl: int = 3600) -> bool:
     return False
 
 
+def get_chat(phone: str):
+    if phone not in CHAT_MEMORY:
+        CHAT_MEMORY[phone] = {
+            "intro_sent": False,
+            "messages": [],
+            "last_seen": time.time(),
+        }
+
+    CHAT_MEMORY[phone]["last_seen"] = time.time()
+    return CHAT_MEMORY[phone]
+
+
+def add_memory(phone: str, role: str, content: str, limit: int = 12):
+    chat = get_chat(phone)
+    chat["messages"].append({"role": role, "content": content})
+    chat["messages"] = chat["messages"][-limit:]
+
+
 @app.get("/")
 def home():
     return {
-        "status": "WhatsApp AI backend is running",
-        "has_verify_token": bool(VERIFY_TOKEN),
+        "status": "WhatsApp AI backend with memory is running",
         "has_whatsapp_access_token": bool(WHATSAPP_ACCESS_TOKEN),
         "has_phone_number_id": bool(WHATSAPP_PHONE_NUMBER_ID),
-        "has_business_account_id": bool(WHATSAPP_BUSINESS_ACCOUNT_ID),
         "has_mistral_api_key": bool(MISTRAL_API_KEY),
         "graph_version": GRAPH_VERSION,
-        "business_name": BUSINESS_NAME,
+        "active_chats": len(CHAT_MEMORY),
     }
 
 
@@ -84,69 +91,7 @@ async def verify_webhook(request: Request):
     return PlainTextResponse("Verification failed", status_code=403)
 
 
-def get_ai_reply(user_text: str) -> str:
-    if not MISTRAL_API_KEY:
-        return "Xabaringiz qabul qilindi 😊 Qanday yordam bera olaman?"
-
-    system_prompt = f"""
-You are a real human WhatsApp sales manager for {BUSINESS_NAME}.
-
-Business information:
-{BUSINESS_INFO}
-
-Rules:
-- Reply in the customer's language.
-- Keep replies short and natural.
-- Usually 1-3 short sentences.
-- Do not write long lists unless asked.
-- Do not invent prices, stock, delivery, discounts, or address.
-- If information is missing, say the manager will clarify.
-- Do not mention AI, bot, automation, API, or database.
-- Focus on helping and selling.
-"""
-
-    try:
-        res = requests.post(
-            "https://api.mistral.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {MISTRAL_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": MISTRAL_MODEL,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text},
-                ],
-                "temperature": 0.5,
-                "max_tokens": 160,
-            },
-            timeout=30,
-        )
-
-        try:
-            result = res.json()
-        except Exception:
-            result = {"raw": res.text}
-
-        log("MISTRAL RESULT", {"status": res.status_code, "body": result})
-
-        if not res.ok:
-            return "Xabaringiz qabul qilindi 😊 Qanday yordam bera olaman?"
-
-        reply = result["choices"][0]["message"]["content"].strip()
-        return reply[:1500] if reply else "Qanday yordam bera olaman?"
-
-    except Exception as e:
-        log("MISTRAL ERROR", str(e))
-        return "Xabaringiz qabul qilindi 😊 Qanday yordam bera olaman?"
-
-
 def send_whatsapp_text(to_phone: str, text: str):
-    if not WHATSAPP_ACCESS_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
-        log("SEND ERROR", "Missing WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID")
-        return False, {"error": "missing_env"}
-
     clean_phone = str(to_phone).replace("+", "").replace(" ", "").strip()
 
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
@@ -156,7 +101,7 @@ def send_whatsapp_text(to_phone: str, text: str):
         "to": clean_phone,
         "type": "text",
         "text": {
-            "preview_url": False,
+            "preview_url": True,
             "body": text[:4096],
         },
     }
@@ -178,8 +123,137 @@ def send_whatsapp_text(to_phone: str, text: str):
         return res.ok, result
 
     except Exception as e:
-        log("WHATSAPP SEND EXCEPTION", str(e))
+        log("WHATSAPP SEND ERROR", str(e))
         return False, {"error": str(e)}
+
+
+def first_intro_message():
+    return (
+        "Assalomu alaykum 😊 Men Milana Premium virtual assistentiman.\n\n"
+        "Sizga tezroq va ustuvor yordam berishimiz uchun, xohlasangiz quyidagi ma’lumotlarni qoldiring:\n"
+        "Ism, telefon raqam, manzil, qaysi mahsulot kerakligi va miqdori.\n\n"
+        "Vakilimiz tez orada siz bilan bog‘lanadi."
+    )
+
+
+def build_system_prompt(intro_sent: bool):
+    return f"""
+You are Milana Premium's human-like WhatsApp sales assistant.
+
+Important style:
+- Reply in the customer's language: Uzbek, Russian, or English.
+- Keep replies short, natural, and sales-focused.
+- Usually 1-3 short sentences.
+- Do not mention AI, bot, API, database, or automation.
+- Do not invent prices, stock, addresses, or discounts.
+- If something is missing, say the manager will clarify.
+- Do not repeat the opening information request if it was already sent.
+- If the user ignores the details request, continue naturally.
+
+Opening conversation rule:
+- If intro_sent is false, introduce yourself as Milana Premium virtual assistant.
+- Ask politely for: name, phone number, address, product of interest, and quantity.
+- Say a representative will contact them soon.
+- Do not force them.
+- Do not keep asking again.
+
+Company:
+Milana Premium sells clothing/textile products.
+Website: https://milanapremium.com/
+
+Catalog and price:
+If customer asks price/catalog, send this catalog link:
+{CATALOG_LINK}
+
+Fast sales contact:
+If customer wants to contact sales manager quickly:
++998 50 155 10 10
+They can contact this number via Telegram and WhatsApp.
+
+Social pages:
+Instagram: https://www.instagram.com/milanapremium/
+TikTok: tiktok.com/@milana_premium_rasmiy
+
+Production/preparation:
+If customer wants us to prepare products:
+- Preparation takes about 2 weeks to 1 month.
+- 50% advance payment is required.
+- Minimum order for preparation is 600.
+
+Delivery:
+- Outside Uzbekistan: 3-5 days depending on location.
+- Inside Uzbekistan: 2-3 days.
+- Delivery options: postal service or Isuzu car.
+
+Minimum order:
+- Outside Uzbekistan: minimum 2000 USD.
+- Inside Uzbekistan: no minimum amount.
+
+KG purchase:
+If they want to buy by KG, tell them to contact:
++998 93 400 44 33
+
+Telegram groups:
+- Single product: t.me/milanapremium1
+- Package: t.me/milanapremium3
+- Мешок / bag: t.me/milanapremium2
+
+Buying flow:
+Ask how many they want to purchase.
+Then send the correct Telegram group depending on their answer:
+single product, package, or мешок/bag.
+
+End rule:
+When the conversation is ending, thank them and ask them to follow:
+Instagram: https://www.instagram.com/milanapremium/
+TikTok: tiktok.com/@milana_premium_rasmiy
+"""
+
+
+def get_ai_reply(phone: str, user_text: str) -> str:
+    chat = get_chat(phone)
+
+    if not chat["intro_sent"]:
+        chat["intro_sent"] = True
+        intro = first_intro_message()
+        add_memory(phone, "assistant", intro)
+        return intro
+
+    if not MISTRAL_API_KEY:
+        return "Xabaringiz qabul qilindi 😊 Qanday yordam bera olaman?"
+
+    messages = [{"role": "system", "content": build_system_prompt(chat["intro_sent"])}]
+    messages.extend(chat["messages"])
+    messages.append({"role": "user", "content": user_text})
+
+    try:
+        res = requests.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": MISTRAL_MODEL,
+                "messages": messages,
+                "temperature": 0.45,
+                "max_tokens": 180,
+            },
+            timeout=30,
+        )
+
+        result = res.json()
+        log("MISTRAL RESULT", {"status": res.status_code, "body": result})
+
+        if not res.ok:
+            return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada aniqlashtirib beradi."
+
+        reply = result["choices"][0]["message"]["content"].strip()
+        return reply[:1500] if reply else "Qanday yordam bera olaman?"
+
+    except Exception as e:
+        log("MISTRAL ERROR", str(e))
+        return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada aniqlashtirib beradi."
 
 
 def extract_message_text(message: dict) -> str:
@@ -221,7 +295,7 @@ async def receive_webhook(request: Request):
     log("WHATSAPP WEBHOOK RECEIVED", data)
 
     if data.get("object") != "whatsapp_business_account":
-        return JSONResponse({"status": "ignored", "object": data.get("object")})
+        return JSONResponse({"status": "ignored"})
 
     for entry in data.get("entry", []):
         for change in entry.get("changes", []):
@@ -232,45 +306,23 @@ async def receive_webhook(request: Request):
                 continue
 
             messages = value.get("messages", [])
-            contacts = value.get("contacts", [])
-
-            if not messages:
-                log("NO CUSTOMER MESSAGES FOUND", value)
-                continue
 
             for message in messages:
                 message_id = message.get("id", "")
-
                 if already_processed(message_id):
-                    log("DUPLICATE MESSAGE IGNORED", message_id)
                     continue
 
                 from_phone = message.get("from", "")
-                msg_type = message.get("type", "")
-                customer_name = from_phone
-
-                if contacts:
-                    customer_name = (
-                        contacts[0].get("profile", {}).get("name")
-                        or from_phone
-                    )
-
                 user_text = extract_message_text(message)
 
-                log(
-                    "CUSTOMER MESSAGE",
-                    {
-                        "from": from_phone,
-                        "name": customer_name,
-                        "type": msg_type,
-                        "text": user_text,
-                    },
-                )
+                log("CUSTOMER MESSAGE", {"from": from_phone, "text": user_text})
 
-                ai_reply = get_ai_reply(user_text)
+                add_memory(from_phone, "user", user_text)
 
-                log("AI REPLY", ai_reply)
+                reply = get_ai_reply(from_phone, user_text)
 
-                send_whatsapp_text(from_phone, ai_reply)
+                add_memory(from_phone, "assistant", reply)
+
+                send_whatsapp_text(from_phone, reply)
 
     return JSONResponse({"status": "ok"})
