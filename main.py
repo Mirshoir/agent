@@ -40,7 +40,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=env_list(
         "CORS_ORIGINS",
-        "https://our-vercel-app.vercel.app,http://localhost:5173,http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:5173,https://instaagent.streamlit.app,https://agent-1-xi6h.onrender.com",
+        "https://agent-rust-delta.vercel.app,https://agent-psi-liard.vercel.app,http://localhost:5173,http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:5173,https://instaagent.streamlit.app,https://agent-1-xi6h.onrender.com",
     ),
     allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX") or None,
     allow_credentials=False,
