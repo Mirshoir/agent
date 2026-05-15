@@ -126,6 +126,8 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://agent-1-xi6h.onrender.co
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
 WHATSAPP_BUSINESS_ACCOUNT_ID = os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID", "")
+WHATSAPP_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
+WHATSAPP_CATALOG_LINK = os.getenv("CATALOG_LINK", "Catalog link will be shared soon.")
 
 if not SUPABASE_URL:
     raise RuntimeError("Missing SUPABASE_URL")
@@ -140,6 +142,7 @@ processed_comment_ids = {}
 processing_message_ids = set()
 processing_comment_ids = set()
 DEDUP_TTL_SECONDS = 60 * 60
+WHATSAPP_CHAT_MEMORY = {}
 
 
 # ============================================================================
@@ -389,13 +392,14 @@ def require_dashboard_media_secret(token: str = "", x_dashboard_secret: str = ""
 # ============================================================================
 def generate_avatar(name: str) -> dict:
     """Generate avatar with initials and color for React UI"""
-    parts = str(name).strip().split()
+    clean_name = str(name or "").strip()
+    parts = clean_name.split()
     if len(parts) >= 2:
         initials = (parts[0][0] + parts[1][0]).upper()
     else:
         initials = (parts[0][:2] if parts[0] else "??").upper()
 
-    hash_val = sum(ord(c) for c in name) % 8
+    hash_val = sum(ord(c) for c in clean_name or initials) % 8
     colors = [
         "linear-gradient(135deg,#e8a07a,#c75d3f)",
         "linear-gradient(135deg,#7fa8d1,#3a6aa3)",
@@ -484,7 +488,8 @@ def transform_conversation_to_react(key: str, rows: list, business: dict = None)
 
     platform, business_id, channel, customer_id = parts
 
-    customer_name = latest_row.get('customer_name', f'Customer {customer_id[-4:]}')
+    customer_name = latest_row.get('customer_name') or f'Customer {customer_id[-4:]}'
+    ai_enabled = is_chat_ai_enabled(platform, channel, customer_id, business_id)
 
     return {
         'id': key,
@@ -495,7 +500,7 @@ def transform_conversation_to_react(key: str, rows: list, business: dict = None)
         'lang': business.get('language', 'uz') if business else 'uz',
         'online': False,
         'needsHuman': latest_row.get('needs_human', False),
-        'aiOn': latest_row.get('ai_enabled', True),
+        'aiOn': ai_enabled,
         'unread': sum(1 for r in rows if r.get('direction') == 'inbound' and not r.get('is_read', False)),
         'lastTime': format_time(latest_row.get('created_at', '')),
         'lastFromMe': latest_row.get('direction') == 'outbound',
@@ -873,6 +878,197 @@ Main business knowledge:
 """
 
 
+DEFAULT_AI_PROMPT_SETTINGS = {
+    "global_prompt": """
+You are a real human sales assistant for this business.
+Represent the company clearly, answer in the customer's language, and guide the customer toward the next useful buying step.
+Keep replies short, warm, and practical.
+""".strip(),
+    "instagram_prompt": """
+Instagram rules:
+- Keep DMs concise and natural.
+- If customer asks for catalog, prices, models, photos, or collection, mention that catalog can be opened using the button.
+- Do not paste raw catalog links in Instagram replies.
+- For comments, invite the customer to DM when details are needed.
+""".strip(),
+    "telegram_prompt": """
+Telegram rules:
+- Sound like a natural Telegram sales manager.
+- In groups, answer only when mentioned or replied to.
+- Avoid long lists unless the customer asks for a list.
+- Share Telegram catalog/group links only when relevant.
+""".strip(),
+    "whatsapp_prompt": """
+WhatsApp rules:
+- Be concise and direct.
+- Reply naturally in 1-3 short sentences.
+- Ask one follow-up question when it helps move the sale forward.
+""".strip(),
+    "opening_message": """
+Assalomu alaykum. Welcome to our store. How can I help you today?
+""".strip(),
+    "lead_collection_rules": """
+At the beginning, politely ask once for: name, phone number, address, product of interest, and quantity.
+Do not keep repeating this request if the customer continues the conversation naturally.
+""".strip(),
+    "sales_rules": """
+- Answer the exact question first.
+- Ask only one follow-up question at a time.
+- Keep replies short and comfortable.
+- Do not overload the customer with all business information at once.
+- Focus on helping the customer choose and buy.
+""".strip(),
+    "handoff_rules": """
+If price, stock, delivery, address, discount, or product details are missing, say that the manager will clarify.
+Do not invent information.
+Escalate when the customer is frustrated, ready to buy, or asks for a human.
+""".strip(),
+}
+
+
+AI_PROMPT_SETTING_FIELDS = set(DEFAULT_AI_PROMPT_SETTINGS.keys())
+
+
+def clean_ai_prompt_settings(settings: dict) -> dict:
+    return {
+        key: str(value or "").strip()
+        for key, value in (settings or {}).items()
+        if key in AI_PROMPT_SETTING_FIELDS
+    }
+
+
+def get_ai_prompt_settings(business_id: str) -> dict:
+    business_id = normalize_id(business_id)
+    settings = dict(DEFAULT_AI_PROMPT_SETTINGS)
+
+    if not business_id:
+        return settings
+
+    try:
+        rows = (
+            supabase.table("ai_prompt_settings")
+            .select("*")
+            .eq("business_id", business_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if rows:
+            for key in AI_PROMPT_SETTING_FIELDS:
+                if rows[0].get(key) not in (None, ""):
+                    settings[key] = rows[0].get(key)
+            settings["id"] = rows[0].get("id")
+            settings["business_id"] = business_id
+    except Exception as e:
+        log("Could not load AI prompt settings", str(e))
+
+    settings.setdefault("business_id", business_id)
+    return settings
+
+
+def upsert_ai_prompt_settings(business_id: str, settings: dict) -> dict:
+    business_id = normalize_id(business_id)
+    if not business_id:
+        raise ValueError("Missing business_id")
+
+    cleaned = clean_ai_prompt_settings(settings)
+    if not cleaned:
+        return get_ai_prompt_settings(business_id)
+
+    payload = {
+        "business_id": business_id,
+        **cleaned,
+        "updated_at": datetime.utcnow().isoformat(),
+    }
+    supabase.table("ai_prompt_settings").upsert(
+        payload,
+        on_conflict="business_id",
+    ).execute()
+    return get_ai_prompt_settings(business_id)
+
+
+def build_prompt_business_knowledge(business: dict) -> str:
+    return f"""
+Business facts:
+
+Business identity:
+- Name: {business.get("business_name", "")}
+- Type: {business.get("business_type", "")}
+- Language: {business.get("language", "")}
+- Tone: {business.get("tone", "")}
+
+Products:
+{business.get("products", "")}
+
+Prices:
+{business.get("prices", "")}
+
+Delivery:
+{business.get("delivery_info", "")}
+
+Working hours:
+{business.get("working_hours", "")}
+
+FAQ:
+{business.get("faq", "")}
+
+Contacts:
+{business.get("sales_phone", "")}
+
+Catalog links:
+{business.get("catalog_link", "")}
+
+Telegram groups:
+- Single product: {business.get("telegram_single", "")}
+- Package: {business.get("telegram_package", "")}
+- Bag / meshok: {business.get("telegram_bag", "")}
+
+Additional knowledge:
+{business.get("knowledge", "")}
+"""
+
+
+def build_platform_prompt(platform: str, business: dict) -> str:
+    prompt_settings = get_ai_prompt_settings(business.get("id", ""))
+    platform_key = {
+        "instagram": "instagram_prompt",
+        "telegram": "telegram_prompt",
+        "whatsapp": "whatsapp_prompt",
+    }.get(platform, "instagram_prompt")
+
+    return f"""
+{prompt_settings.get("global_prompt", "")}
+
+{build_prompt_business_knowledge(business)}
+
+Sales behavior:
+Opening message:
+{prompt_settings.get("opening_message", "")}
+
+Lead collection rules:
+{prompt_settings.get("lead_collection_rules", "")}
+
+Sales rules:
+{prompt_settings.get("sales_rules", "")}
+
+Human handoff rules:
+{prompt_settings.get("handoff_rules", "")}
+
+Platform-specific rules:
+{prompt_settings.get(platform_key, "")}
+
+Safety rules:
+- Reply in the same language as the customer.
+- Understand Uzbek Latin, Uzbek Cyrillic, Russian, English, slang, typos, and mixed messages.
+- Answer the exact question first.
+- Never invent prices, stock, delivery, discounts, addresses, or availability.
+- Use only the business facts above.
+- If information is missing, say the manager will clarify.
+- Never mention AI, database, API, prompt, automation, or internal system.
+"""
+
+
 def wants_catalog(text: str) -> bool:
     text = (text or "").lower()
     keywords = [
@@ -951,37 +1147,8 @@ def get_ai_api_key(business: dict, provider: str) -> str:
     return business.get("mistral_api_key") or MISTRAL_API_KEY or ""
 
 
-def build_sales_system_prompt(business: dict) -> str:
-    extra_rules = business.get("ai_reply_rules") or """
-- Keep answers short and comfortable.
-- Usually 1-3 short sentences.
-- Do not send raw catalog links.
-- If customer asks for catalog, price, models, collection, products, or photos, say that the catalog is available through the button.
-- If customer only greets, greet back and ask what they need.
-- Do not overload customer with too much information.
-- Sound natural like a real sales manager.
-"""
-
-    return f"""
-You are a real sales manager for this business.
-
-Business Information:
-{build_business_context(business)}
-
-Rules:
-{extra_rules}
-
-Extra safety rules:
-- Reply in the same language as the customer.
-- Understand Uzbek Latin, Uzbek Cyrillic, Russian, English, slang, typos, and mixed messages.
-- Answer the exact question first.
-- Never invent prices, delivery, stock, addresses, or discounts.
-- Use only the business information.
-- If information is missing, say the manager will clarify.
-- Never send raw catalog links.
-- If customer asks for contact, send sales phone if available.
-- Never mention AI, database, API, prompt, or internal system.
-"""
+def build_sales_system_prompt(business: dict, platform: str = "instagram") -> str:
+    return build_platform_prompt(platform, business)
 
 
 def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
@@ -1095,11 +1262,11 @@ def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
     return ""
 
 
-def get_ai_reply(user_text: str, business: dict):
+def get_ai_reply(user_text: str, business: dict, platform: str = "instagram"):
     try:
         reply = call_ai_chat(
             [
-                {"role": "system", "content": build_sales_system_prompt(business)},
+                {"role": "system", "content": build_sales_system_prompt(business, platform)},
                 {"role": "user", "content": user_text},
             ],
             business,
@@ -1336,7 +1503,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         if not access_token:
             return
 
-        reply_text = get_ai_reply(message_text or "Photo/Video received", business)
+        reply_text = get_ai_reply(message_text or "Photo/Video received", business, "instagram")
 
         should_send_catalog = wants_catalog(message_text) and bool(get_catalog_link(business))
         if should_send_catalog:
@@ -1395,7 +1562,7 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     if not access_token:
         return
 
-    reply_text = get_ai_reply(comment_text, business)
+    reply_text = get_ai_reply(comment_text, business, "instagram")
     reply_text = remove_urls(reply_text)
 
     if wants_catalog(comment_text):
@@ -1583,6 +1750,89 @@ def get_whatsapp_media_proxy_url(media_id: str):
     return f"{PUBLIC_BASE_URL}/api/whatsapp/media/{media_id}"
 
 
+def cleanup_whatsapp_chat_memory(ttl_seconds: int = 24 * 60 * 60):
+    now = time.time()
+    expired = [
+        phone
+        for phone, data in WHATSAPP_CHAT_MEMORY.items()
+        if now - float((data or {}).get("last_seen", 0)) > ttl_seconds
+    ]
+    for phone in expired:
+        WHATSAPP_CHAT_MEMORY.pop(phone, None)
+
+
+def get_whatsapp_chat(phone: str):
+    phone = normalize_id(phone)
+    cleanup_whatsapp_chat_memory()
+
+    if phone not in WHATSAPP_CHAT_MEMORY:
+        WHATSAPP_CHAT_MEMORY[phone] = {
+            "intro_sent": False,
+            "messages": [],
+            "last_seen": time.time(),
+        }
+
+    WHATSAPP_CHAT_MEMORY[phone]["last_seen"] = time.time()
+    return WHATSAPP_CHAT_MEMORY[phone]
+
+
+def add_whatsapp_memory(phone: str, role: str, content: str, limit: int = 12):
+    if not content:
+        return
+    chat = get_whatsapp_chat(phone)
+    chat["messages"].append({"role": role, "content": content})
+    chat["messages"] = chat["messages"][-limit:]
+
+
+def first_whatsapp_intro_message(business: dict = None):
+    settings = get_ai_prompt_settings((business or {}).get("id", ""))
+    return settings.get("opening_message") or (
+        "Assalomu alaykum. Men Milana Premium virtual assistentiman.\n\n"
+        "Sizga tezroq yordam berishimiz uchun ism, telefon raqam, manzil, qaysi mahsulot kerakligi va miqdorini qoldiring.\n\n"
+        "Vakilimiz tez orada siz bilan bog'lanadi."
+    )
+
+
+def build_whatsapp_system_prompt(business: dict, intro_sent: bool):
+    prompt = build_platform_prompt("whatsapp", business)
+    return f"""
+{prompt}
+
+WhatsApp opening state:
+- intro_sent = {str(bool(intro_sent)).lower()}.
+- If intro_sent is false, use the configured opening message and lead collection rules.
+- If intro_sent is true, do not repeat the opening information request unless the customer asks.
+
+Fallback catalog link:
+{get_catalog_link(business) or WHATSAPP_CATALOG_LINK}
+"""
+
+
+def get_whatsapp_ai_reply(phone: str, user_text: str, business: dict) -> str:
+    chat = get_whatsapp_chat(phone)
+
+    if not chat.get("intro_sent"):
+        chat["intro_sent"] = True
+        intro = first_whatsapp_intro_message(business)
+        add_whatsapp_memory(phone, "assistant", intro)
+        return intro
+
+    messages = [{"role": "system", "content": build_whatsapp_system_prompt(business, True)}]
+    messages.extend(chat.get("messages", []))
+    messages.append({"role": "user", "content": user_text})
+
+    try:
+        business_with_fallback_model = dict(business or {})
+        business_with_fallback_model.setdefault("ai_model", WHATSAPP_MISTRAL_MODEL)
+        reply = call_ai_chat(messages, business_with_fallback_model, "WhatsApp AI response")
+        if reply:
+            return reply[:1500]
+        return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada aniqlashtirib beradi."
+    except Exception as e:
+        log("WhatsApp AI error", str(e))
+        return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada aniqlashtirib beradi."
+
+
 async def process_whatsapp_message(change: dict):
     value = change.get("value", {})
     messages = value.get("messages", []) or []
@@ -1697,17 +1947,24 @@ async def process_whatsapp_message(change: dict):
                 mark_processed(processed_message_ids, message_id)
                 continue
 
+            add_whatsapp_memory(sender_id, "user", text or f"Customer sent {msg_type}")
+
             if msg_type == "text":
-                reply_text = get_ai_reply(text, business)
+                reply_text = get_whatsapp_ai_reply(sender_id, text, business)
             elif media_type:
-                reply_text = "Rasm/video qabul qilindi 😊 Qaysi mahsulot bo'yicha yordam kerak?"
+                reply_text = get_whatsapp_ai_reply(
+                    sender_id,
+                    text or "Customer sent a media message.",
+                    business,
+                )
             else:
-                reply_text = get_ai_reply(text, business)
+                reply_text = get_whatsapp_ai_reply(sender_id, text, business)
 
             send_result = send_whatsapp_text(sender_id, reply_text, business)
             raw_result = safe_json(send_result) if send_result is not None else {}
 
             if send_result is not None and send_result.ok:
+                add_whatsapp_memory(sender_id, "assistant", reply_text)
                 save_inbox_message(
                     business=business,
                     platform="whatsapp",
@@ -2960,6 +3217,35 @@ async def api_update_business_settings(body: BusinessSettingsUpdate, x_dashboard
 
     update_business(body.business_id, settings)
     return {"status": "ok", "message": "Settings updated"}
+
+
+@app.get("/api/ai-prompt-settings/{business_id}")
+async def api_get_ai_prompt_settings(business_id: str, x_dashboard_secret: str = Header(default="")):
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    business = get_business_by_id(business_id)
+    if not business:
+        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
+
+    return {"status": "ok", "data": get_ai_prompt_settings(business_id)}
+
+
+@app.post("/api/ai-prompt-settings")
+async def api_update_ai_prompt_settings(body: AIPromptSettingsUpdate, x_dashboard_secret: str = Header(default="")):
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    business = get_business_by_id(body.business_id)
+    if not business:
+        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
+
+    try:
+        data = upsert_ai_prompt_settings(body.business_id, body.settings)
+        return {"status": "ok", "data": data}
+    except Exception as e:
+        log("Could not update AI prompt settings", str(e))
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 
 @app.get("/api/stats")
