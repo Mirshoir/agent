@@ -29,6 +29,9 @@ ENABLE_TELEGRAM_USER_CLIENT = os.getenv("ENABLE_TELEGRAM_USER_CLIENT", "false").
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
 
 if not SUPABASE_URL:
@@ -268,25 +271,45 @@ def get_recent_chat_history(customer_id, platform="telegram", channel=None, limi
         return []
 
 
-def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private"):
-    api_key = business.get("mistral_api_key") or MISTRAL_API_KEY
+AI_DEFAULT_MODELS = {
+    "mistral": "mistral-small-latest",
+    "openai": "gpt-4o-mini",
+    "gemini": "gemini-1.5-flash",
+    "anthropic": "claude-3-5-haiku-latest",
+}
 
-    if not api_key:
-        return "Assalomu alaykum 😊 Qanday yordam kerak?"
 
-    history = get_recent_chat_history(
-        customer_id=customer_id,
-        platform="telegram",
-        channel=channel,
-    )
+def infer_ai_provider(model: str) -> str:
+    model = str(model or "").lower()
+    if model.startswith(("gpt-", "o1", "o3", "o4")):
+        return "openai"
+    if model.startswith("gemini"):
+        return "gemini"
+    if model.startswith("claude"):
+        return "anthropic"
+    return "mistral"
 
-    system_prompt = f"""
-You are a real human sales manager for Milana Premium.
 
-Business info:
-{build_business_context(business)}
+def get_ai_provider(business: dict) -> str:
+    provider = str(business.get("ai_provider") or "").strip().lower()
+    if provider in AI_DEFAULT_MODELS:
+        return provider
+    return infer_ai_provider(business.get("ai_model"))
 
-IMPORTANT BEHAVIOR RULES:
+
+def get_ai_api_key(business: dict, provider: str) -> str:
+    if provider == "openai":
+        return business.get("openai_api_key") or OPENAI_API_KEY
+    if provider == "gemini":
+        return business.get("gemini_api_key") or GEMINI_API_KEY
+    if provider == "anthropic":
+        return business.get("anthropic_api_key") or ANTHROPIC_API_KEY
+    return business.get("mistral_api_key") or MISTRAL_API_KEY or ""
+
+
+def build_telegram_system_prompt(business):
+    business_name = business.get("business_name") or "this business"
+    extra_rules = business.get("ai_reply_rules") or """
 - Speak naturally like a real Telegram sales manager.
 - Keep answers short and comfortable.
 - Usually 1-3 short sentences.
@@ -301,22 +324,144 @@ IMPORTANT BEHAVIOR RULES:
 - Avoid AI-style formatting.
 - Avoid markdown.
 - Avoid bullet lists.
-- Talk like a real Uzbek sales manager.
-- You are representing Milana Premium textile and clothing.
 - Do not mention AI, bot, automation, prompt, database, or API.
-
-CATALOG RULE:
-- Do NOT offer catalog automatically.
-- Do NOT send catalog in greeting.
-- Do NOT ask "Do you want to see catalog?" in greeting.
-- Send catalog ONLY if the customer explicitly asks for:
-  catalog, katalog, models, modellar, price list, narxlar, collection, kolleksiya, photos, rasmlar.
+- Send catalog ONLY if the customer explicitly asks for catalog, models, price list, collection, photos, or products.
 - If customer only says hello, greet and ask what they need.
-- If customer asks what you sell, answer briefly and ask what product interests them.
 - One main idea per message.
 """
 
-    messages = [{"role": "system", "content": system_prompt}]
+    return f"""
+You are a real human sales manager for {business_name}.
+
+Business info:
+{build_business_context(business)}
+
+Rules:
+{extra_rules}
+"""
+
+
+def call_ai_chat(messages, business, log_label):
+    provider = get_ai_provider(business)
+    model = business.get("ai_model") or AI_DEFAULT_MODELS[provider]
+    api_key = get_ai_api_key(business, provider)
+    temperature = float(business.get("ai_temperature", 0.5) or 0.5)
+    max_tokens = int(business.get("ai_max_tokens", 130) or 130)
+
+    if not api_key:
+        log("Missing Telegram AI API key", {"provider": provider, "model": model})
+        return ""
+
+    if provider in {"mistral", "openai"}:
+        url = "https://api.mistral.ai/v1/chat/completions"
+        if provider == "openai":
+            url = "https://api.openai.com/v1/chat/completions"
+
+        response = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            timeout=30,
+        )
+        log(log_label, {"provider": provider, "model": model, "status": response.status_code, "body": response.text[:1000]})
+        if not response.ok:
+            return ""
+        return (
+            response.json()
+            .get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+            .strip()
+        )
+
+    if provider == "gemini":
+        system_text = "\n\n".join(m["content"] for m in messages if m.get("role") == "system")
+        contents = [
+            {
+                "role": "model" if m.get("role") == "assistant" else "user",
+                "parts": [{"text": m.get("content", "")}],
+            }
+            for m in messages
+            if m.get("role") != "system" and m.get("content")
+        ]
+        response = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+            params={"key": api_key},
+            json={
+                "systemInstruction": {"parts": [{"text": system_text}]},
+                "contents": contents,
+                "generationConfig": {
+                    "temperature": temperature,
+                    "maxOutputTokens": max_tokens,
+                },
+            },
+            timeout=30,
+        )
+        log(log_label, {"provider": provider, "model": model, "status": response.status_code, "body": response.text[:1000]})
+        if not response.ok:
+            return ""
+        parts = (
+            response.json()
+            .get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [])
+        )
+        return "\n".join(part.get("text", "") for part in parts).strip()
+
+    if provider == "anthropic":
+        system_text = "\n\n".join(m["content"] for m in messages if m.get("role") == "system")
+        anthropic_messages = [
+            {
+                "role": "assistant" if m.get("role") == "assistant" else "user",
+                "content": m.get("content", ""),
+            }
+            for m in messages
+            if m.get("role") != "system" and m.get("content")
+        ]
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "system": system_text,
+                "messages": anthropic_messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            },
+            timeout=30,
+        )
+        log(log_label, {"provider": provider, "model": model, "status": response.status_code, "body": response.text[:1000]})
+        if not response.ok:
+            return ""
+        return "\n".join(
+            block.get("text", "")
+            for block in response.json().get("content", [])
+            if block.get("type") == "text"
+        ).strip()
+
+    return ""
+
+
+def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private"):
+    history = get_recent_chat_history(
+        customer_id=customer_id,
+        platform="telegram",
+        channel=channel,
+    )
+
+    messages = [{"role": "system", "content": build_telegram_system_prompt(business)}]
 
     for msg in history:
         role = msg.get("role") or "user"
@@ -326,37 +471,8 @@ CATALOG RULE:
 
     messages.append({"role": "user", "content": user_text})
 
-    payload = {
-        "model": business.get("ai_model") or "mistral-small-latest",
-        "messages": messages,
-        "temperature": float(business.get("ai_temperature", 0.5) or 0.5),
-        "max_tokens": int(business.get("ai_max_tokens", 130) or 130),
-    }
-
     try:
-        response = requests.post(
-            "https://api.mistral.ai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=30,
-        )
-
-        log("Telegram Mistral response", {"status": response.status_code, "body": response.text})
-
-        if not response.ok:
-            return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada javob beradi."
-
-        reply = (
-            response.json()
-            .get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-            .strip()
-        )
-
+        reply = call_ai_chat(messages, business, "Telegram AI response")
         return reply[:1500] if reply else "Assalomu alaykum 😊 Qanday yordam kerak?"
 
     except Exception as exc:
