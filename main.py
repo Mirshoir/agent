@@ -40,7 +40,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=env_list(
         "CORS_ORIGINS",
-        "http://127.0.0.1:4173,http://localhost:4173,https://instaagent.streamlit.app,https://agent-1-xi6h.onrender.com",
+        "https://our-vercel-app.vercel.app,http://localhost:5173,http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:5173,https://instaagent.streamlit.app,https://agent-1-xi6h.onrender.com",
     ),
     allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX") or None,
     allow_credentials=False,
@@ -71,11 +71,13 @@ except Exception:
 @app.get("/dashboard", response_class=HTMLResponse)
 async def dashboard():
     """Serve React dashboard"""
-    try:
-        with open("static/Instaagent Dashboard.html", "r") as f:
-            return f.read()
-    except FileNotFoundError:
-        return "<h1>Dashboard not found. Please ensure static/Instaagent Dashboard.html exists.</h1>"
+    for path in ("frontend/index.html", "static/index.html", "static/Instaagent Dashboard.html"):
+        try:
+            with open(path, "r") as f:
+                return f.read()
+        except FileNotFoundError:
+            continue
+    return RedirectResponse(DASHBOARD_URL)
 
 
 @app.on_event("startup")
@@ -124,8 +126,6 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://agent-1-xi6h.onrender.co
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
 WHATSAPP_BUSINESS_ACCOUNT_ID = os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID", "")
-WHATSAPP_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
-WHATSAPP_CATALOG_LINK = os.getenv("CATALOG_LINK", "Catalog link will be shared soon.")
 
 if not SUPABASE_URL:
     raise RuntimeError("Missing SUPABASE_URL")
@@ -140,7 +140,6 @@ processed_comment_ids = {}
 processing_message_ids = set()
 processing_comment_ids = set()
 DEDUP_TTL_SECONDS = 60 * 60
-WHATSAPP_CHAT_MEMORY = {}
 
 
 # ============================================================================
@@ -1579,137 +1578,6 @@ def get_whatsapp_media_proxy_url(media_id: str):
     return f"{PUBLIC_BASE_URL}/api/whatsapp/media/{media_id}"
 
 
-def cleanup_whatsapp_chat_memory(ttl_seconds: int = 24 * 60 * 60):
-    now = time.time()
-    expired = [
-        phone
-        for phone, data in WHATSAPP_CHAT_MEMORY.items()
-        if now - float((data or {}).get("last_seen", 0)) > ttl_seconds
-    ]
-    for phone in expired:
-        WHATSAPP_CHAT_MEMORY.pop(phone, None)
-
-
-def get_whatsapp_chat(phone: str):
-    phone = normalize_id(phone)
-    cleanup_whatsapp_chat_memory()
-
-    if phone not in WHATSAPP_CHAT_MEMORY:
-        WHATSAPP_CHAT_MEMORY[phone] = {
-            "intro_sent": False,
-            "messages": [],
-            "last_seen": time.time(),
-        }
-
-    WHATSAPP_CHAT_MEMORY[phone]["last_seen"] = time.time()
-    return WHATSAPP_CHAT_MEMORY[phone]
-
-
-def add_whatsapp_memory(phone: str, role: str, content: str, limit: int = 12):
-    if not content:
-        return
-    chat = get_whatsapp_chat(phone)
-    chat["messages"].append({"role": role, "content": content})
-    chat["messages"] = chat["messages"][-limit:]
-
-
-def first_whatsapp_intro_message():
-    return (
-        "Assalomu alaykum 😊 Men Milana Premium virtual assistentiman.\n\n"
-        "Sizga tezroq va ustuvor yordam berishimiz uchun, xohlasangiz quyidagi ma'lumotlarni qoldiring:\n"
-        "Ism, telefon raqam, manzil, qaysi mahsulot kerakligi va miqdori.\n\n"
-        "Vakilimiz tez orada siz bilan bog'lanadi."
-    )
-
-
-def build_whatsapp_system_prompt(business: dict, intro_sent: bool):
-    catalog_link = get_catalog_link(business) or WHATSAPP_CATALOG_LINK
-    sales_phone = normalize_id(business.get("sales_phone")) or "+998 50 155 10 10"
-    ai_rules = (business.get("ai_reply_rules") or "").strip()
-    products = (business.get("products") or "").strip()
-    prices = (business.get("prices") or "").strip()
-    delivery = (business.get("delivery_info") or "").strip()
-    faq = (business.get("faq") or "").strip()
-    knowledge = (business.get("knowledge") or "").strip()
-
-    return f"""
-You are Milana Premium's human-like WhatsApp sales assistant.
-
-Important style:
-- Reply in the customer's language: Uzbek, Russian, or English.
-- Keep replies short, natural, and sales-focused.
-- Usually 1-3 short sentences.
-- Do not mention AI, bot, API, database, or automation.
-- Do not invent prices, stock, addresses, or discounts.
-- If something is missing, say the manager will clarify.
-- Do not repeat the opening information request if it was already sent.
-- If the user ignores the details request, continue naturally.
-
-Opening conversation rule:
-- intro_sent = {str(bool(intro_sent)).lower()}.
-- If intro_sent is false, introduce yourself as Milana Premium virtual assistant.
-- Ask politely for: name, phone number, address, product of interest, and quantity.
-- Say a representative will contact them soon.
-- Do not force them.
-- Do not keep asking again.
-
-Catalog and price:
-- If customer asks price/catalog, send this catalog link:
-{catalog_link}
-
-Fast sales contact:
-- If customer wants quick manager contact, share:
-{sales_phone}
-
-Company context:
-Products:
-{products}
-
-Prices:
-{prices}
-
-Delivery:
-{delivery}
-
-FAQ:
-{faq}
-
-Knowledge:
-{knowledge}
-
-Extra custom rules:
-{ai_rules or "Keep it natural and concise."}
-
-End rule:
-- If conversation is ending, thank customer politely and invite them to follow up.
-"""
-
-
-def get_whatsapp_ai_reply(phone: str, user_text: str, business: dict) -> str:
-    chat = get_whatsapp_chat(phone)
-
-    if not chat.get("intro_sent"):
-        chat["intro_sent"] = True
-        intro = first_whatsapp_intro_message()
-        add_whatsapp_memory(phone, "assistant", intro)
-        return intro
-
-    messages = [{"role": "system", "content": build_whatsapp_system_prompt(business, True)}]
-    messages.extend(chat.get("messages", []))
-    messages.append({"role": "user", "content": user_text})
-
-    try:
-        business_with_fallback_model = dict(business or {})
-        business_with_fallback_model.setdefault("ai_model", WHATSAPP_MISTRAL_MODEL)
-        reply = call_ai_chat(messages, business_with_fallback_model, "WhatsApp AI response")
-        if reply:
-            return reply[:1500]
-        return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada aniqlashtirib beradi."
-    except Exception as e:
-        log("WhatsApp AI error", str(e))
-        return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada aniqlashtirib beradi."
-
-
 async def process_whatsapp_message(change: dict):
     value = change.get("value", {})
     messages = value.get("messages", []) or []
@@ -1824,24 +1692,17 @@ async def process_whatsapp_message(change: dict):
                 mark_processed(processed_message_ids, message_id)
                 continue
 
-            add_whatsapp_memory(sender_id, "user", text or f"Customer sent {msg_type}")
-
             if msg_type == "text":
-                reply_text = get_whatsapp_ai_reply(sender_id, text, business)
+                reply_text = get_ai_reply(text, business)
             elif media_type:
-                reply_text = get_whatsapp_ai_reply(
-                    sender_id,
-                    text or "Customer sent a media message.",
-                    business,
-                )
+                reply_text = "Rasm/video qabul qilindi 😊 Qaysi mahsulot bo'yicha yordam kerak?"
             else:
-                reply_text = get_whatsapp_ai_reply(sender_id, text, business)
+                reply_text = get_ai_reply(text, business)
 
             send_result = send_whatsapp_text(sender_id, reply_text, business)
             raw_result = safe_json(send_result) if send_result is not None else {}
 
             if send_result is not None and send_result.ok:
-                add_whatsapp_memory(sender_id, "assistant", reply_text)
                 save_inbox_message(
                     business=business,
                     platform="whatsapp",
