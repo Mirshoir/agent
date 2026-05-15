@@ -16,11 +16,11 @@ PROCESSED_MESSAGES = {}
 
 
 def log(title, data=None):
-    print("\n" + "=" * 80)
-    print(title)
+    print("\n" + "=" * 80, flush=True)
+    print(title, flush=True)
     if data is not None:
-        print(data)
-    print("=" * 80 + "\n")
+        print(data, flush=True)
+    print("=" * 80 + "\n", flush=True)
 
 
 def already_processed(message_id: str, ttl: int = 3600) -> bool:
@@ -70,11 +70,8 @@ async def verify_webhook(request: Request):
 
 def send_whatsapp_text(to_phone: str, text: str):
     if not WHATSAPP_ACCESS_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
-        log(
-            "WHATSAPP SEND ERROR",
-            "Missing WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID",
-        )
-        return False, {"error": "Missing WhatsApp env variables"}
+        log("SEND ERROR", "Missing WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID")
+        return False, {"error": "missing_env"}
 
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
 
@@ -129,6 +126,10 @@ async def receive_webhook(request: Request):
             messages = value.get("messages", [])
             contacts = value.get("contacts", [])
 
+            if not messages:
+                log("NO CUSTOMER MESSAGES FOUND", value)
+                continue
+
             for message in messages:
                 message_id = message.get("id", "")
 
@@ -180,7 +181,7 @@ async def receive_webhook(request: Request):
                     },
                 )
 
-                reply = f"✅ WhatsApp backend received your message: {text}"
+                reply = f"✅ Received: {text}"
                 send_whatsapp_text(from_phone, reply)
 
     return JSONResponse({"status": "ok"})
