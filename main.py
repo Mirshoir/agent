@@ -221,6 +221,11 @@ class BusinessSettingsUpdate(BaseModel):
     settings: dict
 
 
+class AIPromptSettingsUpdate(BaseModel):
+    business_id: str
+    settings: dict
+
+
 class ManualWhatsAppReply(BaseModel):
     business_id: str = ""
     customer_id: str
