@@ -881,8 +881,9 @@ Main business knowledge:
 DEFAULT_AI_PROMPT_SETTINGS = {
     "global_prompt": """
 You are a real human sales assistant for this business.
+Sound like a real Uzbek seller on Instagram, Telegram, or WhatsApp, not customer support software.
 Represent the company clearly, answer in the customer's language, and guide the customer toward the next useful buying step.
-Keep replies short, warm, and practical.
+Keep replies short, warm, practical, and human.
 """.strip(),
     "instagram_prompt": """
 Instagram rules:
@@ -905,21 +906,26 @@ WhatsApp rules:
 - Ask one follow-up question when it helps move the sale forward.
 """.strip(),
     "opening_message": """
-Assalomu alaykum. Welcome to our store. How can I help you today?
+Assalomu alaykum 😊 Qanday yordam kerak?
 """.strip(),
     "lead_collection_rules": """
-At the beginning, politely ask once for: name, phone number, address, product of interest, and quantity.
-Do not keep repeating this request if the customer continues the conversation naturally.
+Do not ask for name, phone, address, or full details at the beginning.
+First answer naturally and understand what the customer wants.
+Ask only one small follow-up question at a time.
+Ask for phone/address only after the customer is clearly ready to order.
 """.strip(),
     "sales_rules": """
 - Answer the exact question first.
 - Ask only one follow-up question at a time.
-- Keep replies short and comfortable.
+- Keep replies short and comfortable: usually 1-3 short sentences.
 - Do not overload the customer with all business information at once.
+- Do not repeat the same request or paragraph.
+- If the customer is annoyed, says the bot is bad, or asks to stop, reply very briefly and do not sell.
 - Focus on helping the customer choose and buy.
 """.strip(),
     "handoff_rules": """
-If price, stock, delivery, address, discount, or product details are missing, say that the manager will clarify.
+If an important buying detail is missing, ask one simple follow-up question instead of saying a manager will clarify.
+Only mention a manager when the customer asks for a human, is ready to order, or the exact detail really requires confirmation.
 Do not invent information.
 Escalate when the customer is frustrated, ready to buy, or asks for a human.
 """.strip(),
@@ -1064,8 +1070,10 @@ Safety rules:
 - Answer the exact question first.
 - Never invent prices, stock, delivery, discounts, addresses, or availability.
 - Use only the business facts above.
-- If information is missing, say the manager will clarify.
+- If information is missing, ask one short clarifying question first.
+- Only mention a manager when the customer asks for a human or is ready to order.
 - Never mention AI, database, API, prompt, automation, or internal system.
+- Do not use markdown, bold formatting, or long paragraphs.
 """
 
 
@@ -1262,17 +1270,112 @@ def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
     return ""
 
 
-def get_ai_reply(user_text: str, business: dict, platform: str = "instagram"):
+
+def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
+    user = normalize_id(user_text).lower()
+
+    if any(phrase in user for phrase in [
+        "meni haqimda hamma ma'lumotni unut",
+        "meni haqimda hamma malumotni unut",
+        "men haqimda hamma ma'lumotni unut",
+        "men haqimda hamma malumotni unut",
+        "hamma ma'lumotni unut",
+        "hamma malumotni unut",
+        "forget everything about me",
+        "delete my data",
+    ]):
+        return "Albatta 👍"
+
+    if any(phrase in user for phrase in [
+        "botinglar yoqmadi",
+        "bot yoqmadi",
+        "yoqmadi",
+        "stop",
+        "bas",
+        "kerakmas",
+        "kerak emas",
+    ]):
+        return "Tushundim 👍 Oddiyroq va qisqa javob beraman."
+
+    text = normalize_id(reply_text)
+    if not text:
+        return "Xabaringiz qabul qilindi 😊"
+
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
+    text = re.sub(r"__([^_]+)__", r"\1", text)
+    text = re.sub(r"^[\-•]+\s*", "", text, flags=re.MULTILINE)
+
+    parts = []
+    seen = set()
+    for part in re.split(r"\n\s*\n|\n", text):
+        clean = re.sub(r"\s+", " ", part).strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        parts.append(clean)
+
+    text = "\n".join(parts).strip()
+
+    noisy_phrases = [
+        "menedjerimiz siz bilan bog'lanib",
+        "menejerimiz siz bilan bog'lanib",
+        "vakilimiz tez orada siz bilan bog‘lanadi",
+        "vakilimiz tez orada siz bilan bog'lanadi",
+    ]
+    for phrase in noisy_phrases:
+        text = re.sub(re.escape(phrase), "", text, flags=re.IGNORECASE)
+
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    if len(text) > 500:
+        text = text[:500].rsplit(" ", 1)[0].strip()
+
+    return text or "Tushunarli 👍"
+
+
+def get_recent_platform_chat_history(platform: str, business: dict, customer_id: str = "", channel: str = "", limit: int = 10) -> list:
+    if not customer_id:
+        return []
+
     try:
+        query = (
+            supabase.table("inbox_messages")
+            .select("role,content")
+            .eq("platform", platform)
+            .eq("customer_id", normalize_id(customer_id))
+        )
+
+        if business and business.get("id"):
+            query = query.eq("business_id", business.get("id"))
+
+        if channel:
+            query = query.eq("channel", channel)
+
+        rows = query.order("created_at", desc=False).limit(limit).execute().data or []
+        return [
+            {"role": row.get("role") or "user", "content": row.get("content") or ""}
+            for row in rows
+            if row.get("content")
+        ]
+    except Exception as e:
+        log("Could not load recent chat history", str(e))
+        return []
+
+def get_ai_reply(user_text: str, business: dict, platform: str = "instagram", customer_id: str = "", channel: str = ""):
+    try:
+        messages = [{"role": "system", "content": build_sales_system_prompt(business, platform)}]
+        messages.extend(get_recent_platform_chat_history(platform, business, customer_id, channel, limit=10))
+        messages.append({"role": "user", "content": user_text})
+
         reply = call_ai_chat(
-            [
-                {"role": "system", "content": build_sales_system_prompt(business, platform)},
-                {"role": "user", "content": user_text},
-            ],
+            messages,
             business,
             "AI response",
         )
-        return reply.strip() if reply else "Xabaringiz qabul qilindi 😊"
+        return clean_sales_reply(reply.strip(), user_text) if reply else "Xabaringiz qabul qilindi 😊"
 
     except Exception as e:
         log("AI error", str(e))
@@ -1503,7 +1606,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         if not access_token:
             return
 
-        reply_text = get_ai_reply(message_text or "Photo/Video received", business, "instagram")
+        reply_text = get_ai_reply(message_text or "Photo/Video received", business, "instagram", sender_id, "dm")
 
         should_send_catalog = wants_catalog(message_text) and bool(get_catalog_link(business))
         if should_send_catalog:
@@ -1562,7 +1665,7 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     if not access_token:
         return
 
-    reply_text = get_ai_reply(comment_text, business, "instagram")
+    reply_text = get_ai_reply(comment_text, business, "instagram", "", "comment")
     reply_text = remove_urls(reply_text)
 
     if wants_catalog(comment_text):
@@ -1826,11 +1929,11 @@ def get_whatsapp_ai_reply(phone: str, user_text: str, business: dict) -> str:
         business_with_fallback_model.setdefault("ai_model", WHATSAPP_MISTRAL_MODEL)
         reply = call_ai_chat(messages, business_with_fallback_model, "WhatsApp AI response")
         if reply:
-            return reply[:1500]
-        return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada aniqlashtirib beradi."
+            return clean_sales_reply(reply[:1500], user_text)
+        return "Xabaringiz qabul qilindi 😊 Qanday yordam kerak?"
     except Exception as e:
         log("WhatsApp AI error", str(e))
-        return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada aniqlashtirib beradi."
+        return "Xabaringiz qabul qilindi 😊 Qanday yordam kerak?"
 
 
 async def process_whatsapp_message(change: dict):
