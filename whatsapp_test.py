@@ -12,6 +12,20 @@ WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
 WHATSAPP_BUSINESS_ACCOUNT_ID = os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID", "")
 GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v25.0")
 
+MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
+MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
+
+BUSINESS_NAME = os.getenv("BUSINESS_NAME", "AiAgent")
+BUSINESS_INFO = os.getenv(
+    "BUSINESS_INFO",
+    """
+You are a helpful WhatsApp sales assistant.
+Reply shortly, naturally, and politely.
+Ask follow-up questions when needed.
+Do not mention that you are AI.
+""",
+)
+
 PROCESSED_MESSAGES = {}
 
 
@@ -43,12 +57,14 @@ def already_processed(message_id: str, ttl: int = 3600) -> bool:
 @app.get("/")
 def home():
     return {
-        "status": "WhatsApp backend is running",
+        "status": "WhatsApp AI backend is running",
         "has_verify_token": bool(VERIFY_TOKEN),
         "has_whatsapp_access_token": bool(WHATSAPP_ACCESS_TOKEN),
         "has_phone_number_id": bool(WHATSAPP_PHONE_NUMBER_ID),
         "has_business_account_id": bool(WHATSAPP_BUSINESS_ACCOUNT_ID),
+        "has_mistral_api_key": bool(MISTRAL_API_KEY),
         "graph_version": GRAPH_VERSION,
+        "business_name": BUSINESS_NAME,
     }
 
 
@@ -68,16 +84,76 @@ async def verify_webhook(request: Request):
     return PlainTextResponse("Verification failed", status_code=403)
 
 
+def get_ai_reply(user_text: str) -> str:
+    if not MISTRAL_API_KEY:
+        return "Xabaringiz qabul qilindi 😊 Qanday yordam bera olaman?"
+
+    system_prompt = f"""
+You are a real human WhatsApp sales manager for {BUSINESS_NAME}.
+
+Business information:
+{BUSINESS_INFO}
+
+Rules:
+- Reply in the customer's language.
+- Keep replies short and natural.
+- Usually 1-3 short sentences.
+- Do not write long lists unless asked.
+- Do not invent prices, stock, delivery, discounts, or address.
+- If information is missing, say the manager will clarify.
+- Do not mention AI, bot, automation, API, or database.
+- Focus on helping and selling.
+"""
+
+    try:
+        res = requests.post(
+            "https://api.mistral.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {MISTRAL_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": MISTRAL_MODEL,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_text},
+                ],
+                "temperature": 0.5,
+                "max_tokens": 160,
+            },
+            timeout=30,
+        )
+
+        try:
+            result = res.json()
+        except Exception:
+            result = {"raw": res.text}
+
+        log("MISTRAL RESULT", {"status": res.status_code, "body": result})
+
+        if not res.ok:
+            return "Xabaringiz qabul qilindi 😊 Qanday yordam bera olaman?"
+
+        reply = result["choices"][0]["message"]["content"].strip()
+        return reply[:1500] if reply else "Qanday yordam bera olaman?"
+
+    except Exception as e:
+        log("MISTRAL ERROR", str(e))
+        return "Xabaringiz qabul qilindi 😊 Qanday yordam bera olaman?"
+
+
 def send_whatsapp_text(to_phone: str, text: str):
     if not WHATSAPP_ACCESS_TOKEN or not WHATSAPP_PHONE_NUMBER_ID:
         log("SEND ERROR", "Missing WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID")
         return False, {"error": "missing_env"}
 
+    clean_phone = str(to_phone).replace("+", "").replace(" ", "").strip()
+
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{WHATSAPP_PHONE_NUMBER_ID}/messages"
 
     payload = {
         "messaging_product": "whatsapp",
-        "to": str(to_phone),
+        "to": clean_phone,
         "type": "text",
         "text": {
             "preview_url": False,
@@ -104,6 +180,38 @@ def send_whatsapp_text(to_phone: str, text: str):
     except Exception as e:
         log("WHATSAPP SEND EXCEPTION", str(e))
         return False, {"error": str(e)}
+
+
+def extract_message_text(message: dict) -> str:
+    msg_type = message.get("type", "")
+
+    if msg_type == "text":
+        return message.get("text", {}).get("body", "")
+
+    if msg_type == "image":
+        return message.get("image", {}).get("caption") or "Customer sent a photo."
+
+    if msg_type == "video":
+        return message.get("video", {}).get("caption") or "Customer sent a video."
+
+    if msg_type == "audio":
+        return "Customer sent a voice message."
+
+    if msg_type == "document":
+        return message.get("document", {}).get("caption") or "Customer sent a document."
+
+    if msg_type == "button":
+        return message.get("button", {}).get("text", "")
+
+    if msg_type == "interactive":
+        interactive = message.get("interactive", {})
+        return (
+            interactive.get("button_reply", {}).get("title")
+            or interactive.get("list_reply", {}).get("title")
+            or "Customer sent an interactive reply."
+        )
+
+    return f"Customer sent unsupported message type: {msg_type}"
 
 
 @app.post("/webhook")
@@ -143,33 +251,11 @@ async def receive_webhook(request: Request):
 
                 if contacts:
                     customer_name = (
-                        contacts[0]
-                        .get("profile", {})
-                        .get("name")
+                        contacts[0].get("profile", {}).get("name")
                         or from_phone
                     )
 
-                if msg_type == "text":
-                    text = message.get("text", {}).get("body", "")
-                elif msg_type == "image":
-                    text = message.get("image", {}).get("caption") or "Photo received"
-                elif msg_type == "video":
-                    text = message.get("video", {}).get("caption") or "Video received"
-                elif msg_type == "audio":
-                    text = "Voice message received"
-                elif msg_type == "document":
-                    text = message.get("document", {}).get("caption") or "Document received"
-                elif msg_type == "button":
-                    text = message.get("button", {}).get("text", "")
-                elif msg_type == "interactive":
-                    interactive = message.get("interactive", {})
-                    text = (
-                        interactive.get("button_reply", {}).get("title")
-                        or interactive.get("list_reply", {}).get("title")
-                        or "Interactive message received"
-                    )
-                else:
-                    text = f"Unsupported message type: {msg_type}"
+                user_text = extract_message_text(message)
 
                 log(
                     "CUSTOMER MESSAGE",
@@ -177,11 +263,14 @@ async def receive_webhook(request: Request):
                         "from": from_phone,
                         "name": customer_name,
                         "type": msg_type,
-                        "text": text,
+                        "text": user_text,
                     },
                 )
 
-                reply = f"✅ Received: {text}"
-                send_whatsapp_text(from_phone, reply)
+                ai_reply = get_ai_reply(user_text)
+
+                log("AI REPLY", ai_reply)
+
+                send_whatsapp_text(from_phone, ai_reply)
 
     return JSONResponse({"status": "ok"})
