@@ -84,38 +84,165 @@ const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
 const LANDING_LOGO = '/brand/milana-premium-logo.png';
 const DASHBOARD_HASH = '#dashboard';
-
-const LANDING_FEATURES = [
-  ['Unified Inbox', 'Instagram, Telegram, and WhatsApp chats in one place.'],
-  ['AI Auto Replies', 'Natural short replies based on business knowledge.'],
-  ['Human Takeover', 'Turn AI off for any chat and reply manually.'],
-  ['AI Prompt Settings', 'Control how the assistant speaks and sells.'],
-  ['Prompt Generator', 'Improve weak prompts automatically with Accept / Decline controls.'],
-  ['Knowledge Base', 'Add product info, prices, delivery, FAQ, and company rules.'],
-  ['Insights Dashboard', 'Track messages, platforms, customers, AI activity, and sales signals.'],
-  ['Media Support', 'Receive and send images, videos, and voice messages.'],
-  ['Catalog Sharing', 'Send product/catalog links quickly from chat.'],
-  ['Multi-language Support', 'Uzbek, Russian, and English customer conversations.'],
-];
+const UI_LANG_STORAGE_KEY = 'instaagent_ui_lang';
 
 const LANDING_PREVIEWS = [
-  ['Inbox', '/screenshots/inbox.png'],
-  ['Knowledge page', '/screenshots/inbox-4.png'],
-  ['AI Prompt Settings', '/screenshots/inbox-7.png'],
-  ['Insights dashboard', '/screenshots/inbox-8.png'],
-  ['Chat details panel', '/screenshots/02-with-wa.png'],
+  ['inbox', '/screenshots/inbox.png'],
+  ['knowledge', '/screenshots/inbox-4.png'],
+  ['prompts', '/screenshots/inbox-7.png'],
+  ['insights', '/screenshots/inbox-8.png'],
+  ['details', '/screenshots/02-with-wa.png'],
 ];
 
-const LANDING_FAQ = [
-  ['Does it support Instagram?', 'Yes. Instaagent is designed for Instagram DMs and sales conversations.'],
-  ['Does it support Telegram?', 'Yes. It supports Telegram user/private flows and bot private chats.'],
-  ['Does it support WhatsApp?', 'Yes. WhatsApp conversations can be managed from the same inbox.'],
-  ['Can I turn AI off?', 'Yes. Agents can pause AI per chat and take over instantly.'],
-  ['Can I edit the AI prompt?', 'Yes. Prompt settings and business knowledge can be edited anytime.'],
-  ['Can AI answer in Uzbek?', 'Yes. The assistant can handle Uzbek, Russian, and English conversations.'],
-  ['Can humans reply manually?', 'Yes. Human agents can send manual replies, media, and voice notes where supported.'],
-  ['Can I connect multiple businesses?', 'The dashboard is structured for multiple business accounts and channels.'],
-];
+const LANDING_TEXT = {
+  en: {
+    appName: 'Instaagent',
+    navFeatures: 'Features',
+    navDashboard: 'Dashboard',
+    navAiControl: 'AI Control',
+    navFaq: 'FAQ',
+    openDashboard: 'Open Dashboard',
+    eyebrow: 'Instaagent for Milana Premium and modern sales teams',
+    heroTitle: 'AI Sales Assistant for Instagram, Telegram, and WhatsApp',
+    heroCopy: 'Manage all customer chats in one dashboard, let AI reply naturally, and help your sales team close more orders.',
+    getStarted: 'Get Started',
+    bookDemo: 'Book Demo',
+    featureKicker: 'Product features',
+    featureTitle: 'Everything your sales team needs to reply faster',
+    features: [
+      ['Unified Inbox', 'Instagram, Telegram, and WhatsApp chats in one place.'],
+      ['AI Auto Replies', 'Natural short replies based on business knowledge.'],
+      ['Human Takeover', 'Turn AI off for any chat and reply manually.'],
+      ['AI Prompt Settings', 'Control how the assistant speaks and sells.'],
+      ['Prompt Generator', 'Improve weak prompts automatically with Accept / Decline controls.'],
+      ['Knowledge Base', 'Add product info, prices, delivery, FAQ, and company rules.'],
+      ['Insights Dashboard', 'Track messages, platforms, customers, AI activity, and sales signals.'],
+      ['Media Support', 'Receive and send images, videos, and voice messages.'],
+      ['Catalog Sharing', 'Send product/catalog links quickly from chat.'],
+      ['Multi-language Support', 'Uzbek, Russian, and English customer conversations.'],
+    ],
+    previewKicker: 'Dashboard preview',
+    previewTitle: 'See the product before your team uses it',
+    previewLabels: { inbox: 'Inbox', knowledge: 'Knowledge page', prompts: 'AI Prompt Settings', insights: 'Insights dashboard', details: 'Chat details panel' },
+    howKicker: 'How it works',
+    howTitle: 'Launch the assistant in three steps',
+    steps: [
+      ['Connect your channels', 'Instagram, Telegram, and WhatsApp.'],
+      ['Add business knowledge', 'Products, prices, delivery, FAQ, tone, and sales rules.'],
+      ['Let AI assist your team', 'AI replies naturally while your agents stay in control.'],
+    ],
+    aiKicker: 'AI control',
+    aiTitle: 'You are always in control',
+    aiCopy: 'Instaagent is built for real sales operations where agents need speed without losing judgment.',
+    aiItems: ['Turn AI on/off per chat', 'Edit prompts anytime', 'Accept or decline AI prompt improvements', 'Delete or archive conversations', 'Human agents can take over instantly'],
+    faqTitle: 'Common questions',
+    faq: [
+      ['Does it support Instagram?', 'Yes. Instaagent is designed for Instagram DMs and sales conversations.'],
+      ['Does it support Telegram?', 'Yes. It supports Telegram user/private flows and bot private chats.'],
+      ['Does it support WhatsApp?', 'Yes. WhatsApp conversations can be managed from the same inbox.'],
+      ['Can I turn AI off?', 'Yes. Agents can pause AI per chat and take over instantly.'],
+      ['Can I edit the AI prompt?', 'Yes. Prompt settings and business knowledge can be edited anytime.'],
+    ],
+  },
+  uz: {
+    appName: 'Instaagent',
+    navFeatures: 'Imkoniyatlar',
+    navDashboard: 'Dashboard',
+    navAiControl: 'AI nazorati',
+    navFaq: 'FAQ',
+    openDashboard: 'Dashboardni ochish',
+    eyebrow: 'Milana Premium va zamonaviy savdo jamoalari uchun Instaagent',
+    heroTitle: 'Instagram, Telegram va WhatsApp uchun AI savdo yordamchisi',
+    heroCopy: 'Barcha mijoz suhbatlarini bitta dashboardda boshqaring, AI tabiiy javob bersin va jamoangiz ko‘proq buyurtma yopsin.',
+    getStarted: 'Boshlash',
+    bookDemo: 'Demo bron qilish',
+    featureKicker: 'Mahsulot imkoniyatlari',
+    featureTitle: 'Savdo jamoangizga tezroq javob berish uchun hammasi bir joyda',
+    features: [
+      ['Yagona Inbox', 'Instagram, Telegram va WhatsApp chatlari bitta joyda.'],
+      ['AI avtomatik javoblar', 'Biznes bilimlari asosida qisqa va tabiiy javoblar.'],
+      ['Human takeover', 'Istalgan chatda AI ni o‘chirib, qo‘lda javob bering.'],
+      ['AI Prompt sozlamalari', 'AI qanday gapirishini va sotishini boshqaring.'],
+      ['Prompt generator', 'Kuchsiz promptlarni Accept/Decline bilan yaxshilang.'],
+      ['Bilimlar bazasi', 'Mahsulot, narx, yetkazib berish va FAQ ni kiriting.'],
+      ['Insights dashboard', 'Xabarlar, platformalar, mijozlar va AI faolligini kuzating.'],
+      ['Media qo‘llab-quvvatlash', 'Rasm, video va ovozli xabarlarni yuboring/qabul qiling.'],
+      ['Katalog ulashish', 'Chatdan katalog havolalarini tez yuboring.'],
+      ['Ko‘p til', 'Uzbek, Rus va English suhbatlar uchun mos.'],
+    ],
+    previewKicker: 'Dashboard preview',
+    previewTitle: 'Jamoa ishga tushirishdan oldin mahsulotni ko‘ring',
+    previewLabels: { inbox: 'Inbox', knowledge: 'Bilim sahifasi', prompts: 'AI Prompt sozlamalari', insights: 'Insights dashboard', details: 'Chat tafsilotlari paneli' },
+    howKicker: 'Qanday ishlaydi',
+    howTitle: 'Yordamchini 3 bosqichda ishga tushiring',
+    steps: [
+      ['Kanallarni ulang', 'Instagram, Telegram va WhatsApp.'],
+      ['Biznes bilimini kiriting', 'Mahsulot, narx, yetkazib berish, FAQ va qoidalar.'],
+      ['AI ni jamoaga yordam bering', 'AI tabiiy javob beradi, nazorat esa sizda qoladi.'],
+    ],
+    aiKicker: 'AI nazorat',
+    aiTitle: 'Nazorat har doim sizda',
+    aiCopy: 'Instaagent tezlik kerak bo‘lgan real savdo jarayonlari uchun yaratilgan.',
+    aiItems: ['Har chatda AI ni yoqish/o‘chirish', 'Promptlarni istalgan payt tahrirlash', 'AI prompt yaxshilanishini qabul/rad etish', 'Suhbatni o‘chirish yoki arxivlash', 'Operator darhol takeover qilishi mumkin'],
+    faqTitle: 'Ko‘p so‘raladigan savollar',
+    faq: [
+      ['Instagram qo‘llaydimi?', 'Ha. Instaagent Instagram DM savdolariga mos.'],
+      ['Telegram qo‘llaydimi?', 'Ha. Telegram private va bot chatlarini qo‘llaydi.'],
+      ['WhatsApp qo‘llaydimi?', 'Ha. WhatsApp chatlari ham shu inboxda boshqariladi.'],
+      ['AI ni o‘chirish mumkinmi?', 'Ha. Har chat bo‘yicha AI ni pauzaga qo‘yish mumkin.'],
+      ['AI promptni tahrirlash mumkinmi?', 'Ha. Prompt va bilim bazasini xohlagan vaqtda yangilash mumkin.'],
+    ],
+  },
+  ru: {
+    appName: 'Instaagent',
+    navFeatures: 'Функции',
+    navDashboard: 'Дашборд',
+    navAiControl: 'Контроль AI',
+    navFaq: 'FAQ',
+    openDashboard: 'Открыть дашборд',
+    eyebrow: 'Instaagent для Milana Premium и современных отделов продаж',
+    heroTitle: 'AI-ассистент продаж для Instagram, Telegram и WhatsApp',
+    heroCopy: 'Управляйте чатами клиентов в одном дашборде, дайте AI отвечать естественно и помогайте команде закрывать больше заказов.',
+    getStarted: 'Начать',
+    bookDemo: 'Запросить демо',
+    featureKicker: 'Возможности',
+    featureTitle: 'Все, что нужно вашей команде продаж',
+    features: [
+      ['Единый Inbox', 'Instagram, Telegram и WhatsApp в одном месте.'],
+      ['AI-ответы', 'Короткие и естественные ответы по базе знаний.'],
+      ['Human takeover', 'Отключайте AI в любом чате и отвечайте вручную.'],
+      ['Настройки AI Prompt', 'Управляйте стилем общения и продаж AI.'],
+      ['Prompt generator', 'Улучшайте слабые prompt с Accept/Decline.'],
+      ['База знаний', 'Добавьте товары, цены, доставку и FAQ.'],
+      ['Insights dashboard', 'Отслеживайте сообщения, платформы и активность AI.'],
+      ['Поддержка медиа', 'Изображения, видео и голосовые сообщения.'],
+      ['Отправка каталога', 'Быстро отправляйте ссылки из чата.'],
+      ['Мультиязык', 'Поддержка узбекского, русского и английского.'],
+    ],
+    previewKicker: 'Превью дашборда',
+    previewTitle: 'Посмотрите продукт до запуска для команды',
+    previewLabels: { inbox: 'Inbox', knowledge: 'Страница знаний', prompts: 'Настройки AI Prompt', insights: 'Insights dashboard', details: 'Панель деталей чата' },
+    howKicker: 'Как это работает',
+    howTitle: 'Запуск в 3 шага',
+    steps: [
+      ['Подключите каналы', 'Instagram, Telegram и WhatsApp.'],
+      ['Добавьте знания бизнеса', 'Товары, цены, доставка, FAQ и правила продаж.'],
+      ['AI помогает команде', 'AI отвечает естественно, а контроль остается у вас.'],
+    ],
+    aiKicker: 'Контроль AI',
+    aiTitle: 'Контроль всегда у вас',
+    aiCopy: 'Instaagent создан для реальных процессов продаж, где важны скорость и управляемость.',
+    aiItems: ['Включать/выключать AI в каждом чате', 'Редактировать prompt в любое время', 'Принимать или отклонять улучшения prompt', 'Удалять или архивировать диалоги', 'Оператор может моментально перехватить чат'],
+    faqTitle: 'Частые вопросы',
+    faq: [
+      ['Поддерживает Instagram?', 'Да. Instaagent подходит для продаж в Instagram DM.'],
+      ['Поддерживает Telegram?', 'Да. Поддерживаются private/user и bot-чаты.'],
+      ['Поддерживает WhatsApp?', 'Да. WhatsApp чаты доступны в том же inbox.'],
+      ['Можно отключить AI?', 'Да. AI можно ставить на паузу по каждому чату.'],
+      ['Можно редактировать AI prompt?', 'Да. Prompt и база знаний редактируются в любое время.'],
+    ],
+  },
+};
 
 function readStoredObject(key) {
   try {
@@ -287,43 +414,49 @@ const EMOJI_SETS = [
   { label: 'Symbols', items: '✅ ❌ ❗ ❓ ⁉️ ⚠️ 🚫 🔴 🟠 🟡 🟢 🔵 🟣 ⚫ ⚪ 🟤 ⬆️ ⬇️ ⬅️ ➡️ 🔁 🔄 🆕 🆗 🆒 🆘 💲 #️⃣ *️⃣ 0️⃣ 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣ 8️⃣ 9️⃣'.split(' ') },
 ];
 
-function LandingPage({ onOpenDashboard }) {
+function LandingPage({ onOpenDashboard, lang, setLang }) {
+  const l = LANDING_TEXT[lang] || LANDING_TEXT.en;
   return (
     <main className="landing-page">
       <nav className="landing-nav">
         <a className="landing-brand" href="#top">
           <img src={LANDING_LOGO} alt="Milana Premium logo" />
-          <span>Instaagent</span>
+          <span>{l.appName}</span>
         </a>
         <div className="landing-links">
-          <a href="#features">Features</a>
-          <a href="#preview">Dashboard</a>
-          <a href="#control">AI Control</a>
-          <a href="#faq">FAQ</a>
+          <a href="#features">{l.navFeatures}</a>
+          <a href="#preview">{l.navDashboard}</a>
+          <a href="#control">{l.navAiControl}</a>
+          <a href="#faq">{l.navFaq}</a>
         </div>
-        <button onClick={onOpenDashboard}>Open Dashboard</button>
+        <div className="lang">
+          {['en', 'uz', 'ru'].map(code => (
+            <button key={code} className={lang === code ? 'on' : ''} onClick={() => setLang(code)}>{code}</button>
+          ))}
+        </div>
+        <button onClick={onOpenDashboard}>{l.openDashboard}</button>
       </nav>
 
       <section id="top" className="landing-hero">
         <img className="hero-logo-bg" src={LANDING_LOGO} alt="" aria-hidden="true" />
         <div className="landing-hero-inner">
           <img className="hero-logo" src={LANDING_LOGO} alt="Milana Premium logo" />
-          <p className="eyebrow">Instaagent for Milana Premium and modern sales teams</p>
-          <h1>AI Sales Assistant for Instagram, Telegram, and WhatsApp</h1>
-          <p className="hero-copy">Manage all customer chats in one dashboard, let AI reply naturally, and help your sales team close more orders.</p>
+          <p className="eyebrow">{l.eyebrow}</p>
+          <h1>{l.heroTitle}</h1>
+          <p className="hero-copy">{l.heroCopy}</p>
           <div className="hero-actions">
-            <button onClick={onOpenDashboard}>Get Started</button>
-            <button className="secondary" onClick={onOpenDashboard}>Open Dashboard</button>
-            <a href="mailto:hello@instaagent.ai?subject=Book%20Instaagent%20Demo">Book Demo</a>
+            <button onClick={onOpenDashboard}>{l.getStarted}</button>
+            <button className="secondary" onClick={onOpenDashboard}>{l.openDashboard}</button>
+            <a href="mailto:hello@instaagent.ai?subject=Book%20Instaagent%20Demo">{l.bookDemo}</a>
           </div>
         </div>
       </section>
 
       <section id="features" className="landing-section">
-        <div className="section-kicker">Product features</div>
-        <h2>Everything your sales team needs to reply faster</h2>
+        <div className="section-kicker">{l.featureKicker}</div>
+        <h2>{l.featureTitle}</h2>
         <div className="feature-grid">
-          {LANDING_FEATURES.map(([title, text]) => (
+          {l.features.map(([title, text]) => (
             <article className="feature-card" key={title}>
               <h3>{title}</h3>
               <p>{text}</p>
@@ -333,40 +466,36 @@ function LandingPage({ onOpenDashboard }) {
       </section>
 
       <section id="preview" className="landing-section preview-section">
-        <div className="section-kicker">Dashboard preview</div>
-        <h2>See the product before your team uses it</h2>
+        <div className="section-kicker">{l.previewKicker}</div>
+        <h2>{l.previewTitle}</h2>
         <div className="preview-grid">
-          {LANDING_PREVIEWS.map(([title, src], index) => (
-            <figure className={`preview-card ${index === 0 ? 'wide' : ''}`} key={title}>
-              <img src={src} alt={`${title} dashboard preview`} />
-              <figcaption>{title}</figcaption>
+          {LANDING_PREVIEWS.map(([key, src], index) => (
+            <figure className={`preview-card ${index === 0 ? 'wide' : ''}`} key={key}>
+              <img src={src} alt={`${l.previewLabels[key]} dashboard preview`} />
+              <figcaption>{l.previewLabels[key]}</figcaption>
             </figure>
           ))}
         </div>
       </section>
 
       <section className="landing-section how-section">
-        <div className="section-kicker">How it works</div>
-        <h2>Launch the assistant in three steps</h2>
+        <div className="section-kicker">{l.howKicker}</div>
+        <h2>{l.howTitle}</h2>
         <div className="steps-grid">
-          <article><b>1</b><h3>Connect your channels</h3><p>Instagram, Telegram, and WhatsApp.</p></article>
-          <article><b>2</b><h3>Add business knowledge</h3><p>Products, prices, delivery, FAQ, tone, and sales rules.</p></article>
-          <article><b>3</b><h3>Let AI assist your team</h3><p>AI replies naturally while your agents stay in control.</p></article>
+          {l.steps.map((item, idx) => (
+            <article key={item[0]}><b>{idx + 1}</b><h3>{item[0]}</h3><p>{item[1]}</p></article>
+          ))}
         </div>
       </section>
 
       <section id="control" className="landing-split">
         <div>
-          <div className="section-kicker">AI control</div>
-          <h2>You are always in control</h2>
-          <p>Instaagent is built for real sales operations where agents need speed without losing judgment.</p>
+          <div className="section-kicker">{l.aiKicker}</div>
+          <h2>{l.aiTitle}</h2>
+          <p>{l.aiCopy}</p>
         </div>
         <ul>
-          <li>Turn AI on/off per chat</li>
-          <li>Edit prompts anytime</li>
-          <li>Accept or decline AI prompt improvements</li>
-          <li>Delete or archive conversations</li>
-          <li>Human agents can take over instantly</li>
+          {l.aiItems.map(item => <li key={item}>{item}</li>)}
         </ul>
       </section>
 
@@ -417,10 +546,10 @@ function LandingPage({ onOpenDashboard }) {
       </section>
 
       <section id="faq" className="landing-section faq-section">
-        <div className="section-kicker">FAQ</div>
-        <h2>Common questions</h2>
+        <div className="section-kicker">{l.navFaq}</div>
+        <h2>{l.faqTitle}</h2>
         <div className="faq-grid">
-          {LANDING_FAQ.map(([question, answer]) => (
+          {l.faq.map(([question, answer]) => (
             <details key={question}>
               <summary>{question}</summary>
               <p>{answer}</p>
@@ -2281,8 +2410,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "theme": "light"
 }/*EDITMODE-END*/;
 
-function App() {
-  const [lang, setLang] = useState('en');
+function App({ lang, setLang }) {
   const t = window.STRINGS[lang];
 
   const [conversations, setConversations] = useState(window.CONVERSATIONS);
@@ -3034,7 +3162,12 @@ function App() {
 }
 
 function Root() {
+  const [lang, setLang] = useState(() => window.localStorage.getItem(UI_LANG_STORAGE_KEY) || 'en');
   const [showDashboard, setShowDashboard] = useState(() => window.location.hash === DASHBOARD_HASH || urlParams.get('dashboard') === '1');
+
+  useEffect(() => {
+    window.localStorage.setItem(UI_LANG_STORAGE_KEY, lang);
+  }, [lang]);
 
   useEffect(() => {
     const onHashChange = () => setShowDashboard(window.location.hash === DASHBOARD_HASH);
@@ -3047,7 +3180,9 @@ function Root() {
     setShowDashboard(true);
   };
 
-  return showDashboard ? <App /> : <LandingPage onOpenDashboard={openDashboard} />;
+  return showDashboard
+    ? <App lang={lang} setLang={setLang} />
+    : <LandingPage onOpenDashboard={openDashboard} lang={lang} setLang={setLang} />;
 }
 
 createRoot(document.getElementById('root')).render(<Root />);
