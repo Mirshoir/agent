@@ -291,6 +291,25 @@ def standard_channel(platform: str, channel: str = "") -> str:
     return channel or platform
 
 
+def conversation_scope(platform: str, channel: str, customer_id: str, chat_id: str = "") -> str:
+    """
+    Stable conversation identity:
+    - Telegram group/supergroup chats are scoped by chat_id (single window per group)
+    - Other chats remain scoped by customer_id
+    """
+    platform = normalize_id(platform).lower()
+    channel = standard_channel(platform, channel)
+    customer_id = normalize_id(customer_id)
+    chat_id = normalize_id(chat_id)
+
+    if platform == "telegram":
+        if channel in ("telegram_bot_group", "telegram_chat"):
+            return chat_id or customer_id
+        return customer_id or chat_id
+
+    return customer_id
+
+
 def instagram_reply_window_closed(result: dict) -> bool:
     error = result.get("error") if isinstance(result, dict) else {}
     if not isinstance(error, dict):
@@ -539,14 +558,16 @@ def transform_conversation_to_react(key: str, rows: list, business: dict = None)
         return None
 
     platform, business_id, channel, customer_id = parts
+    latest_chat_id = normalize_id(latest_row.get("chat_id"))
+    effective_scope = latest_chat_id if platform == "telegram" and channel in ("telegram_bot_group", "telegram_chat") else customer_id
 
-    customer_name = latest_row.get('customer_name') or f'Customer {customer_id[-4:]}'
-    ai_enabled = is_chat_ai_enabled(platform, channel, customer_id, business_id)
+    customer_name = latest_row.get('customer_name') or f'Customer {effective_scope[-4:]}'
+    ai_enabled = is_chat_ai_enabled(platform, channel, effective_scope, business_id)
 
     return {
         'id': key,
         'name': customer_name,
-        'handle': f'@{customer_id}',
+        'handle': f'@{effective_scope}',
         'platform': platform,
         'avatar': generate_avatar(customer_name),
         'lang': business.get('language', 'uz') if business else 'uz',
@@ -2418,11 +2439,21 @@ async def get_conversations_v2(
             platform_name = normalize_id(row.get("platform", "instagram")).lower() or "instagram"
             channel = standard_channel(platform_name, row.get("channel", ""))
             customer_id = str(row.get("customer_id") or "").strip()
+            chat_id = str(row.get("chat_id") or "").strip()
+            scope = conversation_scope(platform_name, channel, customer_id, chat_id)
 
-            if not business_id or not customer_id:
+            if not business_id or not scope:
                 continue
 
-            key = f"{platform_name}::{business_id}::{channel}::{customer_id}"
+            # Merge Telegram rows of the same real chat even if legacy channel values differ.
+            if platform_name == "telegram":
+                if channel == "telegram_user_private":
+                    key_channel = "telegram_user_private"
+                else:
+                    key_channel = "telegram_bot_group" if str(scope).startswith("-") else "telegram_bot_private"
+                key = f"{platform_name}::{business_id}::{key_channel}::{scope}"
+            else:
+                key = f"{platform_name}::{business_id}::{channel}::{scope}"
 
             if key not in conversations_map:
                 conversations_map[key] = []
@@ -2483,11 +2514,14 @@ async def get_conversation_messages_v2(
             .select("*")
             .eq("platform", platform)
             .eq("business_id", business_id)
-            .eq("customer_id", str(customer_id))
         )
 
-        if channel:
-            query = query.eq("channel", channel)
+        if platform == "telegram" and channel in ("telegram_bot_group", "telegram_bot_private"):
+            query = query.or_(f"chat_id.eq.{customer_id},customer_id.eq.{customer_id}")
+        else:
+            query = query.eq("customer_id", str(customer_id))
+            if channel:
+                query = query.eq("channel", channel)
 
         result = query.order("created_at", desc=False).limit(limit).execute()
         rows = result.data or []
@@ -2500,11 +2534,14 @@ async def get_conversation_messages_v2(
                 .update({"is_read": True})
                 .eq("platform", platform)
                 .eq("business_id", business_id)
-                .eq("customer_id", str(customer_id))
                 .eq("direction", "inbound")
             )
-            if channel:
-                mark_query = mark_query.eq("channel", channel)
+            if platform == "telegram" and channel in ("telegram_bot_group", "telegram_bot_private"):
+                mark_query = mark_query.or_(f"chat_id.eq.{customer_id},customer_id.eq.{customer_id}")
+            else:
+                mark_query = mark_query.eq("customer_id", str(customer_id))
+                if channel:
+                    mark_query = mark_query.eq("channel", channel)
             mark_query.execute()
         except Exception:
             pass
@@ -2553,6 +2590,7 @@ async def send_message_v2(
         platform, business_id, channel, customer_id = parts
         platform = normalize_id(platform).lower()
         channel = standard_channel(platform, channel)
+        target_id = customer_id
 
         business = get_business_by_id(business_id)
         if not business:
@@ -2576,9 +2614,9 @@ async def send_message_v2(
 
         elif platform == "telegram":
             if channel == "telegram_user_private":
-                ok, result = await send_telegram_user_message(customer_id=customer_id, text=text)
+                ok, result = await send_telegram_user_message(customer_id=target_id, text=text)
             else:
-                res = send_telegram_bot_message(customer_id, text)
+                res = send_telegram_bot_message(target_id, text)
                 if res:
                     ok = res.ok
                     result = safe_json(res)
@@ -2610,7 +2648,7 @@ async def send_message_v2(
             business=business,
             platform=platform,
             sender_id=business_id,
-            recipient_id=customer_id,
+            recipient_id=target_id,
             message_text=text,
             direction="outbound",
             platform_message_id=result.get("message_id") or result.get("messages", [{}])[0].get("id", ""),
@@ -2701,11 +2739,14 @@ async def delete_conversation_v2(
             .delete()
             .eq("platform", platform)
             .eq("business_id", business_id)
-            .eq("customer_id", str(customer_id))
         )
 
-        if channel:
-            query = query.eq("channel", channel)
+        if platform == "telegram" and channel in ("telegram_bot_group", "telegram_bot_private"):
+            query = query.or_(f"chat_id.eq.{customer_id},customer_id.eq.{customer_id}")
+        else:
+            query = query.eq("customer_id", str(customer_id))
+            if channel:
+                query = query.eq("channel", channel)
 
         result = query.execute()
         deleted = len(result.data or [])
