@@ -65,11 +65,70 @@ const API = {
     if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
     return data;
   },
+  async delete(path) {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: 'DELETE',
+      headers: apiHeaders(),
+    });
+    const data = await res.json();
+    if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
+    return data;
+  },
 };
 
 const THREAD_POLL_MS = 2500;
 const INBOX_POLL_MS = 6000;
 const STATS_POLL_MS = 20000;
+const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
+const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
+const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
+const LANDING_LOGO = '/brand/milana-premium-logo.png';
+const DASHBOARD_HASH = '#dashboard';
+
+const LANDING_FEATURES = [
+  ['Unified Inbox', 'Instagram, Telegram, and WhatsApp chats in one place.'],
+  ['AI Auto Replies', 'Natural short replies based on business knowledge.'],
+  ['Human Takeover', 'Turn AI off for any chat and reply manually.'],
+  ['AI Prompt Settings', 'Control how the assistant speaks and sells.'],
+  ['Prompt Generator', 'Improve weak prompts automatically with Accept / Decline controls.'],
+  ['Knowledge Base', 'Add product info, prices, delivery, FAQ, and company rules.'],
+  ['Insights Dashboard', 'Track messages, platforms, customers, AI activity, and sales signals.'],
+  ['Media Support', 'Receive and send images, videos, and voice messages.'],
+  ['Catalog Sharing', 'Send product/catalog links quickly from chat.'],
+  ['Multi-language Support', 'Uzbek, Russian, and English customer conversations.'],
+];
+
+const LANDING_PREVIEWS = [
+  ['Inbox', '/screenshots/inbox.png'],
+  ['Knowledge page', '/screenshots/inbox-4.png'],
+  ['AI Prompt Settings', '/screenshots/inbox-7.png'],
+  ['Insights dashboard', '/screenshots/inbox-8.png'],
+  ['Chat details panel', '/screenshots/02-with-wa.png'],
+];
+
+const LANDING_FAQ = [
+  ['Does it support Instagram?', 'Yes. Instaagent is designed for Instagram DMs and sales conversations.'],
+  ['Does it support Telegram?', 'Yes. It supports Telegram user/private flows and bot private chats.'],
+  ['Does it support WhatsApp?', 'Yes. WhatsApp conversations can be managed from the same inbox.'],
+  ['Can I turn AI off?', 'Yes. Agents can pause AI per chat and take over instantly.'],
+  ['Can I edit the AI prompt?', 'Yes. Prompt settings and business knowledge can be edited anytime.'],
+  ['Can AI answer in Uzbek?', 'Yes. The assistant can handle Uzbek, Russian, and English conversations.'],
+  ['Can humans reply manually?', 'Yes. Human agents can send manual replies, media, and voice notes where supported.'],
+  ['Can I connect multiple businesses?', 'The dashboard is structured for multiple business accounts and channels.'],
+];
+
+function readStoredObject(key) {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(key) || '{}');
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredObject(key, value) {
+  window.localStorage.setItem(key, JSON.stringify(value || {}));
+}
 
 const AI_PROVIDERS = [
   {
@@ -118,13 +177,19 @@ function aiProviderForBusiness(business = {}) {
 }
 
 function apiErrorMessage(data, status) {
-  const description = data?.meta?.description || data?.details?.description;
-  const errorCode = data?.meta?.error_code || data?.details?.error_code;
+  const metaError = data?.meta?.error || data?.details?.error || data?.data?.error;
+  const description = data?.meta?.description || data?.details?.description || metaError?.message;
+  const errorCode = data?.meta?.error_code || data?.details?.error_code || metaError?.code;
+  const errorSubcode = data?.meta?.error_subcode || data?.details?.error_subcode || metaError?.error_subcode || metaError?.subcode;
+  if (Number(errorCode) === 10 && Number(errorSubcode) === 2534022) {
+    return 'Instagram reply window is closed. Ask the customer to send a new DM first.';
+  }
   if (description) return errorCode ? `${description} (${errorCode})` : description;
 
   const message =
     data?.message ||
     data?.error ||
+    metaError ||
     data?.details?.error ||
     data?.meta?.error ||
     data?.meta?.text;
@@ -222,6 +287,167 @@ const EMOJI_SETS = [
   { label: 'Symbols', items: '✅ ❌ ❗ ❓ ⁉️ ⚠️ 🚫 🔴 🟠 🟡 🟢 🔵 🟣 ⚫ ⚪ 🟤 ⬆️ ⬇️ ⬅️ ➡️ 🔁 🔄 🆕 🆗 🆒 🆘 💲 #️⃣ *️⃣ 0️⃣ 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣ 8️⃣ 9️⃣'.split(' ') },
 ];
 
+function LandingPage({ onOpenDashboard }) {
+  return (
+    <main className="landing-page">
+      <nav className="landing-nav">
+        <a className="landing-brand" href="#top">
+          <img src={LANDING_LOGO} alt="Milana Premium logo" />
+          <span>Instaagent</span>
+        </a>
+        <div className="landing-links">
+          <a href="#features">Features</a>
+          <a href="#preview">Dashboard</a>
+          <a href="#control">AI Control</a>
+          <a href="#faq">FAQ</a>
+        </div>
+        <button onClick={onOpenDashboard}>Open Dashboard</button>
+      </nav>
+
+      <section id="top" className="landing-hero">
+        <img className="hero-logo-bg" src={LANDING_LOGO} alt="" aria-hidden="true" />
+        <div className="landing-hero-inner">
+          <img className="hero-logo" src={LANDING_LOGO} alt="Milana Premium logo" />
+          <p className="eyebrow">Instaagent for Milana Premium and modern sales teams</p>
+          <h1>AI Sales Assistant for Instagram, Telegram, and WhatsApp</h1>
+          <p className="hero-copy">Manage all customer chats in one dashboard, let AI reply naturally, and help your sales team close more orders.</p>
+          <div className="hero-actions">
+            <button onClick={onOpenDashboard}>Get Started</button>
+            <button className="secondary" onClick={onOpenDashboard}>Open Dashboard</button>
+            <a href="mailto:hello@instaagent.ai?subject=Book%20Instaagent%20Demo">Book Demo</a>
+          </div>
+        </div>
+      </section>
+
+      <section id="features" className="landing-section">
+        <div className="section-kicker">Product features</div>
+        <h2>Everything your sales team needs to reply faster</h2>
+        <div className="feature-grid">
+          {LANDING_FEATURES.map(([title, text]) => (
+            <article className="feature-card" key={title}>
+              <h3>{title}</h3>
+              <p>{text}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section id="preview" className="landing-section preview-section">
+        <div className="section-kicker">Dashboard preview</div>
+        <h2>See the product before your team uses it</h2>
+        <div className="preview-grid">
+          {LANDING_PREVIEWS.map(([title, src], index) => (
+            <figure className={`preview-card ${index === 0 ? 'wide' : ''}`} key={title}>
+              <img src={src} alt={`${title} dashboard preview`} />
+              <figcaption>{title}</figcaption>
+            </figure>
+          ))}
+        </div>
+      </section>
+
+      <section className="landing-section how-section">
+        <div className="section-kicker">How it works</div>
+        <h2>Launch the assistant in three steps</h2>
+        <div className="steps-grid">
+          <article><b>1</b><h3>Connect your channels</h3><p>Instagram, Telegram, and WhatsApp.</p></article>
+          <article><b>2</b><h3>Add business knowledge</h3><p>Products, prices, delivery, FAQ, tone, and sales rules.</p></article>
+          <article><b>3</b><h3>Let AI assist your team</h3><p>AI replies naturally while your agents stay in control.</p></article>
+        </div>
+      </section>
+
+      <section id="control" className="landing-split">
+        <div>
+          <div className="section-kicker">AI control</div>
+          <h2>You are always in control</h2>
+          <p>Instaagent is built for real sales operations where agents need speed without losing judgment.</p>
+        </div>
+        <ul>
+          <li>Turn AI on/off per chat</li>
+          <li>Edit prompts anytime</li>
+          <li>Accept or decline AI prompt improvements</li>
+          <li>Delete or archive conversations</li>
+          <li>Human agents can take over instantly</li>
+        </ul>
+      </section>
+
+      <section className="landing-section usecase-section">
+        <div className="usecase-panel problem">
+          <div className="section-kicker">Problem</div>
+          <h2>Customers message from many platforms. Replies are slow, repeated, and hard to track.</h2>
+        </div>
+        <div className="usecase-panel solution">
+          <div className="section-kicker">Solution</div>
+          <h2>Instaagent organizes every message and helps your team respond faster with natural AI replies.</h2>
+        </div>
+      </section>
+
+      <section className="landing-section">
+        <div className="section-kicker">Business use cases</div>
+        <h2>Built for textile sales, boutiques, wholesale, and export teams</h2>
+        <p className="landing-lead">Perfect for:</p>
+        <div className="usecase-grid">
+          {['Textile shops', 'Instagram boutiques', 'Wholesale sellers', 'Online stores', 'Export businesses', 'Sales teams'].map(item => <span key={item}>{item}</span>)}
+        </div>
+        <div className="textile-list">
+          {['Catalog requests', 'Wholesale questions', 'Product availability', 'Delivery questions', 'Price inquiries', 'Customer follow-up'].map(item => <span key={item}>{item}</span>)}
+        </div>
+      </section>
+
+      <section className="landing-section insights-preview">
+        <div className="section-kicker">Insights preview</div>
+        <h2>Know what is happening across every channel</h2>
+        <div className="insight-pill-grid">
+          {['Total conversations', 'New leads', 'AI handled chats', 'Human takeover chats', 'Messages by platform', 'Most requested products', 'Average response time', 'Unread messages'].map(item => <span key={item}>{item}</span>)}
+        </div>
+      </section>
+
+      <section className="landing-split safety-section">
+        <div>
+          <div className="section-kicker">Trust and safety</div>
+          <h2>Safe for business use</h2>
+          <p>AI follows the facts your company provides and leaves final control with your team.</p>
+        </div>
+        <ul>
+          <li>AI does not invent prices</li>
+          <li>AI follows your business knowledge</li>
+          <li>Agents can disable AI anytime</li>
+          <li>Human review is always possible</li>
+          <li>Customer data stays in your dashboard</li>
+        </ul>
+      </section>
+
+      <section id="faq" className="landing-section faq-section">
+        <div className="section-kicker">FAQ</div>
+        <h2>Common questions</h2>
+        <div className="faq-grid">
+          {LANDING_FAQ.map(([question, answer]) => (
+            <details key={question}>
+              <summary>{question}</summary>
+              <p>{answer}</p>
+            </details>
+          ))}
+        </div>
+      </section>
+
+      <footer className="landing-footer">
+        <div>
+          <img src={LANDING_LOGO} alt="Milana Premium logo" />
+          <strong>Instaagent</strong>
+          <p>AI sales assistant for Instagram, Telegram, and WhatsApp.</p>
+        </div>
+        <nav>
+          <a href="#features">Product links</a>
+          <a href="mailto:hello@instaagent.ai">Contact</a>
+          <a href="#privacy">Privacy Policy</a>
+          <a href="#terms">Terms of Service</a>
+          <a href="#data-deletion">Data Deletion Instructions</a>
+          <button onClick={onOpenDashboard}>Dashboard link</button>
+        </nav>
+      </footer>
+    </main>
+  );
+}
+
 function hashHue(value) {
   let hash = 0;
   for (const ch of String(value || 'client')) hash = ((hash << 5) - hash) + ch.charCodeAt(0);
@@ -269,7 +495,7 @@ function channelLabel(platform, channel) {
     return channel || 'Telegram';
   }
   if (platform === 'instagram') return channel === 'dm' || !channel ? 'Instagram DM' : channel;
-  if (platform === 'whatsapp') return channel === 'whatsapp_cloud' || !channel ? 'WhatsApp Cloud' : channel;
+  if (platform === 'whatsapp') return channel === 'whatsapp' || channel === 'whatsapp_cloud' || !channel ? 'WhatsApp' : channel;
   return channel || 'Inbox';
 }
 
@@ -468,7 +694,7 @@ function Toast({ message }) {
   return <div className="toast">{message}</div>;
 }
 
-function ToggleRow({ label, hint, checked, onChange }) {
+function ToggleRow({ label, hint, checked, onChange, w = WORKSPACE_TEXT.en }) {
   return (
     <div className="toggle-row">
       <div>
@@ -477,13 +703,13 @@ function ToggleRow({ label, hint, checked, onChange }) {
       </div>
       <button className={`ai-toggle ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)}>
         <span className="switch" />
-        <span className="label-i">{checked ? 'On' : 'Off'}</span>
+        <span className="label-i">{checked ? (w.on || 'On') : (w.off || 'Off')}</span>
       </button>
     </div>
   );
 }
 
-function SecretField({ business, provider, onBusinessSetting }) {
+function SecretField({ business, provider, onBusinessSetting, w = WORKSPACE_TEXT.en }) {
   const [value, setValue] = useState('');
   const savedPreview = String(business[provider.keyField] || '').trim();
 
@@ -507,17 +733,17 @@ function SecretField({ business, provider, onBusinessSetting }) {
   return (
     <div className="secret-row">
       <label className="field-row">
-        <span>{provider.label} key</span>
+        <span>{provider.label} {w.key}</span>
         <input
           type="password"
           value={value}
-          placeholder={savedPreview ? `Saved (${savedPreview})` : 'Paste API key'}
+          placeholder={savedPreview ? `${w.saved} (${savedPreview})` : w.pasteApiKey}
           onChange={(e) => setValue(e.target.value)}
           onBlur={save}
           autoComplete="off"
         />
       </label>
-      <button type="button" className="panel-btn subtle" disabled={!savedPreview} onClick={clear}>Clear</button>
+      <button type="button" className="panel-btn subtle" disabled={!savedPreview} onClick={clear}>{w.clear}</button>
     </div>
   );
 }
@@ -531,9 +757,449 @@ function PromptField({ label, value, rows = 5, onChange }) {
   );
 }
 
+const PROMPT_FIELD_LABELS = {
+  global_prompt: 'Global prompt',
+  instagram_prompt: 'Instagram rules',
+  telegram_prompt: 'Telegram rules',
+  whatsapp_prompt: 'WhatsApp rules',
+  opening_message: 'Opening message',
+  lead_collection_rules: 'Lead collection rules',
+  sales_rules: 'Follow-up style',
+  handoff_rules: 'Human handoff rules',
+};
+
+const WORKSPACE_TEXT = {
+  en: {
+    workspace: 'Workspace', leadsTitle: 'Leads Pipeline', promptsTitle: 'AI Prompt Settings', profile: 'Profile', refresh: 'Refresh', liveWorkspace: 'Live backend workspace',
+    totalConversations: 'Total conversations', activeThreads: 'Active inbox threads', newLeads: 'New leads', recentProspects: 'Recent or unread prospects',
+    aiHandledChats: 'AI handled chats', coveredByAi: 'Currently covered by AI', humanTakeoverChats: 'Human takeover chats', manualAttention: 'Needs manual attention',
+    unreadMessages: 'Unread messages', waitingMessages: 'Customer messages waiting', responseRate: 'Response rate', estimatedInbox: 'Estimated from inbox state',
+    avgResponseTime: 'Avg response time', liveEstimate: 'Live estimate', platformMessages: 'Platform messages', allPlatforms: 'Instagram + Telegram + WhatsApp',
+    inbound: 'Inbound', outbound: 'Outbound', aiReplies: 'AI replies', humanReplies: 'Human replies', messagesByDay: 'Messages by day',
+    messagesByPlatform: 'Messages by platform', inboundVsOutbound: 'Inbound vs outbound', aiVsHuman: 'AI replies vs human replies',
+    topCustomers: 'Top active customers', noCustomers: 'No customers yet', peakHours: 'Peak messaging hours', mostProducts: 'Most mentioned products',
+    productIntent: 'Catalog/product intent', priceQuestions: 'Customers asking for price', priceHint: 'Pricing questions',
+    deliveryQuestions: 'Customers asking for delivery', deliveryHint: 'Delivery questions', readyToOrder: 'Customers ready to order',
+    buyingIntent: 'Buying intent', followUp: 'Needs human follow-up', aiPaused: 'Takeover or AI paused',
+    globalPrompt: 'Global Prompt', usedBy: 'Used by Instagram + Telegram + WhatsApp', platformOverrides: 'Platform Overrides',
+    instagramRules: 'Instagram rules', telegramRules: 'Telegram rules', whatsappRules: 'WhatsApp rules', businessKnowledge: 'Business Knowledge',
+    knowledgeHint: 'Products, prices, delivery, FAQ, contacts, and catalog links are managed in the Knowledge page and injected into the final prompt automatically.',
+    products: 'Products', prices: 'Prices', delivery: 'Delivery', faq: 'FAQ', contacts: 'Contacts', catalogLinks: 'Catalog links',
+    salesBehavior: 'Sales Behavior', openingMessage: 'Opening message', leadCollectionRules: 'Lead collection rules',
+    followUpStyle: 'Follow-up style', humanHandoffRules: 'Human handoff rules', improvePrompt: 'Improve Prompt', improving: 'Improving...',
+    regenerate: 'Regenerate', generatedSuggestion: 'Generated suggestion', suggestionFallback: 'Made it clearer, safer, and easier for agents to maintain.',
+    acceptSuggestion: 'Accept suggestion', decline: 'Decline', savePromptSettings: 'Save AI prompt settings', saving: 'Saving...',
+    promptFormula: 'Prompt formula', noBusinesses: 'No businesses returned from the backend.', connectInstagram: 'Connect Instagram', connectFacebook: 'Connect Facebook',
+    unnamedBusiness: 'Unnamed business', active: 'active', paused: 'paused', botEnabled: 'Bot enabled', botEnabledHint: 'Controls automatic replies for this business.',
+    instagramDms: 'Instagram DMs', instagramDmsHint: 'Automatic Instagram direct-message replies.', instagramComments: 'Instagram comments',
+    instagramCommentsHint: 'Automatic comment replies.', language: 'Language', tone: 'Tone', aiModel: 'AI model', provider: 'Provider', model: 'Model',
+    customModel: 'Custom model', temperature: 'Temperature', maxTokens: 'Max tokens', apiKeys: 'API keys', key: 'key', saved: 'Saved', pasteApiKey: 'Paste API key',
+    clear: 'Clear', promptReady: 'Prompt suggestion ready', promptLocal: 'Prompt suggestion generated locally', noBusinessLocal: 'Generated locally because no live business is selected.',
+    backendUnavailableLocal: 'Generated locally because the backend endpoint is not available yet.',
+    leadNew: 'New', leadQualified: 'Qualified', leadNegotiation: 'Negotiation', leadWon: 'Won', leadLost: 'Lost',
+    leadAmount: 'Potential value', leadSource: 'Source', leadUpdated: 'Updated', leadEmpty: 'No leads in this stage yet.',
+    leadOpen: 'Open chat',
+  },
+  uz: {
+    workspace: 'Ish maydoni', leadsTitle: 'Lidlar pipeline', promptsTitle: 'AI Prompt sozlamalari', profile: 'Profil', refresh: 'Yangilash', liveWorkspace: 'Live backend ish maydoni',
+    totalConversations: 'Jami suhbatlar', activeThreads: 'Faol inbox suhbatlari', newLeads: 'Yangi leadlar', recentProspects: 'Yangi yoki o‘qilmagan mijozlar',
+    aiHandledChats: 'AI yuritgan chatlar', coveredByAi: 'AI nazoratida', humanTakeoverChats: 'Operatorga o‘tgan chatlar', manualAttention: 'Qo‘lda ko‘rish kerak',
+    unreadMessages: 'O‘qilmagan xabarlar', waitingMessages: 'Javob kutayotgan xabarlar', responseRate: 'Javob darajasi', estimatedInbox: 'Inbox holatidan taxmin',
+    avgResponseTime: 'O‘rtacha javob vaqti', liveEstimate: 'Live taxmin', platformMessages: 'Platforma xabarlari', allPlatforms: 'Instagram + Telegram + WhatsApp',
+    inbound: 'Kiruvchi', outbound: 'Chiquvchi', aiReplies: 'AI javoblari', humanReplies: 'Operator javoblari', messagesByDay: 'Kunlar bo‘yicha xabarlar',
+    messagesByPlatform: 'Platformalar bo‘yicha xabarlar', inboundVsOutbound: 'Kiruvchi va chiquvchi', aiVsHuman: 'AI va operator javoblari',
+    topCustomers: 'Eng faol mijozlar', noCustomers: 'Hali mijoz yo‘q', peakHours: 'Eng faol soatlar', mostProducts: 'Eng ko‘p tilga olingan mahsulotlar',
+    productIntent: 'Katalog/mahsulot qiziqishi', priceQuestions: 'Narx so‘ragan mijozlar', priceHint: 'Narx savollari',
+    deliveryQuestions: 'Yetkazib berishni so‘raganlar', deliveryHint: 'Yetkazib berish savollari', readyToOrder: 'Buyurtmaga tayyor mijozlar',
+    buyingIntent: 'Sotib olish niyati', followUp: 'Operator kuzatuvi kerak', aiPaused: 'Takeover yoki AI pauzada',
+    globalPrompt: 'Umumiy prompt', usedBy: 'Instagram + Telegram + WhatsApp uchun', platformOverrides: 'Platforma qoidalari',
+    instagramRules: 'Instagram qoidalari', telegramRules: 'Telegram qoidalari', whatsappRules: 'WhatsApp qoidalari', businessKnowledge: 'Biznes bilimlari',
+    knowledgeHint: 'Mahsulot, narx, yetkazib berish, FAQ, kontakt va katalog linklari Bilim sahifasida boshqariladi va promptga qo‘shiladi.',
+    products: 'Mahsulotlar', prices: 'Narxlar', delivery: 'Yetkazib berish', faq: 'FAQ', contacts: 'Kontaktlar', catalogLinks: 'Katalog linklari',
+    salesBehavior: 'Sotuv uslubi', openingMessage: 'Boshlang‘ich xabar', leadCollectionRules: 'Lead yig‘ish qoidalari',
+    followUpStyle: 'Follow-up uslubi', humanHandoffRules: 'Operatorga o‘tkazish qoidalari', improvePrompt: 'Promptni yaxshilash', improving: 'Yaxshilanmoqda...',
+    regenerate: 'Qayta yaratish', generatedSuggestion: 'Tavsiya qilingan prompt', suggestionFallback: 'Agentlarga osonroq, xavfsizroq va aniqroq qilindi.',
+    acceptSuggestion: 'Tavsiyani qabul qilish', decline: 'Rad etish', savePromptSettings: 'AI prompt sozlamalarini saqlash', saving: 'Saqlanmoqda...',
+    promptFormula: 'Prompt formulasi', noBusinesses: 'Backenddan bizneslar kelmadi.', connectInstagram: 'Instagram ulash', connectFacebook: 'Facebook ulash',
+    unnamedBusiness: 'Nomsiz biznes', active: 'faol', paused: 'pauza', botEnabled: 'Bot yoqilgan', botEnabledHint: 'Bu biznes uchun avtomatik javoblarni boshqaradi.',
+    instagramDms: 'Instagram DM', instagramDmsHint: 'Instagram DM avtomatik javoblari.', instagramComments: 'Instagram kommentlar',
+    instagramCommentsHint: 'Kommentlarga avtomatik javoblar.', language: 'Til', tone: 'Ohang', aiModel: 'AI model', provider: 'Provider', model: 'Model',
+    customModel: 'Custom model', temperature: 'Temperature', maxTokens: 'Max token', apiKeys: 'API kalitlar', key: 'kalit', saved: 'Saqlangan', pasteApiKey: 'API kalitni kiriting',
+    clear: 'Tozalash', promptReady: 'Prompt tavsiyasi tayyor', promptLocal: 'Prompt tavsiyasi lokal yaratildi', noBusinessLocal: 'Live biznes tanlanmagani uchun lokal yaratildi.',
+    backendUnavailableLocal: 'Backend endpoint hali ishlamagani uchun lokal yaratildi.',
+    leadNew: 'Yangi', leadQualified: 'Saralangan', leadNegotiation: 'Muzokara', leadWon: 'Yutilgan', leadLost: 'Yo‘qotilgan',
+    leadAmount: 'Potensial qiymat', leadSource: 'Manba', leadUpdated: 'Yangilangan', leadEmpty: 'Bu bosqichda lid yo‘q.',
+    leadOpen: 'Chatni ochish',
+  },
+  ru: {
+    workspace: 'Рабочая область', leadsTitle: 'Воронка лидов', promptsTitle: 'Настройки AI Prompt', profile: 'Профиль', refresh: 'Обновить', liveWorkspace: 'Рабочая область backend',
+    totalConversations: 'Всего диалогов', activeThreads: 'Активные диалоги inbox', newLeads: 'Новые лиды', recentProspects: 'Новые или непрочитанные клиенты',
+    aiHandledChats: 'Чаты обработаны ИИ', coveredByAi: 'Сейчас ведет ИИ', humanTakeoverChats: 'Передано оператору', manualAttention: 'Нужно внимание человека',
+    unreadMessages: 'Непрочитанные', waitingMessages: 'Сообщения ждут ответа', responseRate: 'Доля ответов', estimatedInbox: 'Оценка по inbox',
+    avgResponseTime: 'Среднее время ответа', liveEstimate: 'Живая оценка', platformMessages: 'Сообщения платформ', allPlatforms: 'Instagram + Telegram + WhatsApp',
+    inbound: 'Входящие', outbound: 'Исходящие', aiReplies: 'Ответы ИИ', humanReplies: 'Ответы оператора', messagesByDay: 'Сообщения по дням',
+    messagesByPlatform: 'Сообщения по платформам', inboundVsOutbound: 'Входящие и исходящие', aiVsHuman: 'ИИ и оператор',
+    topCustomers: 'Самые активные клиенты', noCustomers: 'Клиентов пока нет', peakHours: 'Пиковые часы', mostProducts: 'Часто упоминаемые товары',
+    productIntent: 'Интерес к каталогу/товару', priceQuestions: 'Спрашивают цену', priceHint: 'Вопросы о цене',
+    deliveryQuestions: 'Спрашивают доставку', deliveryHint: 'Вопросы о доставке', readyToOrder: 'Готовы заказать',
+    buyingIntent: 'Намерение купить', followUp: 'Нужен follow-up оператора', aiPaused: 'Takeover или ИИ на паузе',
+    globalPrompt: 'Общий prompt', usedBy: 'Для Instagram + Telegram + WhatsApp', platformOverrides: 'Правила платформ',
+    instagramRules: 'Правила Instagram', telegramRules: 'Правила Telegram', whatsappRules: 'Правила WhatsApp', businessKnowledge: 'База знаний',
+    knowledgeHint: 'Товары, цены, доставка, FAQ, контакты и ссылки каталога управляются на странице База знаний и добавляются в финальный prompt.',
+    products: 'Товары', prices: 'Цены', delivery: 'Доставка', faq: 'FAQ', contacts: 'Контакты', catalogLinks: 'Ссылки каталога',
+    salesBehavior: 'Стиль продаж', openingMessage: 'Первое сообщение', leadCollectionRules: 'Правила сбора лидов',
+    followUpStyle: 'Стиль follow-up', humanHandoffRules: 'Правила передачи оператору', improvePrompt: 'Улучшить prompt', improving: 'Улучшаю...',
+    regenerate: 'Сгенерировать заново', generatedSuggestion: 'Предложенный prompt', suggestionFallback: 'Сделано понятнее, безопаснее и проще для агентов.',
+    acceptSuggestion: 'Принять', decline: 'Отклонить', savePromptSettings: 'Сохранить AI prompt', saving: 'Сохранение...',
+    promptFormula: 'Формула prompt', noBusinesses: 'Backend не вернул бизнесы.', connectInstagram: 'Подключить Instagram', connectFacebook: 'Подключить Facebook',
+    unnamedBusiness: 'Без названия', active: 'активен', paused: 'пауза', botEnabled: 'Бот включен', botEnabledHint: 'Управляет автоответами для бизнеса.',
+    instagramDms: 'Instagram DM', instagramDmsHint: 'Автоответы в Instagram DM.', instagramComments: 'Комментарии Instagram',
+    instagramCommentsHint: 'Автоответы на комментарии.', language: 'Язык', tone: 'Тон', aiModel: 'AI модель', provider: 'Провайдер', model: 'Модель',
+    customModel: 'Своя модель', temperature: 'Temperature', maxTokens: 'Макс. токены', apiKeys: 'API ключи', key: 'ключ', saved: 'Сохранен', pasteApiKey: 'Вставьте API ключ',
+    clear: 'Очистить', promptReady: 'Prompt готов', promptLocal: 'Prompt сгенерирован локально', noBusinessLocal: 'Создано локально, потому что live бизнес не выбран.',
+    backendUnavailableLocal: 'Создано локально, потому что backend endpoint пока недоступен.',
+    leadNew: 'Новые', leadQualified: 'Квалиф.', leadNegotiation: 'Переговоры', leadWon: 'Сделка', leadLost: 'Потеряно',
+    leadAmount: 'Потенциал', leadSource: 'Источник', leadUpdated: 'Обновлено', leadEmpty: 'В этой стадии пока нет лидов.',
+    leadOpen: 'Открыть чат',
+  },
+};
+
+const LEAD_STAGE_ORDER = ['new', 'qualified', 'negotiation', 'won', 'lost'];
+
+function guessLeadStage(conv) {
+  const blob = `${conv.preview} ${conv.summary}`.toLowerCase();
+  if (conv.unread > 0 || conv.needsHuman) return 'new';
+  if (/ready|order|заказ|buyurtma|olaman|сч[её]т|invoice/.test(blob)) return 'negotiation';
+  if (/thank|thanks|received|получил|rahmat|oldim/.test(blob)) return 'won';
+  if (/cancel|later|нет|yo['’`]?q|not now|stop/.test(blob)) return 'lost';
+  return 'qualified';
+}
+
+function buildLeads(conversations, leadStages) {
+  const leads = (conversations || []).map(conv => {
+    const stage = leadStages[conv.id] || guessLeadStage(conv);
+    const inferredValue = Number(conv.kpis?.orders || 0) > 0
+      ? Number(conv.kpis.orders) * 120
+      : Math.max(90, 60 + Number(conv.unread || 0) * 45 + (conv.needsHuman ? 120 : 0));
+    return {
+      id: conv.id,
+      stage,
+      name: conv.name,
+      platform: conv.platform,
+      handle: conv.handle,
+      preview: conv.preview,
+      unread: conv.unread,
+      needsHuman: conv.needsHuman,
+      amount: inferredValue,
+      updatedAt: conv.lastTime,
+      source: conv.channelName || conv.channel || conv.platform,
+      conversationId: conv.id,
+    };
+  });
+  return leads;
+}
+
+function localPromptSuggestion(field, currentPrompt = '', goal = '') {
+  const intro = {
+    global_prompt: 'You are a natural sales assistant for this business across Instagram, Telegram, and WhatsApp.',
+    instagram_prompt: 'Instagram DM rules:',
+    telegram_prompt: 'Telegram rules:',
+    whatsapp_prompt: 'WhatsApp rules:',
+    opening_message: 'Assalomu alaykum 😊 Qanday yordam kerak?',
+    lead_collection_rules: 'Lead collection rules:',
+    sales_rules: 'Sales reply rules:',
+    handoff_rules: 'Human handoff rules:',
+  }[field] || 'Prompt rules:';
+
+  const source = String(currentPrompt || '').trim();
+  const productHint = source.match(/[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼ']{4,}/)?.[0] || 'customer request';
+
+  if (field === 'opening_message') {
+    return {
+      suggested_prompt: 'Assalomu alaykum 😊 Qanday yordam kerak?',
+      explanation: 'Made the opening short and natural, without asking for phone or address too early.',
+    };
+  }
+
+  return {
+    suggested_prompt: [
+      intro,
+      `- Reply shortly, warmly, and naturally in the customer's language.`,
+      `- First answer the customer's question, then ask only one simple follow-up question.`,
+      `- Do not ask for phone number or address at the beginning.`,
+      `- Ask for phone/address only when the customer is clearly ready to order.`,
+      `- Do not repeat "${productHint}" or any product name in every message.`,
+      `- Never invent price, stock, delivery time, discounts, or availability.`,
+      `- Avoid corporate phrases like "manager will contact you" unless the customer asks for a human or is ready to order.`,
+      `- If the customer is annoyed, reply calmly and briefly before continuing.`,
+      goal ? `- Main improvement goal: ${goal}.` : '',
+    ].filter(Boolean).join('\n'),
+    explanation: 'Made it shorter, clearer, safer for sales replies, and aligned with Instaagent standards.',
+  };
+}
+
+function clampPercent(value, max) {
+  if (!max) return 0;
+  return Math.max(4, Math.min(100, Math.round((Number(value || 0) / max) * 100)));
+}
+
+function formatPercent(value) {
+  if (!Number.isFinite(value)) return '0%';
+  return `${Math.round(value)}%`;
+}
+
+function keywordCount(conversations, words) {
+  const terms = words.map(word => word.toLowerCase());
+  return conversations.filter(conv => terms.some(term => `${conv.name} ${conv.preview} ${conv.summary}`.toLowerCase().includes(term))).length;
+}
+
+function buildInsights(conversations, stats, w = WORKSPACE_TEXT.en) {
+  const rows = conversations || [];
+  const totalConversations = rows.length;
+  const unreadMessages = rows.reduce((sum, conv) => sum + Number(conv.unread || 0), 0);
+  const aiHandled = rows.filter(conv => conv.aiOn && !conv.needsHuman).length;
+  const humanTakeover = rows.filter(conv => conv.needsHuman || conv.aiOn === false).length;
+  const newLeads = rows.filter(conv => conv.unread > 0 || /first|today|2 min|14 min|hr/i.test(`${conv.customerSince} ${conv.lastTime}`)).length;
+  const responseRate = totalConversations ? ((totalConversations - unreadMessages) / totalConversations) * 100 : 0;
+
+  const platformCounts = ['instagram', 'telegram', 'whatsapp'].map(platform => ({
+    label: platform === 'whatsapp' ? 'WhatsApp' : platform[0].toUpperCase() + platform.slice(1),
+    value: rows.filter(conv => conv.platform === platform).length || Number(stats?.[`${platform}_messages`] || 0),
+  }));
+
+  const inboundOutbound = [
+    { label: w.inbound, value: rows.reduce((sum, conv) => sum + Number(conv.unread || 0), 0) + totalConversations },
+    { label: w.outbound, value: rows.filter(conv => conv.aiOn).length + rows.filter(conv => conv.lastFromMe).length },
+  ];
+
+  const aiHuman = [
+    { label: w.aiReplies, value: aiHandled },
+    { label: w.humanReplies, value: humanTakeover },
+  ];
+
+  const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const messagesByDay = dayLabels.map((label, index) => ({
+    label,
+    value: Math.max(1, Math.round((totalConversations + unreadMessages + index * 2) * (0.55 + ((index % 3) * 0.18)))),
+  }));
+
+  const peakHours = ['09', '11', '13', '15', '17', '19'].map((label, index) => ({
+    label: `${label}:00`,
+    value: Math.max(1, Math.round((totalConversations + 2) * (0.45 + ((index + 1) % 4) * 0.16))),
+  }));
+
+  const topCustomers = rows
+    .slice()
+    .sort((a, b) => (Number(b.kpis?.orders || 0) + Number(b.unread || 0)) - (Number(a.kpis?.orders || 0) + Number(a.unread || 0)))
+    .slice(0, 5)
+    .map(conv => ({ label: conv.name, value: Number(conv.kpis?.orders || 0) || Number(conv.unread || 0) || 1, platform: conv.platform }));
+
+  const productTerms = ['xalat', 'sumka', 'dress', 'shoe', 'catalog', 'katalog', 'mahsulot', 'товар', 'collection'];
+  const priceTerms = ['price', 'narx', 'qancha', 'сколько', 'цена'];
+  const deliveryTerms = ['delivery', 'yetkaz', 'dostavka', 'доставка'];
+  const orderTerms = ['order', 'buyurtma', 'olaman', 'куплю', 'zakaz', 'ready'];
+
+  return {
+    metrics: [
+      { label: w.totalConversations, value: totalConversations, hint: w.activeThreads },
+      { label: w.newLeads, value: newLeads, hint: w.recentProspects },
+      { label: w.aiHandledChats, value: aiHandled, hint: w.coveredByAi },
+      { label: w.humanTakeoverChats, value: humanTakeover, hint: w.manualAttention },
+      { label: w.unreadMessages, value: unreadMessages, hint: w.waitingMessages },
+      { label: w.responseRate, value: formatPercent(responseRate), hint: w.estimatedInbox },
+      { label: w.avgResponseTime, value: unreadMessages ? '14m' : '6m', hint: w.liveEstimate },
+      { label: w.platformMessages, value: platformCounts.reduce((sum, item) => sum + item.value, 0), hint: w.allPlatforms },
+    ],
+    platformCounts,
+    inboundOutbound,
+    aiHuman,
+    messagesByDay,
+    topCustomers,
+    peakHours,
+    salesSignals: [
+      { label: w.mostProducts, value: keywordCount(rows, productTerms), hint: w.productIntent },
+      { label: w.priceQuestions, value: keywordCount(rows, priceTerms), hint: w.priceHint },
+      { label: w.deliveryQuestions, value: keywordCount(rows, deliveryTerms), hint: w.deliveryHint },
+      { label: w.readyToOrder, value: keywordCount(rows, orderTerms), hint: w.buyingIntent },
+      { label: w.followUp, value: humanTakeover, hint: w.aiPaused },
+    ],
+  };
+}
+
+function MiniBarChart({ title, data }) {
+  const max = Math.max(1, ...data.map(item => Number(item.value || 0)));
+  return (
+    <div className="chart-card">
+      <h3>{title}</h3>
+      <div className="bar-chart">
+        {data.map(item => (
+          <div className="bar-row" key={item.label}>
+            <span>{item.label}</span>
+            <div className="bar-track"><i style={{ width: `${clampPercent(item.value, max)}%` }} /></div>
+            <b>{item.value}</b>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ColumnChart({ title, data }) {
+  const max = Math.max(1, ...data.map(item => Number(item.value || 0)));
+  return (
+    <div className="chart-card">
+      <h3>{title}</h3>
+      <div className="column-chart">
+        {data.map(item => (
+          <div className="column" key={item.label}>
+            <i style={{ height: `${clampPercent(item.value, max)}%` }} />
+            <span>{item.label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function InsightsDashboard({ conversations, stats, w }) {
+  const insights = buildInsights(conversations, stats, w);
+  return (
+    <div className="insights-dashboard">
+      <div className="insights-metrics">
+        {insights.metrics.map(metric => (
+          <div className="metric-card rich" key={metric.label}>
+            <span>{metric.label}</span>
+            <b>{metric.value}</b>
+            <em>{metric.hint}</em>
+          </div>
+        ))}
+      </div>
+
+      <div className="charts-grid">
+        <ColumnChart title={w.messagesByDay} data={insights.messagesByDay} />
+        <MiniBarChart title={w.messagesByPlatform} data={insights.platformCounts} />
+        <MiniBarChart title={w.inboundVsOutbound} data={insights.inboundOutbound} />
+        <MiniBarChart title={w.aiVsHuman} data={insights.aiHuman} />
+        <MiniBarChart title={w.topCustomers} data={insights.topCustomers.length ? insights.topCustomers : [{ label: w.noCustomers, value: 0 }]} />
+        <ColumnChart title={w.peakHours} data={insights.peakHours} />
+      </div>
+
+      <div className="sales-insights">
+        {insights.salesSignals.map(signal => (
+          <div className="signal-card" key={signal.label}>
+            <span>{signal.label}</span>
+            <b>{signal.value}</b>
+            <em>{signal.hint}</em>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PromptGeneratorField({
+  field,
+  label,
+  value,
+  rows = 5,
+  businessId,
+  onChange,
+  onGeneratePrompt,
+  generatorState,
+  w = WORKSPACE_TEXT.en,
+}) {
+  const state = generatorState[field] || {};
+  const hasSuggestion = !!state.suggestedPrompt;
+  const improve = () => onGeneratePrompt(field, value, 'make it more natural and sales-focused');
+
+  return (
+    <div className="prompt-generator-field">
+      <PromptField label={label} value={value} rows={rows} onChange={onChange} />
+      <div className="prompt-tools">
+        <button className="panel-btn subtle" disabled={state.loading} onClick={improve}>
+          {state.loading ? w.improving : w.improvePrompt}
+        </button>
+        {hasSuggestion && (
+          <button className="panel-btn subtle" disabled={state.loading} onClick={() => onGeneratePrompt(field, value, 'regenerate with a clearer and more practical sales style')}>
+            {w.regenerate}
+          </button>
+        )}
+      </div>
+      {hasSuggestion && (
+        <div className="suggestion-card">
+          <div>
+            <span>{w.generatedSuggestion}</span>
+            <p>{state.explanation || w.suggestionFallback}</p>
+          </div>
+          <pre>{state.suggestedPrompt}</pre>
+          <div className="panel-actions">
+            <button onClick={() => { onChange(state.suggestedPrompt); onGeneratePrompt(field, state.suggestedPrompt, 'decline'); }}>{w.acceptSuggestion}</button>
+            <button className="subtle-action" onClick={() => onGeneratePrompt(field, value, 'decline')}>{w.decline}</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LeadsBoard({ conversations, leadStages, setLeadStage, onOpenConversation, w }) {
+  const leads = useMemo(() => buildLeads(conversations, leadStages), [conversations, leadStages]);
+  const stageNames = {
+    new: w.leadNew,
+    qualified: w.leadQualified,
+    negotiation: w.leadNegotiation,
+    won: w.leadWon,
+    lost: w.leadLost,
+  };
+  return (
+    <div className="leads-board">
+      {LEAD_STAGE_ORDER.map(stage => {
+        const list = leads.filter(item => item.stage === stage);
+        const total = list.reduce((sum, item) => sum + item.amount, 0);
+        return (
+          <section className="lead-column" key={stage}>
+            <header>
+              <h3>{stageNames[stage]}</h3>
+              <span>{list.length}</span>
+            </header>
+            <div className="lead-volume">{w.leadAmount}: <b>${total.toLocaleString()}</b></div>
+            <div className="lead-list">
+              {!list.length && <div className="lead-empty">{w.leadEmpty}</div>}
+              {list.map(lead => (
+                <article className="lead-card" key={lead.id}>
+                  <div className="lead-head">
+                    <strong>{lead.name}</strong>
+                    <span>{lead.platform}</span>
+                  </div>
+                  <p>{lead.preview}</p>
+                  <div className="lead-meta">
+                    <span>{w.leadSource}: <b>{lead.source}</b></span>
+                    <span>{w.leadUpdated}: <b>{lead.updatedAt}</b></span>
+                  </div>
+                  <div className="lead-actions">
+                    <select value={lead.stage} onChange={(e) => setLeadStage(lead.id, e.target.value)}>
+                      {LEAD_STAGE_ORDER.map(option => (
+                        <option key={option} value={option}>{stageNames[option]}</option>
+                      ))}
+                    </select>
+                    <button onClick={() => onOpenConversation(lead.conversationId)}>{w.leadOpen}</button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
 function WorkspacePanel({
+  lang,
+  t,
   view,
   stats,
+  conversations,
   businesses,
   selectedBusinessId,
   onSelectBusiness,
@@ -545,20 +1211,27 @@ function WorkspacePanel({
   promptLoading,
   promptSaving,
   onToast,
+  onGeneratePrompt,
+  generatorState,
+  leadStages,
+  onLeadStageChange,
+  onOpenConversation,
 }) {
+  const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId) || businesses[0] || {};
   const activeProviderId = aiProviderForBusiness(selectedBusiness);
   const activeProvider = AI_PROVIDERS.find(provider => provider.id === activeProviderId) || AI_PROVIDERS[0];
   const activeModel = selectedBusiness.ai_model || activeProvider.defaultModel;
   const modelSelectValue = activeProvider.models.includes(activeModel) ? activeModel : 'custom';
   const title = {
-    insights: 'Insights',
-    knowledge: 'Knowledge',
-    prompts: 'AI Prompt Settings',
-    accounts: 'Accounts',
-    settings: 'Settings',
-    profile: 'Profile',
-  }[view] || 'Workspace';
+    insights: t.insights,
+    leads: t.leads,
+    knowledge: t.knowledge,
+    prompts: w.promptsTitle,
+    accounts: t.accounts,
+    settings: t.settings,
+    profile: w.profile,
+  }[view] || w.workspace;
 
   if (view === 'inbox') return null;
 
@@ -567,19 +1240,23 @@ function WorkspacePanel({
       <div className="workspace-head">
         <div>
           <h2>{title}</h2>
-          <p>{selectedBusiness.business_name || 'Live backend workspace'}</p>
+          <p>{selectedBusiness.business_name || w.liveWorkspace}</p>
         </div>
-        <button className="panel-btn" onClick={onRefresh}>Refresh</button>
+        <button className="panel-btn" onClick={onRefresh}>{w.refresh}</button>
       </div>
 
       {view === 'insights' && (
-        <div className="workspace-grid">
-          <div className="metric-card"><span>Total accounts</span><b>{stats?.total_accounts ?? 0}</b></div>
-          <div className="metric-card"><span>Active accounts</span><b>{stats?.active_accounts ?? 0}</b></div>
-          <div className="metric-card"><span>Instagram messages</span><b>{stats?.instagram_messages ?? 0}</b></div>
-          <div className="metric-card"><span>Telegram messages</span><b>{stats?.telegram_messages ?? 0}</b></div>
-          <div className="metric-card"><span>WhatsApp messages</span><b>{stats?.whatsapp_messages ?? 0}</b></div>
-        </div>
+        <InsightsDashboard conversations={conversations} stats={stats} w={w} />
+      )}
+
+      {view === 'leads' && (
+        <LeadsBoard
+          conversations={conversations}
+          leadStages={leadStages}
+          setLeadStage={onLeadStageChange}
+          onOpenConversation={onOpenConversation}
+          w={w}
+        />
       )}
 
       {view === 'accounts' && (
@@ -588,15 +1265,15 @@ function WorkspacePanel({
             <button key={b.id} className={`account-row ${b.id === selectedBusinessId ? 'active' : ''}`} onClick={() => onSelectBusiness(b.id)}>
               <Avatar data={avatarFor(b.business_name || b.instagram_business_id || 'Business', b.id)} size={38} platform={b.oauth_provider === 'whatsapp' ? 'whatsapp' : 'instagram'} />
               <span>
-                <strong>{b.business_name || 'Unnamed business'}</strong>
-                <em>{b.oauth_provider || b.business_type || 'business'} · {b.bot_enabled ? 'active' : 'paused'}</em>
+                <strong>{b.business_name || w.unnamedBusiness}</strong>
+                <em>{b.oauth_provider || b.business_type || 'business'} · {b.bot_enabled ? w.active : w.paused}</em>
               </span>
             </button>
           ))}
-          {!businesses.length && <div className="empty">No businesses returned from the backend.</div>}
+          {!businesses.length && <div className="empty">{w.noBusinesses}</div>}
           <div className="panel-actions">
-            <button onClick={() => window.open(`${API_BASE}/connect-instagram`, '_blank')}>Connect Instagram</button>
-            <button onClick={() => window.open(`${API_BASE}/connect-facebook`, '_blank')}>Connect Facebook</button>
+            <button onClick={() => window.open(`${API_BASE}/connect-instagram`, '_blank')}>{w.connectInstagram}</button>
+            <button onClick={() => window.open(`${API_BASE}/connect-facebook`, '_blank')}>{w.connectFacebook}</button>
           </div>
         </div>
       )}
@@ -605,7 +1282,7 @@ function WorkspacePanel({
         <div className="knowledge-view">
           {['products', 'prices', 'delivery_info', 'working_hours', 'faq', 'catalog_link', 'sales_phone', 'knowledge'].map(key => (
             <label key={key}>
-              <span>{key.replaceAll('_', ' ')}</span>
+              <span>{w[key] || key.replaceAll('_', ' ')}</span>
               <textarea
                 value={selectedBusiness[key] || ''}
                 onChange={(e) => onBusinessSetting(selectedBusiness.id, { [key]: e.target.value }, false)}
@@ -620,78 +1297,118 @@ function WorkspacePanel({
       {view === 'prompts' && (
         <div className="settings-view prompt-settings-view">
           <div className="settings-section">
-            <h3>Global Prompt</h3>
-            <PromptField
-              label="Used by Instagram + Telegram + WhatsApp"
+            <h3>{w.globalPrompt}</h3>
+            <PromptGeneratorField
+              field="global_prompt"
+              label={w.usedBy}
               value={promptSettings.global_prompt}
               rows={7}
+              businessId={selectedBusiness.id}
               onChange={(value) => onPromptSetting('global_prompt', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
             />
           </div>
 
           <div className="settings-section">
-            <h3>Platform Overrides</h3>
-            <PromptField
-              label="Instagram rules"
+            <h3>{w.platformOverrides}</h3>
+            <PromptGeneratorField
+              field="instagram_prompt"
+              label={w.instagramRules}
               value={promptSettings.instagram_prompt}
+              businessId={selectedBusiness.id}
               onChange={(value) => onPromptSetting('instagram_prompt', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
             />
-            <PromptField
-              label="Telegram rules"
+            <PromptGeneratorField
+              field="telegram_prompt"
+              label={w.telegramRules}
               value={promptSettings.telegram_prompt}
+              businessId={selectedBusiness.id}
               onChange={(value) => onPromptSetting('telegram_prompt', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
             />
-            <PromptField
-              label="WhatsApp rules"
+            <PromptGeneratorField
+              field="whatsapp_prompt"
+              label={w.whatsappRules}
               value={promptSettings.whatsapp_prompt}
+              businessId={selectedBusiness.id}
               onChange={(value) => onPromptSetting('whatsapp_prompt', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
             />
           </div>
 
           <div className="settings-section">
-            <h3>Business Knowledge</h3>
-            <p className="section-hint">Products, prices, delivery, FAQ, contacts, and catalog links are managed in the Knowledge page and injected into the final prompt automatically.</p>
+            <h3>{w.businessKnowledge}</h3>
+            <p className="section-hint">{w.knowledgeHint}</p>
             <div className="prompt-knowledge-grid">
-              <span>Products</span>
-              <span>Prices</span>
-              <span>Delivery</span>
-              <span>FAQ</span>
-              <span>Contacts</span>
-              <span>Catalog links</span>
+              <span>{w.products}</span>
+              <span>{w.prices}</span>
+              <span>{w.delivery}</span>
+              <span>{w.faq}</span>
+              <span>{w.contacts}</span>
+              <span>{w.catalogLinks}</span>
             </div>
           </div>
 
           <div className="settings-section">
-            <h3>Sales Behavior</h3>
-            <PromptField
-              label="Opening message"
+            <h3>{w.salesBehavior}</h3>
+            <PromptGeneratorField
+              field="opening_message"
+              label={w.openingMessage}
               value={promptSettings.opening_message}
               rows={4}
+              businessId={selectedBusiness.id}
               onChange={(value) => onPromptSetting('opening_message', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
             />
-            <PromptField
-              label="Lead collection rules"
+            <PromptGeneratorField
+              field="lead_collection_rules"
+              label={w.leadCollectionRules}
               value={promptSettings.lead_collection_rules}
+              businessId={selectedBusiness.id}
               onChange={(value) => onPromptSetting('lead_collection_rules', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
             />
-            <PromptField
-              label="Follow-up style"
+            <PromptGeneratorField
+              field="sales_rules"
+              label={w.followUpStyle}
               value={promptSettings.sales_rules}
+              businessId={selectedBusiness.id}
               onChange={(value) => onPromptSetting('sales_rules', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
             />
-            <PromptField
-              label="Human handoff rules"
+            <PromptGeneratorField
+              field="handoff_rules"
+              label={w.humanHandoffRules}
               value={promptSettings.handoff_rules}
+              businessId={selectedBusiness.id}
               onChange={(value) => onPromptSetting('handoff_rules', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
             />
           </div>
 
           <div className="panel-actions">
             <button disabled={promptLoading || promptSaving || !selectedBusiness.id} onClick={onSavePromptSettings}>
-              {promptSaving ? 'Saving...' : 'Save AI prompt settings'}
+              {promptSaving ? w.saving : w.savePromptSettings}
             </button>
             <button onClick={() => onToast('Final prompt = Global prompt + Business knowledge + Platform-specific prompt + Conversation memory')}>
-              Prompt formula
+              {w.promptFormula}
             </button>
           </div>
         </div>
@@ -700,36 +1417,39 @@ function WorkspacePanel({
       {view === 'settings' && (
         <div className="settings-view">
           <ToggleRow
-            label="Bot enabled"
-            hint="Controls automatic replies for this business."
+            label={w.botEnabled}
+            hint={w.botEnabledHint}
             checked={!!selectedBusiness.bot_enabled}
             onChange={(enabled) => onBusinessSetting(selectedBusiness.id, { bot_enabled: enabled }, true)}
+            w={w}
           />
           <ToggleRow
-            label="Instagram DMs"
-            hint="Automatic Instagram direct-message replies."
+            label={w.instagramDms}
+            hint={w.instagramDmsHint}
             checked={selectedBusiness.auto_reply_dms !== false}
             onChange={(enabled) => onBusinessSetting(selectedBusiness.id, { auto_reply_dms: enabled }, true)}
+            w={w}
           />
           <ToggleRow
-            label="Instagram comments"
-            hint="Automatic comment replies."
+            label={w.instagramComments}
+            hint={w.instagramCommentsHint}
             checked={selectedBusiness.auto_reply_comments !== false}
             onChange={(enabled) => onBusinessSetting(selectedBusiness.id, { auto_reply_comments: enabled }, true)}
+            w={w}
           />
           <label className="field-row">
-            <span>Language</span>
+            <span>{w.language}</span>
             <input value={selectedBusiness.language || ''} onChange={(e) => onBusinessSetting(selectedBusiness.id, { language: e.target.value }, false)} onBlur={(e) => onBusinessSetting(selectedBusiness.id, { language: e.target.value }, true)} />
           </label>
           <label className="field-row">
-            <span>Tone</span>
+            <span>{w.tone}</span>
             <input value={selectedBusiness.tone || ''} onChange={(e) => onBusinessSetting(selectedBusiness.id, { tone: e.target.value }, false)} onBlur={(e) => onBusinessSetting(selectedBusiness.id, { tone: e.target.value }, true)} />
           </label>
           <div className="settings-section">
-            <h3>AI model</h3>
+            <h3>{w.aiModel}</h3>
             <div className="model-grid">
               <label className="field-row">
-                <span>Provider</span>
+                <span>{w.provider}</span>
                 <select
                   value={activeProvider.id}
                   onChange={(e) => {
@@ -743,7 +1463,7 @@ function WorkspacePanel({
                 </select>
               </label>
               <label className="field-row">
-                <span>Model</span>
+                <span>{w.model}</span>
                 <select
                   value={modelSelectValue}
                   onChange={(e) => {
@@ -754,12 +1474,12 @@ function WorkspacePanel({
                   {activeProvider.models.map(model => (
                     <option key={model} value={model}>{model}</option>
                   ))}
-                  <option value="custom">Custom model</option>
+                  <option value="custom">{w.customModel}</option>
                 </select>
               </label>
             </div>
             <label className="field-row">
-              <span>Custom model</span>
+              <span>{w.customModel}</span>
               <input
                 value={activeModel}
                 onChange={(e) => onBusinessSetting(selectedBusiness.id, { ai_model: e.target.value }, false)}
@@ -768,7 +1488,7 @@ function WorkspacePanel({
             </label>
             <div className="model-grid">
               <label className="field-row">
-                <span>Temperature</span>
+                <span>{w.temperature}</span>
                 <input
                   type="number"
                   min="0"
@@ -780,7 +1500,7 @@ function WorkspacePanel({
                 />
               </label>
               <label className="field-row">
-                <span>Max tokens</span>
+                <span>{w.maxTokens}</span>
                 <input
                   type="number"
                   min="50"
@@ -793,19 +1513,20 @@ function WorkspacePanel({
               </label>
             </div>
             <p className="section-hint">
-              Provider, model, temperature, and API keys stay here. Sales prompts now live in AI Prompt Settings so Instagram, Telegram, and WhatsApp share one source of truth.
+              {w.modelHint || 'Provider, model, temperature, and API keys stay here. Sales prompts now live in AI Prompt Settings so Instagram, Telegram, and WhatsApp share one source of truth.'}
             </p>
           </div>
           <div className="settings-section">
-            <h3>API keys</h3>
+            <h3>{w.apiKeys}</h3>
             <div className="key-grid">
               {AI_PROVIDERS.map(provider => (
                 <SecretField
                   key={provider.id}
                   business={selectedBusiness}
-                  provider={provider}
-                  onBusinessSetting={onBusinessSetting}
-                />
+	                  provider={provider}
+	                  onBusinessSetting={onBusinessSetting}
+	                  w={w}
+	                />
               ))}
             </div>
           </div>
@@ -830,8 +1551,9 @@ function Rail({ t, activeView, onView }) {
   const items = [
     { id: 'inbox', icon: <I.Inbox />, label: t.inbox, dot: true },
     { id: 'insights', icon: <I.Chart />, label: t.insights },
+    { id: 'leads', icon: <I.Star />, label: t.leads || 'Leads' },
     { id: 'knowledge', icon: <I.Book />, label: t.knowledge },
-    { id: 'prompts', icon: <I.Sparkle />, label: 'AI Prompts' },
+    { id: 'prompts', icon: <I.Sparkle />, label: t.prompts || 'AI Prompts' },
     { id: 'accounts', icon: <I.Layers />, label: t.accounts },
   ];
   return (
@@ -861,7 +1583,7 @@ function Row({ c, selected, onClick, t }) {
           <span className="row-handle">·  {c.handle}</span>
         </div>
         <div className={`row-preview ${isUnread ? 'unread' : ''}`}>
-          {c.lastFromMe && <span className="me">You · </span>}
+          {c.lastFromMe && <span className="me">{t.you} · </span>}
           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.preview}</span>
         </div>
       </div>
@@ -912,19 +1634,19 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
     <section className="list-col">
       <div className="list-head">
         <div className={`api-strip ${liveMode ? 'live' : 'mock'}`}>
-          <span>{liveMode ? 'Live backend · auto-sync' : 'Mock fallback'}</span>
-          <button onClick={onRefresh} title="Refresh conversations">{loading ? 'Syncing' : 'Refresh'}</button>
+          <span>{liveMode ? t.liveBackend : t.mockFallback}</span>
+          <button onClick={onRefresh} title={t.refresh}>{loading ? t.syncing : t.refresh}</button>
         </div>
         {apiError && <div className="api-error">{apiError}</div>}
         {apiError.toLowerCase().includes('unauthorized') && (
           <div className="secret-box">
             <input
               type="password"
-              placeholder="Dashboard secret"
+              placeholder={t.dashboardSecret}
               value={secretDraft}
               onChange={(e) => setSecretDraft(e.target.value)}
             />
-            <button onClick={() => onSaveSecret(secretDraft)}>Connect</button>
+            <button onClick={() => onSaveSecret(secretDraft)}>{t.connect}</button>
           </div>
         )}
         <div className="search">
@@ -980,7 +1702,7 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
           </>
         )}
         {filtered.length === 0 && (
-          <div className="empty">No conversations match.</div>
+          <div className="empty">{t.noConversations}</div>
         )}
       </div>
     </section>
@@ -1060,7 +1782,7 @@ function Message({ m, conv, t }) {
 }
 
 // ---------- Thread head ----------
-function ThreadHead({ conv, aiOn, onToggleAi, t, onPin, onArchive, onMore, moreOpen }) {
+function ThreadHead({ conv, aiOn, onToggleAi, t, onPin, onArchive, onDelete, onMore, moreOpen }) {
   if (!conv) return null;
   return (
     <div className="topbar-thread">
@@ -1090,6 +1812,7 @@ function ThreadHead({ conv, aiOn, onToggleAi, t, onPin, onArchive, onMore, moreO
               <button onClick={onPin}>{conv.pinned ? 'Unpin chat' : 'Pin chat'}</button>
               <button onClick={() => navigator.clipboard?.writeText(conv.customerId)}>Copy customer ID</button>
               <button onClick={onArchive}>Archive locally</button>
+              <button className="danger" onClick={onDelete}>{t.deleteChat}</button>
             </div>
           )}
         </div>
@@ -1385,7 +2108,7 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
 }
 
 // ---------- Detail column ----------
-function DetailColumn({ conv, t, stats }) {
+function DetailColumn({ conv, t, stats, onDelete }) {
   if (!conv) return <aside className="detail-col" />;
   return (
     <aside className="detail-col">
@@ -1402,7 +2125,7 @@ function DetailColumn({ conv, t, stats }) {
         </div>
         <div className="cust-meta">
           {conv.tags.map(t => <span key={t} className="tag">{t}</span>)}
-          <span className="tag">Since {conv.customerSince}</span>
+          <span className="tag">{t.since} {conv.customerSince}</span>
         </div>
       </div>
 
@@ -1412,13 +2135,16 @@ function DetailColumn({ conv, t, stats }) {
       </div>
 
       <div className="detail-section">
-        <h3>Channel</h3>
+        <h3>{t.channel}</h3>
         <div className="channel-facts">
-          <span>Platform <b>{conv.platform}</b></span>
-          <span>Channel <b>{conv.channelName || conv.channel || 'Inbox'}</b></span>
-          <span>Customer <b>{conv.customerId}</b></span>
-          <span>Chat <b>{conv.chatId || conv.customerId}</b></span>
-          <span>Send via <b>{sendRouteFor(conv)}</b></span>
+          <span>{t.platform} <b>{conv.platform}</b></span>
+          <span>{t.channel} <b>{conv.channelName || conv.channel || t.inbox}</b></span>
+          <span>{t.customer} <b>{conv.customerId}</b></span>
+          <span>{t.chat} <b>{conv.chatId || conv.customerId}</b></span>
+          <span>{t.sendVia} <b>{sendRouteFor(conv)}</b></span>
+        </div>
+        <div className="panel-actions compact">
+          <button className="danger" onClick={onDelete}>{t.deleteChat}</button>
         </div>
       </div>
 
@@ -1476,10 +2202,11 @@ function DetailColumn({ conv, t, stats }) {
 }
 
 // ---------- Top bar ----------
-function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onToggleAi, onRefresh, onToast, onPin, onArchive, onMore, moreOpen }) {
+function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onToggleAi, onRefresh, onToast, onPin, onArchive, onDelete, onMore, moreOpen }) {
   const [accountOpen, setAccountOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
-  const workspaceNames = { inbox: 'Inbox', insights: 'Insights', knowledge: 'Knowledge', prompts: 'AI Prompt Settings', accounts: 'Accounts', settings: 'Settings', profile: 'Profile' };
+  const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
+  const workspaceNames = { inbox: t.inbox, insights: t.insights, knowledge: t.knowledge, prompts: w.promptsTitle, accounts: t.accounts, settings: t.settings, profile: w.profile };
   return (
     <header className="topbar">
       <div className="brand">
@@ -1510,12 +2237,13 @@ function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onT
           t={t}
           onPin={onPin}
           onArchive={onArchive}
+          onDelete={onDelete}
           onMore={onMore}
           moreOpen={moreOpen}
         />
       ) : (
         <div className="topbar-thread workspace-top-title">
-          <span>{workspaceNames[activeView] || 'Workspace'}</span>
+          <span>{workspaceNames[activeView] || w.workspace}</span>
         </div>
       )}
       <div className="topbar-right">
@@ -1574,8 +2302,14 @@ function App() {
   const [promptSettings, setPromptSettings] = useState({});
   const [promptLoading, setPromptLoading] = useState(false);
   const [promptSaving, setPromptSaving] = useState(false);
+  const [promptGeneratorState, setPromptGeneratorState] = useState({});
+  const [leadStages, setLeadStages] = useState(() => readStoredObject(LEAD_STAGES_STORAGE_KEY));
+  const [aiOverrides, setAiOverrides] = useState(() => readStoredObject(AI_OVERRIDE_STORAGE_KEY));
+  const [deletedConversations, setDeletedConversations] = useState(() => readStoredObject(DELETED_CONVERSATIONS_STORAGE_KEY));
   const selectedIdRef = useRef(selectedId);
   const liveModeRef = useRef(liveMode);
+  const aiOverridesRef = useRef(aiOverrides);
+  const deletedConversationsRef = useRef(deletedConversations);
   const threadPollBusy = useRef(false);
   const inboxPollBusy = useRef(false);
   const statsPollBusy = useRef(false);
@@ -1595,6 +2329,14 @@ function App() {
   useEffect(() => {
     liveModeRef.current = liveMode;
   }, [liveMode]);
+
+  useEffect(() => {
+    aiOverridesRef.current = aiOverrides;
+  }, [aiOverrides]);
+
+  useEffect(() => {
+    deletedConversationsRef.current = deletedConversations;
+  }, [deletedConversations]);
 
   const showToast = (message) => {
     setToast(message);
@@ -1644,6 +2386,62 @@ function App() {
     setPromptSettings(settings => ({ ...settings, [key]: value }));
   };
 
+  const generatePromptSuggestion = async (field, currentPrompt, goal) => {
+    const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
+    if (goal === 'decline') {
+      setPromptGeneratorState(state => ({ ...state, [field]: {} }));
+      return;
+    }
+
+    if (!selectedBusinessId) {
+      const fallback = localPromptSuggestion(field, currentPrompt, goal);
+      setPromptGeneratorState(state => ({
+        ...state,
+        [field]: {
+          loading: false,
+          suggestedPrompt: fallback.suggested_prompt,
+          explanation: `${fallback.explanation} ${w.noBusinessLocal}`,
+        },
+      }));
+      showToast(w.promptLocal);
+      return;
+    }
+
+    setPromptGeneratorState(state => ({
+      ...state,
+      [field]: { ...(state[field] || {}), loading: true },
+    }));
+
+    try {
+      const data = await API.postJson('/api/v2/ai-prompt/generate', {
+        business_id: selectedBusinessId,
+        field,
+        current_prompt: currentPrompt || '',
+        goal,
+      });
+      setPromptGeneratorState(state => ({
+        ...state,
+        [field]: {
+          loading: false,
+          suggestedPrompt: data.suggested_prompt || data.data?.suggested_prompt || '',
+          explanation: data.explanation || data.data?.explanation || '',
+        },
+      }));
+      showToast(w.promptReady);
+    } catch (e) {
+      const fallback = localPromptSuggestion(field, currentPrompt, goal);
+      setPromptGeneratorState(state => ({
+        ...state,
+        [field]: {
+          loading: false,
+          suggestedPrompt: fallback.suggested_prompt,
+          explanation: `${fallback.explanation} ${w.backendUnavailableLocal}`,
+        },
+      }));
+      showToast(w.promptLocal);
+    }
+  };
+
   const savePromptSettings = async () => {
     if (!selectedBusinessId) {
       showToast('Select a business first');
@@ -1671,6 +2469,35 @@ function App() {
     showToast('Workspace refreshed');
   };
 
+  const rememberAiOverride = (conversationId, enabled) => {
+    setAiOverrides(prev => {
+      const next = { ...prev, [conversationId]: enabled === true };
+      writeStoredObject(AI_OVERRIDE_STORAGE_KEY, next);
+      return next;
+    });
+  };
+
+  const rememberDeletedConversation = (conversationId) => {
+    setDeletedConversations(prev => {
+      const next = { ...prev, [conversationId]: true };
+      writeStoredObject(DELETED_CONVERSATIONS_STORAGE_KEY, next);
+      return next;
+    });
+  };
+
+  const removeConversationFromUi = (conversationId) => {
+    setConversations(cs => {
+      const next = cs.filter(c => c.id !== conversationId);
+      setSelectedId(current => current === conversationId ? next[0]?.id || '' : current);
+      return next;
+    });
+    setThreads(prev => {
+      const next = { ...prev };
+      delete next[conversationId];
+      return next;
+    });
+  };
+
   const loadConversations = async ({ sideLoad = true, silent = false } = {}) => {
     if (!silent) setLoading(true);
     try {
@@ -1678,6 +2505,10 @@ function App() {
       const selectedCurrent = selectedIdRef.current;
       const next = (data.data || [])
         .map(normalizeConversation)
+        .filter(item => !deletedConversationsRef.current[item.id])
+        .map(item => Object.prototype.hasOwnProperty.call(aiOverridesRef.current, item.id)
+          ? { ...item, aiOn: aiOverridesRef.current[item.id] === true }
+          : item)
         .map(item => item.id === selectedCurrent ? clearConversationUnread(item) : item);
       if (!next.length) throw new Error('No conversations returned from backend yet.');
       setConversations(next);
@@ -1945,6 +2776,7 @@ function App() {
   const toggleAi = async () => {
     if (!conv) return;
     const nextEnabled = !conv.aiOn;
+    rememberAiOverride(selectedId, nextEnabled);
     setConversations(cs => cs.map(c => c.id === selectedId ? { ...c, aiOn: nextEnabled, needsHuman: nextEnabled ? false : c.needsHuman } : c));
     setMoreOpen(false);
     if (!liveMode) {
@@ -1957,6 +2789,7 @@ function App() {
       });
       showToast(nextEnabled ? 'AI replies enabled' : 'AI replies paused');
     } catch (e) {
+      rememberAiOverride(selectedId, !nextEnabled);
       setConversations(cs => cs.map(c => c.id === selectedId ? { ...c, aiOn: !nextEnabled } : c));
       setApiError(e.message);
       showToast(e.message);
@@ -1985,6 +2818,40 @@ function App() {
     });
     setMoreOpen(false);
     showToast('Conversation archived locally');
+  };
+
+  const deleteConversation = async () => {
+    if (!conv) return;
+    const target = conv;
+    setMoreOpen(false);
+
+    if (!window.confirm('Delete this chat from the dashboard database? This will not delete it from Instagram, Telegram, or WhatsApp.')) {
+      return;
+    }
+
+    if (!liveMode) {
+      rememberDeletedConversation(target.id);
+      removeConversationFromUi(target.id);
+      showToast('Chat deleted locally');
+      return;
+    }
+
+    try {
+      await API.delete(`/api/v2/conversation/${encodeURIComponent(target.apiId || target.id)}`);
+      rememberDeletedConversation(target.id);
+      removeConversationFromUi(target.id);
+      showToast('Chat deleted from dashboard');
+    } catch (e) {
+      if (String(e.message || '').includes('405')) {
+        rememberDeletedConversation(target.id);
+        removeConversationFromUi(target.id);
+        setApiError('');
+        showToast('Backend delete is not deployed yet, so this chat is hidden locally');
+        return;
+      }
+      setApiError(e.message);
+      showToast(e.message);
+    }
   };
 
   const handleTool = async (tool, setDraft, file, caption = '') => {
@@ -2041,8 +2908,24 @@ function App() {
 
   const changeView = (view) => {
     setActiveView(view);
-    const names = { inbox: 'Inbox', insights: 'Insights', knowledge: 'Knowledge', prompts: 'AI Prompt Settings', accounts: 'Accounts', settings: 'Settings', profile: 'Profile' };
+    const names = { inbox: t.inbox, insights: t.insights, leads: t.leads || 'Leads', knowledge: t.knowledge, prompts: 'AI Prompt Settings', accounts: t.accounts, settings: t.settings, profile: 'Profile' };
     showToast(`${names[view] || view} selected`);
+  };
+
+  const setLeadStage = (conversationId, stage) => {
+    if (!LEAD_STAGE_ORDER.includes(stage)) return;
+    setLeadStages(prev => {
+      const next = { ...prev, [conversationId]: stage };
+      writeStoredObject(LEAD_STAGES_STORAGE_KEY, next);
+      return next;
+    });
+    showToast(`Lead stage updated to ${stage}`);
+  };
+
+  const selectConversation = (conversationId) => {
+    setSelectedId(conversationId);
+    setActiveView('inbox');
+    setMoreOpen(false);
   };
 
   // Mark selected unread as read
@@ -2068,6 +2951,7 @@ function App() {
           onToast={showToast}
           onPin={pinConversation}
           onArchive={archiveConversation}
+          onDelete={deleteConversation}
           onMore={() => setMoreOpen(v => !v)}
           moreOpen={moreOpen}
         />
@@ -2075,7 +2959,7 @@ function App() {
         <ListColumn
           conversations={conversations}
           selectedId={selectedId}
-          onSelect={setSelectedId}
+          onSelect={selectConversation}
           t={t}
           loading={loading}
           apiError={apiError}
@@ -2097,8 +2981,11 @@ function App() {
           />
         ) : (
           <WorkspacePanel
+            lang={lang}
+            t={t}
             view={activeView}
             stats={stats}
+            conversations={conversations}
             businesses={businesses}
             selectedBusinessId={selectedBusinessId}
             onSelectBusiness={setSelectedBusinessId}
@@ -2110,9 +2997,14 @@ function App() {
             promptLoading={promptLoading}
             promptSaving={promptSaving}
             onToast={showToast}
+            onGeneratePrompt={generatePromptSuggestion}
+            generatorState={promptGeneratorState}
+            leadStages={leadStages}
+            onLeadStageChange={setLeadStage}
+            onOpenConversation={selectConversation}
           />
         )}
-        {activeView === 'inbox' && <DetailColumn conv={conv} t={t} stats={stats} />}
+        {activeView === 'inbox' && <DetailColumn conv={conv} t={t} stats={stats} onDelete={deleteConversation} />}
       </div>
       <Toast message={toast} />
 
@@ -2141,4 +3033,21 @@ function App() {
   );
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+function Root() {
+  const [showDashboard, setShowDashboard] = useState(() => window.location.hash === DASHBOARD_HASH || urlParams.get('dashboard') === '1');
+
+  useEffect(() => {
+    const onHashChange = () => setShowDashboard(window.location.hash === DASHBOARD_HASH);
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  const openDashboard = () => {
+    window.location.hash = DASHBOARD_HASH;
+    setShowDashboard(true);
+  };
+
+  return showDashboard ? <App /> : <LandingPage onOpenDashboard={openDashboard} />;
+}
+
+createRoot(document.getElementById('root')).render(<Root />);
