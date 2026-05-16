@@ -855,10 +855,39 @@ def telegram_user_media_mime(message):
     if mime_type:
         return mime_type
 
+    if getattr(message, "voice", None):
+        return "audio/ogg"
+    if getattr(message, "video", None) or getattr(message, "video_note", None):
+        return "video/mp4"
     if getattr(message, "photo", None):
         return "image/jpeg"
 
     return "application/octet-stream"
+
+
+def parse_http_range(range_header: str, total_size: int):
+    if not range_header or not range_header.startswith("bytes="):
+        return None
+    try:
+        value = range_header.replace("bytes=", "", 1).strip()
+        if "-" not in value:
+            return None
+        start_s, end_s = value.split("-", 1)
+        if start_s == "":
+            suffix = int(end_s)
+            if suffix <= 0:
+                return None
+            start = max(0, total_size - suffix)
+            end = total_size - 1
+            return start, end
+        start = int(start_s)
+        end = int(end_s) if end_s else total_size - 1
+        if start < 0 or end < start:
+            return None
+        end = min(end, total_size - 1)
+        return start, end
+    except Exception:
+        return None
 
 
 def buffer_message(buffer_store, buffer_key, text):
@@ -920,6 +949,7 @@ async def get_telegram_user_media(
     message_id: str,
     token: str = "",
     x_dashboard_secret: str = Header(default=""),
+    range_header: str = Header(default="", alias="Range"),
 ):
     if DASHBOARD_SECRET and token != DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET:
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
@@ -941,10 +971,29 @@ async def get_telegram_user_media(
         if not media_bytes:
             return JSONResponse({"status": "error", "message": "Telegram media download failed"}, status_code=404)
 
+        mime = telegram_user_media_mime(message)
+        total = len(media_bytes)
+        byte_range = parse_http_range(range_header, total)
+        common_headers = {
+            "Cache-Control": "private, max-age=3600",
+            "Accept-Ranges": "bytes",
+            "Content-Type": mime,
+        }
+
+        if byte_range is not None:
+            start, end = byte_range
+            chunk = media_bytes[start:end + 1]
+            headers = {
+                **common_headers,
+                "Content-Range": f"bytes {start}-{end}/{total}",
+                "Content-Length": str(len(chunk)),
+            }
+            return Response(content=chunk, media_type=mime, status_code=206, headers=headers)
+
         return Response(
             content=media_bytes,
-            media_type=telegram_user_media_mime(message),
-            headers={"Cache-Control": "private, max-age=3600"},
+            media_type=mime,
+            headers={**common_headers, "Content-Length": str(total)},
         )
 
     except Exception as exc:
