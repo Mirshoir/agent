@@ -523,6 +523,18 @@ def extract_date(timestamp: str) -> str:
         return "unknown"
 
 
+def telegram_user_media_proxy_url(customer_id: str, message_id: str) -> str:
+    customer_id = normalize_id(customer_id)
+    message_id = normalize_id(message_id)
+    if not customer_id or not message_id:
+        return ""
+
+    base = f"/api/telegram-user-media/{customer_id}/{message_id}"
+    if DASHBOARD_SECRET:
+        return f"{base}?token={DASHBOARD_SECRET}"
+    return base
+
+
 def transform_message_to_react(row: dict) -> dict:
     """Transform database message row to React UI format"""
     message = {
@@ -534,12 +546,36 @@ def transform_message_to_react(row: dict) -> dict:
 
     media_type = row.get('media_type')
     content = row.get('content', '')
+    platform = normalize_id(row.get("platform")).lower()
+    channel = standard_channel(platform, row.get("channel", ""))
+    customer_id = normalize_id(row.get("customer_id"))
+    external_message_id = normalize_id(row.get("external_message_id"))
+    media_url = row.get("media_url") or ""
+
+    # Telegram user client media is often stored without direct media_url.
+    # Build proxy URL from customer_id + external_message_id so browser can stream it.
+    if (
+        not media_url
+        and platform == "telegram"
+        and channel == "telegram_user_private"
+        and media_type in ("photo", "video", "voice", "audio", "file")
+        and customer_id
+        and external_message_id
+    ):
+        media_url = telegram_user_media_proxy_url(customer_id, external_message_id)
 
     if media_type:
         message['type'] = 'media'
         message['label'] = media_type
         message['mediaCaption'] = content
-        message['mediaUrl'] = row.get('media_url', '')
+        message['mediaUrl'] = media_url
+        # Keep raw identity fields so frontend can reconstruct fallback media URLs when needed.
+        message['media_type'] = media_type
+        message['media_url'] = media_url
+        message['platform'] = platform
+        message['channel'] = channel
+        message['customer_id'] = customer_id
+        message['external_message_id'] = external_message_id
     else:
         message['type'] = 'text'
         message['text'] = content
