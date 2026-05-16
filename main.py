@@ -529,7 +529,19 @@ def telegram_user_media_proxy_url(customer_id: str, message_id: str) -> str:
     if not customer_id or not message_id:
         return ""
 
-    base = f"/api/telegram-user-media/{customer_id}/{message_id}"
+    base_root = (PUBLIC_BASE_URL or "").rstrip("/")
+    base = f"{base_root}/api/telegram-user-media/{customer_id}/{message_id}" if base_root else f"/api/telegram-user-media/{customer_id}/{message_id}"
+    if DASHBOARD_SECRET:
+        return f"{base}?token={DASHBOARD_SECRET}"
+    return base
+
+
+def telegram_bot_media_proxy_url(file_id: str) -> str:
+    file_id = normalize_id(file_id)
+    if not file_id:
+        return ""
+    base_root = (PUBLIC_BASE_URL or "").rstrip("/")
+    base = f"{base_root}/api/telegram-bot-media/{file_id}" if base_root else f"/api/telegram-bot-media/{file_id}"
     if DASHBOARD_SECRET:
         return f"{base}?token={DASHBOARD_SECRET}"
     return base
@@ -550,6 +562,7 @@ def transform_message_to_react(row: dict) -> dict:
     channel = standard_channel(platform, row.get("channel", ""))
     customer_id = normalize_id(row.get("customer_id"))
     external_message_id = normalize_id(row.get("external_message_id"))
+    media_file_id = normalize_id(row.get("media_file_id"))
     media_url = row.get("media_url") or ""
 
     # Telegram user client media is often stored without direct media_url.
@@ -564,6 +577,11 @@ def transform_message_to_react(row: dict) -> dict:
     ):
         media_url = telegram_user_media_proxy_url(customer_id, external_message_id)
 
+    # Fallback for legacy Telegram rows where external_message_id is missing,
+    # but file_id was stored (common for bot API updates and some migrations).
+    if not media_url and platform == "telegram" and media_file_id:
+        media_url = telegram_bot_media_proxy_url(media_file_id)
+
     if media_type:
         message['type'] = 'media'
         message['label'] = media_type
@@ -576,6 +594,7 @@ def transform_message_to_react(row: dict) -> dict:
         message['channel'] = channel
         message['customer_id'] = customer_id
         message['external_message_id'] = external_message_id
+        message['media_file_id'] = media_file_id
     else:
         message['type'] = 'text'
         message['text'] = content
@@ -1034,12 +1053,15 @@ Ask for phone/address only after the customer is clearly ready to order.
 - Answer the exact question first.
 - Ask only one follow-up question at a time.
 - Keep replies short and comfortable: usually 1-3 short sentences.
+- For price questions ("narx", "nechpul", "qancha", "цена", "сколько"), answer price directly first if known.
 - Do not ask for phone number or address at the beginning.
 - Do not repeat product names every message.
 - Do not over-focus on only the product the customer first mentioned if they are still choosing.
 - Avoid corporate phrases like "manager will contact you" unless the customer asks for a human or is ready to order.
 - Do not overload the customer with all business information at once.
 - Do not repeat the same request or paragraph.
+- Do not repeat the same question the customer already answered.
+- If customer says they cannot buy now, stop selling and close politely in one short line.
 - If the customer is annoyed, says the bot is bad, or asks to stop, reply very briefly and do not sell.
 - Focus on helping the customer choose and buy.
 """.strip(),
@@ -1522,6 +1544,17 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     ]):
         return "Tushundim 👍 Oddiyroq va qisqa javob beraman."
 
+    if any(phrase in user for phrase in [
+        "ololmayapman",
+        "ololmayman",
+        "qarzga",
+        "hozircha olmayman",
+        "hozircha yo'q",
+        "keyinroq",
+        "pul yo'q",
+    ]):
+        return "Tushunarli 😊 Muammo emas, qachon qulay bo'lsa yozing."
+
     text = normalize_id(reply_text)
     if not text:
         return "Xabaringiz qabul qilindi 😊"
@@ -1554,6 +1587,20 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
         text = re.sub(re.escape(phrase), "", text, flags=re.IGNORECASE)
 
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    # Keep at most one question per reply to avoid interrogation loops.
+    question_count = text.count("?")
+    if question_count > 1:
+        first_q = text.find("?")
+        tail = text[first_q + 1:]
+        tail = tail.replace("?", ".")
+        text = text[:first_q + 1] + tail
+
+    # If customer asked price but reply has no numeric price hint, force concise pricing follow-up.
+    price_ask = any(k in user for k in ["narx", "nechpul", "qancha", "цена", "сколько", "price"])
+    has_number = bool(re.search(r"\d", text))
+    if price_ask and not has_number:
+        text = "Narxni aniq aytishim uchun model yoki variantni yozing 😊"
 
     if len(text) > 500:
         text = text[:500].rsplit(" ", 1)[0].strip()
@@ -1593,7 +1640,7 @@ def get_recent_platform_chat_history(platform: str, business: dict, customer_id:
 def get_ai_reply(user_text: str, business: dict, platform: str = "instagram", customer_id: str = "", channel: str = ""):
     try:
         messages = [{"role": "system", "content": build_sales_system_prompt(business, platform)}]
-        messages.extend(get_recent_platform_chat_history(platform, business, customer_id, channel, limit=10))
+        messages.extend(get_recent_platform_chat_history(platform, business, customer_id, channel, limit=8))
         messages.append({"role": "user", "content": user_text})
 
         reply = call_ai_chat(
@@ -2446,6 +2493,42 @@ async def api_health():
     }
 
 
+@app.get("/api/health/deep")
+async def api_health_deep(
+        token: str = "",
+        x_dashboard_secret: str = Header(default=""),
+):
+    if require_dashboard_media_secret(token, x_dashboard_secret):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    checks = {}
+
+    try:
+        supabase.table("businesses").select("id").limit(1).execute()
+        checks["supabase"] = "ok"
+    except Exception as exc:
+        checks["supabase"] = f"error: {exc}"
+
+    checks["telegram_bot_token"] = "ok" if os.getenv("TELEGRAM_BOT_TOKEN", "") else "missing"
+    checks["telegram_user_client"] = "configured" if (
+        os.getenv("TELEGRAM_API_ID", "")
+        and os.getenv("TELEGRAM_API_HASH", "")
+        and os.getenv("TELEGRAM_USER_SESSION", "")
+    ) else "missing_env"
+    checks["whatsapp_access_token"] = "ok" if WHATSAPP_ACCESS_TOKEN else "missing"
+
+    healthy = (
+        checks["supabase"] == "ok"
+        and checks["telegram_bot_token"] == "ok"
+    )
+
+    return {
+        "status": "ok" if healthy else "degraded",
+        "version": "5.1.1-telegram-media-fallback",
+        "checks": checks,
+    }
+
+
 # ============================================================================
 # API ROUTES - V2 (REACT UI)
 # ============================================================================
@@ -2997,6 +3080,51 @@ async def get_whatsapp_media(
         content=file_res.content,
         media_type=file_res.headers.get("Content-Type", "application/octet-stream"),
     )
+
+
+@app.get("/api/telegram-bot-media/{file_id}")
+async def get_telegram_bot_media(
+        file_id: str,
+        token: str = "",
+        x_dashboard_secret: str = Header(default=""),
+):
+    if require_dashboard_media_secret(token, x_dashboard_secret):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    if not TELEGRAM_BOT_TOKEN:
+        return JSONResponse({"status": "error", "message": "Missing TELEGRAM_BOT_TOKEN"}, status_code=400)
+
+    try:
+        meta_res = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
+            params={"file_id": file_id},
+            timeout=30,
+        )
+        if not meta_res.ok:
+            return JSONResponse({"status": "error", "message": meta_res.text}, status_code=meta_res.status_code)
+
+        file_path = (meta_res.json().get("result") or {}).get("file_path")
+        if not file_path:
+            return JSONResponse({"status": "error", "message": "file_path not found"}, status_code=404)
+
+        file_res = requests.get(
+            f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}",
+            timeout=60,
+        )
+        if not file_res.ok:
+            return JSONResponse({"status": "error", "message": file_res.text}, status_code=file_res.status_code)
+
+        return Response(
+            content=file_res.content,
+            media_type=file_res.headers.get("Content-Type", "application/octet-stream"),
+            headers={
+                "Cache-Control": "private, max-age=3600",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(len(file_res.content)),
+            },
+        )
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
 # ============================================================================
