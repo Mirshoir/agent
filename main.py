@@ -229,6 +229,13 @@ class AIPromptSettingsUpdate(BaseModel):
     settings: dict
 
 
+class AIPromptGenerateRequest(BaseModel):
+    business_id: str
+    field: str
+    current_prompt: str = ""
+    goal: str = "make it more natural and sales-focused"
+
+
 class ManualWhatsAppReply(BaseModel):
     business_id: str = ""
     customer_id: str
@@ -260,10 +267,55 @@ def safe_token(token: str) -> str:
 
 
 def safe_json(res):
+    if res is None:
+        return {}
     try:
         return res.json()
     except Exception:
         return {"text": res.text}
+
+
+def standard_channel(platform: str, channel: str = "") -> str:
+    platform = normalize_id(platform).lower()
+    channel = normalize_id(channel).lower()
+    if platform == "instagram":
+        return "dm" if channel in ("", "instagram", "instagram_dm") else channel
+    if platform == "whatsapp":
+        return "whatsapp"
+    if platform == "telegram":
+        if channel in ("private", "telegram_bot", "telegram_bot_dm"):
+            return "telegram_bot_private"
+        if channel in ("user", "telegram_user"):
+            return "telegram_user_private"
+        return channel or "telegram_bot_private"
+    return channel or platform
+
+
+def instagram_reply_window_closed(result: dict) -> bool:
+    error = result.get("error") if isinstance(result, dict) else {}
+    if not isinstance(error, dict):
+        error = {}
+
+    code = error.get("code") or result.get("code") or result.get("error_code")
+    subcode = (
+        error.get("error_subcode")
+        or error.get("subcode")
+        or result.get("error_subcode")
+        or result.get("subcode")
+    )
+
+    return str(code) == "10" and str(subcode) == "2534022"
+
+
+def send_failure_response(result: dict, default_message: str = "Failed to send message"):
+    message = default_message
+    if instagram_reply_window_closed(result or {}):
+        message = "Instagram reply window is closed. Ask the customer to send a new DM first."
+
+    return JSONResponse(
+        {"status": "error", "message": message, "details": result or {}},
+        status_code=400,
+    )
 
 
 def decode_upload_data(file_data: str, max_bytes: int = 10 * 1024 * 1024):
@@ -706,6 +758,8 @@ def sanitize_business_row(row: dict):
 
 def is_chat_ai_enabled(platform, channel, customer_id, business_id=None):
     try:
+        platform = normalize_id(platform).lower()
+        channel = standard_channel(platform, channel)
         query = (
             supabase.table("chat_ai_settings")
             .select("ai_enabled")
@@ -727,6 +781,8 @@ def is_chat_ai_enabled(platform, channel, customer_id, business_id=None):
 
 
 def set_chat_ai_enabled(business_id, platform, channel, customer_id, enabled):
+    platform = normalize_id(platform).lower()
+    channel = standard_channel(platform, channel)
     data = {
         "business_id": business_id,
         "platform": platform,
@@ -746,6 +802,8 @@ def mark_conversation_read_in_db(conversation_id: str):
         raise ValueError("Invalid conversation ID")
 
     platform, business_id, channel, customer_id = parts
+    platform = normalize_id(platform).lower()
+    channel = standard_channel(platform, channel)
 
     query = (
         supabase.table("inbox_messages")
@@ -789,7 +847,7 @@ def save_inbox_message(
             "platform": platform,
             "customer_id": normalize_id(customer_id),
             "customer_name": customer_name or normalize_id(customer_id),
-            "channel": channel or ("dm" if platform == "instagram" else platform),
+            "channel": standard_channel(platform, channel),
             "direction": direction,
             "role": "user" if direction == "inbound" else "assistant",
             "content": message_text or "",
@@ -883,7 +941,8 @@ DEFAULT_AI_PROMPT_SETTINGS = {
 You are a real human sales assistant for this business.
 Sound like a real Uzbek seller on Instagram, Telegram, or WhatsApp, not customer support software.
 Represent the company clearly, answer in the customer's language, and guide the customer toward the next useful buying step.
-Keep replies short, warm, practical, and human.
+Keep replies short, warm, practical, and human. Ask one question at a time.
+Do not sound corporate, do not over-explain, and do not repeat the product name in every message.
 """.strip(),
     "instagram_prompt": """
 Instagram rules:
@@ -918,6 +977,10 @@ Ask for phone/address only after the customer is clearly ready to order.
 - Answer the exact question first.
 - Ask only one follow-up question at a time.
 - Keep replies short and comfortable: usually 1-3 short sentences.
+- Do not ask for phone number or address at the beginning.
+- Do not repeat product names every message.
+- Do not over-focus on only the product the customer first mentioned if they are still choosing.
+- Avoid corporate phrases like "manager will contact you" unless the customer asks for a human or is ready to order.
 - Do not overload the customer with all business information at once.
 - Do not repeat the same request or paragraph.
 - If the customer is annoyed, says the bot is bad, or asks to stop, reply very briefly and do not sell.
@@ -992,6 +1055,111 @@ def upsert_ai_prompt_settings(business_id: str, settings: dict) -> dict:
         on_conflict="business_id",
     ).execute()
     return get_ai_prompt_settings(business_id)
+
+
+PROMPT_FIELD_LABELS = {
+    "global_prompt": "global prompt",
+    "instagram_prompt": "Instagram rules",
+    "telegram_prompt": "Telegram rules",
+    "whatsapp_prompt": "WhatsApp rules",
+    "opening_message": "opening message",
+    "lead_collection_rules": "lead collection rules",
+    "sales_rules": "sales rules",
+    "handoff_rules": "human handoff rules",
+}
+
+
+def fallback_prompt_suggestion(field: str, current_prompt: str = "", goal: str = "") -> dict:
+    label = PROMPT_FIELD_LABELS.get(field, "prompt")
+    current_words = re.findall(r"[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼ']{4,}", current_prompt or "")
+    product_hint = current_words[0] if current_words else "customer request"
+
+    if field == "opening_message":
+        return {
+            "suggested_prompt": "Assalomu alaykum 😊 Qanday yordam kerak?",
+            "explanation": "Made the opening short and natural, without asking for phone or address too early.",
+        }
+
+    suggested_prompt = "\n".join([
+        f"{label.title()}:",
+        "- Reply shortly, warmly, and naturally in the customer's language.",
+        "- First answer the customer's question, then ask only one simple follow-up question.",
+        "- Do not ask for phone number or address at the beginning.",
+        "- Ask for phone/address only when the customer is clearly ready to order.",
+        f"- Do not repeat {product_hint!r} or any product name in every message.",
+        "- Never invent price, stock, delivery time, discounts, or availability.",
+        "- Avoid corporate phrases like 'manager will contact you' unless the customer asks for a human or is ready to order.",
+        "- If the customer is annoyed, reply calmly and briefly before continuing.",
+        f"- Main improvement goal: {goal}." if goal else "",
+    ]).strip()
+
+    return {
+        "suggested_prompt": suggested_prompt,
+        "explanation": "Made it shorter, clearer, safer for sales replies, and aligned with Instaagent standards.",
+    }
+
+
+def generate_ai_prompt_suggestion(business: dict, field: str, current_prompt: str, goal: str) -> dict:
+    field = normalize_id(field)
+    if field not in AI_PROMPT_SETTING_FIELDS:
+        raise ValueError("Invalid prompt field")
+
+    fallback = fallback_prompt_suggestion(field, current_prompt, goal)
+    business_for_generation = {
+        **business,
+        "ai_temperature": 0.35,
+        "ai_max_tokens": max(450, int(business.get("ai_max_tokens", 130) or 130)),
+    }
+
+    messages = [
+        {
+            "role": "system",
+            "content": """
+You are Instaagent's prompt generator for non-technical business agents.
+Rewrite weak sales-bot instructions into a professional prompt section.
+
+Always follow Instaagent standards:
+- short natural replies
+- same language as customer
+- one question at a time
+- no repeated product names
+- no phone/address at beginning
+- no invented price, stock, delivery, discount, address, or availability
+- no corporate language like "manager will contact you" unless truly needed
+- handle angry customers calmly
+- good for Instagram, Telegram, and WhatsApp
+
+Return only the improved prompt text. Do not include markdown fences or explanations.
+""".strip(),
+        },
+        {
+            "role": "user",
+            "content": f"""
+Business name: {business.get("business_name", "")}
+Prompt field: {PROMPT_FIELD_LABELS.get(field, field)}
+Agent goal: {goal}
+
+Current prompt:
+{current_prompt or "(empty)"}
+
+Write a better prompt section that a sales assistant bot can follow.
+""".strip(),
+        },
+    ]
+
+    try:
+        reply = clean_sales_reply(call_ai_chat(messages, business_for_generation, "AI prompt generator"), "")
+    except Exception as exc:
+        log("Prompt generator failed", str(exc))
+        reply = ""
+
+    if not reply:
+        return fallback
+
+    return {
+        "suggested_prompt": reply,
+        "explanation": "Made it shorter, clearer, and safer for natural sales replies.",
+    }
 
 
 def build_prompt_business_knowledge(business: dict) -> str:
@@ -1354,7 +1522,8 @@ def get_recent_platform_chat_history(platform: str, business: dict, customer_id:
         if channel:
             query = query.eq("channel", channel)
 
-        rows = query.order("created_at", desc=False).limit(limit).execute().data or []
+        rows = query.order("created_at", desc=True).limit(limit).execute().data or []
+        rows = list(reversed(rows))
         return [
             {"role": row.get("role") or "user", "content": row.get("content") or ""}
             for row in rows
@@ -2246,8 +2415,8 @@ async def get_conversations_v2(
         conversations_map = {}
         for row in rows:
             business_id = row.get("business_id")
-            platform_name = row.get("platform", "instagram")
-            channel = row.get("channel", "")
+            platform_name = normalize_id(row.get("platform", "instagram")).lower() or "instagram"
+            channel = standard_channel(platform_name, row.get("channel", ""))
             customer_id = str(row.get("customer_id") or "").strip()
 
             if not business_id or not customer_id:
@@ -2306,6 +2475,8 @@ async def get_conversation_messages_v2(
             )
 
         platform, business_id, channel, customer_id = parts
+        platform = normalize_id(platform).lower()
+        channel = standard_channel(platform, channel)
 
         query = (
             supabase.table("inbox_messages")
@@ -2324,11 +2495,17 @@ async def get_conversation_messages_v2(
         messages = [transform_message_to_react(row) for row in rows]
 
         try:
-            supabase.table("inbox_messages").update({"is_read": True}).eq(
-                "platform", platform
-            ).eq("business_id", business_id).eq(
-                "customer_id", str(customer_id)
-            ).eq("direction", "inbound").execute()
+            mark_query = (
+                supabase.table("inbox_messages")
+                .update({"is_read": True})
+                .eq("platform", platform)
+                .eq("business_id", business_id)
+                .eq("customer_id", str(customer_id))
+                .eq("direction", "inbound")
+            )
+            if channel:
+                mark_query = mark_query.eq("channel", channel)
+            mark_query.execute()
         except Exception:
             pass
 
@@ -2374,6 +2551,8 @@ async def send_message_v2(
             )
 
         platform, business_id, channel, customer_id = parts
+        platform = normalize_id(platform).lower()
+        channel = standard_channel(platform, channel)
 
         business = get_business_by_id(business_id)
         if not business:
@@ -2425,10 +2604,7 @@ async def send_message_v2(
 
         if not ok:
             log("Message send failed", result)
-            return JSONResponse(
-                {"error": "Failed to send message", "details": result},
-                status_code=400
-            )
+            return send_failure_response(result)
 
         save_inbox_message(
             business=business,
@@ -2471,6 +2647,8 @@ async def toggle_ai_v2(
             )
 
         platform, business_id, channel, customer_id = parts
+        platform = normalize_id(platform).lower()
+        channel = standard_channel(platform, channel)
 
         payload = await request.json()
         enabled = payload.get("enabled", True)
@@ -2497,6 +2675,56 @@ async def toggle_ai_v2(
         )
 
 
+@app.delete("/api/v2/conversation/{conversation_id}")
+async def delete_conversation_v2(
+        conversation_id: str,
+        x_dashboard_secret: str = Header(default=""),
+):
+    """Delete a dashboard conversation from inbox_messages only."""
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    try:
+        parts = conversation_id.split("::")
+        if len(parts) != 4:
+            return JSONResponse(
+                {"error": "Invalid conversation ID format"},
+                status_code=400
+            )
+
+        platform, business_id, channel, customer_id = parts
+        platform = normalize_id(platform).lower()
+        channel = standard_channel(platform, channel)
+
+        query = (
+            supabase.table("inbox_messages")
+            .delete()
+            .eq("platform", platform)
+            .eq("business_id", business_id)
+            .eq("customer_id", str(customer_id))
+        )
+
+        if channel:
+            query = query.eq("channel", channel)
+
+        result = query.execute()
+        deleted = len(result.data or [])
+
+        return {
+            "status": "ok",
+            "conversation_id": conversation_id,
+            "deleted_messages": deleted,
+            "note": "Deleted from dashboard database only.",
+        }
+
+    except Exception as e:
+        log("Error deleting conversation", str(e))
+        return JSONResponse(
+            {"status": "error", "message": str(e)},
+            status_code=500
+        )
+
+
 @app.get("/api/v2/conversation/{conversation_id}")
 async def get_conversation_details_v2(
         conversation_id: str,
@@ -2515,6 +2743,8 @@ async def get_conversation_details_v2(
             )
 
         platform, business_id, channel, customer_id = parts
+        platform = normalize_id(platform).lower()
+        channel = standard_channel(platform, channel)
 
         business = get_business_by_id(business_id)
 
@@ -3121,8 +3351,8 @@ async def api_get_conversations(platform: str = "all", search: str = "", x_dashb
 
         for row in rows:
             business_id = row.get("business_id")
-            plat = row.get("platform", "instagram")
-            channel = row.get("channel", "")
+            plat = normalize_id(row.get("platform", "instagram")).lower() or "instagram"
+            channel = standard_channel(plat, row.get("channel", ""))
             customer_id = str(row.get("customer_id") or "").strip()
 
             if not business_id or not customer_id:
@@ -3179,6 +3409,8 @@ async def api_get_conversation_messages(conversation_id: str, limit: int = 250,
             return JSONResponse({"status": "error", "message": "Invalid conversation ID"}, status_code=400)
 
         platform, business_id, channel, customer_id = parts
+        platform = normalize_id(platform).lower()
+        channel = standard_channel(platform, channel)
 
         query = (
             supabase.table("inbox_messages")
@@ -3233,6 +3465,8 @@ async def api_send_message(
 
     try:
         platform, biz_id, channel, customer_id = conversation_id.split("::")
+        platform = normalize_id(platform).lower()
+        channel = standard_channel(platform, channel)
         business = get_business_by_id(biz_id)
 
         if not business:
@@ -3283,7 +3517,10 @@ async def api_send_message(
                 channel=channel,
             )
 
-        return {"status": "ok" if ok else "error", "meta": result}
+        if not ok:
+            return send_failure_response(result)
+
+        return {"status": "ok", "meta": result}
 
     except Exception as e:
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
@@ -3332,6 +3569,34 @@ async def api_get_ai_prompt_settings(business_id: str, x_dashboard_secret: str =
         return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
 
     return {"status": "ok", "data": get_ai_prompt_settings(business_id)}
+
+
+@app.post("/api/v2/ai-prompt/generate")
+async def api_generate_ai_prompt(body: AIPromptGenerateRequest, x_dashboard_secret: str = Header(default="")):
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    business = get_business_by_id(body.business_id)
+    if not business:
+        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
+
+    try:
+        result = generate_ai_prompt_suggestion(
+            business=business,
+            field=body.field,
+            current_prompt=body.current_prompt,
+            goal=body.goal,
+        )
+        return {
+            "ok": True,
+            "suggested_prompt": result["suggested_prompt"],
+            "explanation": result["explanation"],
+        }
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
+    except Exception as exc:
+        log("Could not generate prompt suggestion", str(exc))
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
 @app.post("/api/ai-prompt-settings")
