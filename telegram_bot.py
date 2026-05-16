@@ -19,6 +19,7 @@ telegram_router = APIRouter()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "").lower().replace("@", "")
+TELEGRAM_GROUP_REPLY_MODE = os.getenv("TELEGRAM_GROUP_REPLY_MODE", "all").strip().lower()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "")
 
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID", "")
@@ -69,6 +70,26 @@ def log(title, data=None):
 
 def normalize_text(value):
     return str(value or "").strip()
+
+
+def should_reply_in_group(message):
+    """
+    Group reply modes:
+    - all: reply to all user messages in groups/supergroups
+    - mention_or_reply: reply only when mentioned/replied to
+    """
+    mode = TELEGRAM_GROUP_REPLY_MODE or "all"
+    if mode == "all":
+        return True
+
+    text = normalize_text(message.get("text")).lower()
+    mention = f"@{TELEGRAM_BOT_USERNAME}" if TELEGRAM_BOT_USERNAME else ""
+    has_mention = bool(mention and mention in text)
+
+    reply_from = (message.get("reply_to_message") or {}).get("from") or {}
+    replied_to_bot = is_own_or_any_bot_user(reply_from)
+
+    return has_mention or replied_to_bot
 
 
 def already_processed(cache, event_id, ttl=3600):
@@ -257,7 +278,8 @@ DEFAULT_AI_PROMPT_SETTINGS = {
         "You are a real human sales assistant for this business. "
         "Sound like a real Uzbek Telegram seller, not customer support software. "
         "Represent the company clearly, answer in the customer's language, and guide the customer toward the next useful buying step. "
-        "Keep every reply short, natural, and human."
+        "Keep every reply short, natural, and human. Ask one question at a time. "
+        "Do not repeat product names in every message or sound corporate."
     ),
     "telegram_prompt": (
         "Telegram rules:\n"
@@ -276,6 +298,10 @@ DEFAULT_AI_PROMPT_SETTINGS = {
     "sales_rules": (
         "Answer the exact question first. Ask only one follow-up question at a time. "
         "Keep replies short and comfortable: usually 1-3 short sentences. "
+        "Do not ask for phone number or address at the beginning. "
+        "Do not repeat product names every message. "
+        "Do not over-focus on only the product the customer first mentioned if they are still choosing. "
+        "Avoid corporate phrases like 'manager will contact you' unless the customer asks for a human or is ready to order. "
         "Do not repeat the same request or paragraph. "
         "If the customer is annoyed, apologizes, says the bot is bad, or asks to stop, reply very briefly and do not sell."
     ),
@@ -369,7 +395,8 @@ def get_recent_chat_history(customer_id, platform="telegram", channel=None, limi
         if channel:
             query = query.eq("channel", channel)
 
-        return query.order("created_at", desc=False).limit(limit).execute().data or []
+        rows = query.order("created_at", desc=True).limit(limit).execute().data or []
+        return list(reversed(rows))
 
     except Exception as exc:
         log("Could not load Telegram history", str(exc))
@@ -438,6 +465,7 @@ Platform-specific rules:
 
 Safety rules:
 - Reply in the same language as the customer.
+- Ask one question at a time.
 - Never invent prices, stock, delivery, discounts, addresses, or availability.
 - Use only the business facts above.
 - If information is missing, ask one short clarifying question first.
@@ -955,15 +983,7 @@ async def telegram_webhook(request: Request):
         if not business:
             return JSONResponse({"status": "no_business"})
 
-        if chat_type in ["group", "supergroup"]:
-            mention = f"@{TELEGRAM_BOT_USERNAME}"
-            replied_to_bot = (
-                message.get("reply_to_message", {})
-                .get("from", {})
-                .get("is_bot", False)
-            )
-
-            if mention not in (message.get("text") or "").lower() and not replied_to_bot:
+        if chat_type in ["group", "supergroup"] and not should_reply_in_group(message):
                 return JSONResponse({"status": "ignored_group_message"})
 
         channel = "telegram_bot_group" if chat_type in ["group", "supergroup"] else "telegram_bot_private"
