@@ -971,10 +971,13 @@ async def telegram_webhook(request: Request):
 
         chat_id = chat.get("id")
         chat_type = chat.get("type", "private")
-        customer_id = user.get("id") or chat_id
+        is_group_chat = chat_type in ["group", "supergroup"]
+        sender_id = user.get("id") or chat_id
+        # Use chat_id as conversation identity for groups so one group = one dashboard thread.
+        customer_id = chat_id if is_group_chat else sender_id
         message_id = message.get("message_id")
 
-        event_id = f"bot:{chat_id}:{customer_id}:{message_id}"
+        event_id = f"bot:{chat_id}:{sender_id}:{message_id}"
 
         if already_processed(PROCESSED_BOT_MESSAGES, event_id):
             return JSONResponse({"status": "duplicate"})
@@ -983,16 +986,18 @@ async def telegram_webhook(request: Request):
         if not business:
             return JSONResponse({"status": "no_business"})
 
-        if chat_type in ["group", "supergroup"] and not should_reply_in_group(message):
+        if is_group_chat and not should_reply_in_group(message):
                 return JSONResponse({"status": "ignored_group_message"})
 
-        channel = "telegram_bot_group" if chat_type in ["group", "supergroup"] else "telegram_bot_private"
+        channel = "telegram_bot_group" if is_group_chat else "telegram_bot_private"
         customer_name = build_customer_name(user)
+        conversation_name = normalize_text(chat.get("title")) if is_group_chat else customer_name
 
         text = normalize_text(message.get("text"))
 
         if text:
-            buffer_key = f"bot:{chat_id}:{customer_id}"
+            # Keep per-sender buffering in groups so two users talking at once do not merge together.
+            buffer_key = f"bot:{chat_id}:{sender_id}"
             buffer_message(MESSAGE_BUFFER, buffer_key, text)
 
             combined_text = await pop_buffer_if_ready(MESSAGE_BUFFER, buffer_key, wait_seconds=2)
@@ -1008,7 +1013,7 @@ async def telegram_webhook(request: Request):
                 message_id=message_id,
                 raw_payload=update,
                 channel=channel,
-                customer_name=customer_name,
+                customer_name=conversation_name or customer_name,
                 chat_id=chat_id,
             )
 
@@ -1036,7 +1041,7 @@ async def telegram_webhook(request: Request):
                 message_id=safe_json(send_result).get("result", {}).get("message_id", ""),
                 raw_payload=safe_json(send_result),
                 channel=channel,
-                customer_name=customer_name,
+                customer_name=conversation_name or customer_name,
                 chat_id=chat_id,
             )
 
