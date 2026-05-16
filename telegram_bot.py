@@ -297,12 +297,15 @@ DEFAULT_AI_PROMPT_SETTINGS = {
     ),
     "sales_rules": (
         "Answer the exact question first. Ask only one follow-up question at a time. "
+        "For price questions ('narx', 'nechpul', 'qancha', 'цена', 'сколько'), answer price directly first if known. "
         "Keep replies short and comfortable: usually 1-3 short sentences. "
         "Do not ask for phone number or address at the beginning. "
         "Do not repeat product names every message. "
         "Do not over-focus on only the product the customer first mentioned if they are still choosing. "
         "Avoid corporate phrases like 'manager will contact you' unless the customer asks for a human or is ready to order. "
         "Do not repeat the same request or paragraph. "
+        "Do not repeat the same question the customer already answered. "
+        "If customer says they cannot buy now, stop selling and close politely in one short line. "
         "If the customer is annoyed, apologizes, says the bot is bad, or asks to stop, reply very briefly and do not sell."
     ),
     "handoff_rules": (
@@ -615,6 +618,17 @@ def clean_sales_reply(reply_text, user_text=""):
     ]):
         return "Tushundim 👍 Oddiyroq va qisqa javob beraman."
 
+    if any(phrase in user for phrase in [
+        "ololmayapman",
+        "ololmayman",
+        "qarzga",
+        "hozircha olmayman",
+        "hozircha yo'q",
+        "keyinroq",
+        "pul yo'q",
+    ]):
+        return "Tushunarli 😊 Muammo emas, qachon qulay bo'lsa yozing."
+
     text = normalize_text(reply_text)
     if not text:
         return "Assalomu alaykum 😊 Qanday yordam kerak?"
@@ -648,6 +662,18 @@ def clean_sales_reply(reply_text, user_text=""):
 
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
+    question_count = text.count("?")
+    if question_count > 1:
+        first_q = text.find("?")
+        tail = text[first_q + 1:]
+        tail = tail.replace("?", ".")
+        text = text[:first_q + 1] + tail
+
+    price_ask = any(k in user for k in ["narx", "nechpul", "qancha", "цена", "сколько", "price"])
+    has_number = bool(re.search(r"\d", text))
+    if price_ask and not has_number:
+        text = "Narxni aniq aytishim uchun model yoki variantni yozing 😊"
+
     if len(text) > 500:
         text = text[:500].rsplit(" ", 1)[0].strip()
 
@@ -658,6 +684,7 @@ def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private
         customer_id=customer_id,
         platform="telegram",
         channel=channel,
+        limit=8,
     )
 
     messages = [{"role": "system", "content": build_telegram_system_prompt(business)}]
