@@ -368,6 +368,90 @@ def set_chat_ai_enabled(business_id, platform, channel, customer_id, enabled):
         )
 
 
+def normalized_platform_channel(platform, channel, chat_id=""):
+    p = str(platform or "").strip().lower() or "instagram"
+    ch = str(channel or "").strip().lower()
+    chat = str(chat_id or "").strip()
+
+    if p == "instagram":
+        return "instagram", "dm"
+    if p == "whatsapp":
+        return "whatsapp", "whatsapp"
+    if p == "telegram":
+        if "group" in ch or chat.startswith("-"):
+            return "telegram", "telegram_bot_group"
+        if ch == "telegram_user_private":
+            return "telegram", "telegram_user_private"
+        return "telegram", "telegram_bot_private"
+    return p, ch
+
+
+def is_telegram_group(platform, channel, chat_id):
+    p = str(platform or "").lower()
+    ch = str(channel or "").lower()
+    chat = str(chat_id or "")
+    return p == "telegram" and ("group" in ch or chat.startswith("-"))
+
+
+def conversation_identity_from_row(row):
+    business_id = row.get("business_id")
+    platform, channel = normalized_platform_channel(
+        row.get("platform"),
+        row.get("channel"),
+        row.get("chat_id"),
+    )
+    customer_id = str(row.get("customer_id") or "").strip()
+    chat_id = str(row.get("chat_id") or "").strip()
+
+    if is_telegram_group(platform, channel, chat_id):
+        thread_scope = "group"
+        thread_id = chat_id
+        ai_customer_key = chat_id
+        ai_channel = "telegram_group"
+    else:
+        thread_scope = "private"
+        thread_id = customer_id
+        ai_customer_key = customer_id
+        if platform == "telegram":
+            ai_channel = "telegram_private"
+        elif platform == "instagram":
+            ai_channel = "dm"
+        elif platform == "whatsapp":
+            ai_channel = "whatsapp"
+        else:
+            ai_channel = channel or ""
+
+    conversation_id = f"{business_id}::{platform}::{thread_scope}::{thread_id}"
+    return {
+        "business_id": business_id,
+        "platform": platform,
+        "channel": channel,
+        "customer_id": customer_id,
+        "chat_id": chat_id or customer_id,
+        "thread_scope": thread_scope,
+        "thread_id": thread_id,
+        "conversation_id": conversation_id,
+        "ai_customer_key": ai_customer_key,
+        "ai_channel": ai_channel,
+    }
+
+
+def get_chat_ai_enabled_for_conversation(conversation):
+    business_id = conversation["business_id"]
+    platform = conversation["platform"]
+    ai_channel = conversation.get("ai_channel", conversation.get("channel") or "")
+    ai_customer_key = conversation.get("ai_customer_key") or conversation["customer_id"]
+    return get_chat_ai_enabled(business_id, platform, ai_channel, ai_customer_key)
+
+
+def set_chat_ai_enabled_for_conversation(conversation, enabled):
+    business_id = conversation["business_id"]
+    platform = conversation["platform"]
+    ai_channel = conversation.get("ai_channel", conversation.get("channel") or "")
+    ai_customer_key = conversation.get("ai_customer_key") or conversation["customer_id"]
+    return set_chat_ai_enabled(business_id, platform, ai_channel, ai_customer_key, enabled)
+
+
 def get_social_conversations(business_ids, platform_filter="all", search_text="", limit=900):
     if not business_ids:
         return []
@@ -393,18 +477,24 @@ def get_social_conversations(business_ids, platform_filter="all", search_text=""
     conversations = {}
 
     for row in rows:
-        business_id = row.get("business_id")
-        platform = row.get("platform", "instagram")
-        channel = row.get("channel", "")
-        customer_id = str(row.get("customer_id") or "").strip()
+        identity = conversation_identity_from_row(row)
+        business_id = identity["business_id"]
+        platform = identity["platform"]
+        channel = identity["channel"]
+        customer_id = identity["customer_id"]
+        chat_id = identity["chat_id"]
+        thread_scope = identity["thread_scope"]
+        thread_id = identity["thread_id"]
+        key = identity["conversation_id"]
 
-        if not business_id or not customer_id:
+        if not business_id or not thread_id:
             continue
 
-        key = f"{platform}::{business_id}::{channel}::{customer_id}"
-
         if platform == "telegram":
-            fallback_name = f"Telegram Client {customer_id[-4:]}"
+            if thread_scope == "group":
+                fallback_name = f"Telegram Group {thread_id[-6:]}"
+            else:
+                fallback_name = f"Telegram Client {customer_id[-4:]}"
         elif platform == "whatsapp":
             fallback_name = f"WhatsApp Client {customer_id[-4:]}"
         else:
@@ -412,12 +502,16 @@ def get_social_conversations(business_ids, platform_filter="all", search_text=""
 
         if key not in conversations:
             conversations[key] = {
-                "conversation_id": key,
+                "conversation_id": identity["conversation_id"],
                 "business_id": business_id,
                 "platform": platform,
                 "channel": channel,
                 "customer_id": customer_id,
-                "chat_id": str(row.get("chat_id") or customer_id),
+                "chat_id": chat_id,
+                "thread_scope": thread_scope,
+                "thread_id": thread_id,
+                "ai_channel": identity["ai_channel"],
+                "ai_customer_key": identity["ai_customer_key"],
                 "customer_name": row.get("customer_name") or fallback_name,
                 "last_message": row.get("content", ""),
                 "last_message_at": row.get("created_at", ""),
@@ -468,6 +562,39 @@ def get_conversation_messages(business_id, customer_id, platform, channel, limit
         return []
 
 
+def get_conversation_messages_for_conversation(conversation, limit=250):
+    try:
+        business_id = conversation["business_id"]
+        platform = conversation["platform"]
+        thread_scope = conversation.get("thread_scope", "private")
+        customer_id = str(conversation.get("customer_id") or "")
+        chat_id = str(conversation.get("chat_id") or customer_id)
+
+        query = (
+            supabase.table("inbox_messages")
+            .select("*")
+            .eq("platform", platform)
+            .eq("business_id", business_id)
+        )
+
+        if platform == "telegram" and thread_scope == "group":
+            query = query.eq("chat_id", chat_id)
+        else:
+            query = query.eq("customer_id", customer_id)
+
+        return (
+            query.order("created_at", desc=False)
+            .limit(limit)
+            .execute()
+            .data
+            or []
+        )
+
+    except Exception as e:
+        st.error(f"Could not load conversation: {e}")
+        return []
+
+
 def mark_conversation_read(business_id, customer_id, platform, channel):
     try:
         query = (
@@ -484,6 +611,32 @@ def mark_conversation_read(business_id, customer_id, platform, channel):
 
         query.execute()
 
+    except Exception:
+        pass
+
+
+def mark_conversation_read_for_conversation(conversation):
+    try:
+        business_id = conversation["business_id"]
+        platform = conversation["platform"]
+        thread_scope = conversation.get("thread_scope", "private")
+        customer_id = str(conversation.get("customer_id") or "")
+        chat_id = str(conversation.get("chat_id") or customer_id)
+
+        query = (
+            supabase.table("inbox_messages")
+            .update({"is_read": True})
+            .eq("platform", platform)
+            .eq("business_id", business_id)
+            .eq("direction", "inbound")
+        )
+
+        if platform == "telegram" and thread_scope == "group":
+            query = query.eq("chat_id", chat_id)
+        else:
+            query = query.eq("customer_id", customer_id)
+
+        query.execute()
     except Exception:
         pass
 
@@ -538,11 +691,13 @@ def send_instagram_dm_from_backend(business_id, customer_id, text):
     return response.ok, data
 
 
-def send_telegram_message_from_backend(customer_id, text):
+def send_telegram_message_from_backend(customer_id, text, chat_id=None):
+    target_chat_id = str(chat_id or customer_id)
     response = requests.post(
         f"{BACKEND_URL}/dashboard/send-telegram-message",
         json={
             "customer_id": str(customer_id),
+            "chat_id": target_chat_id,
             "text": text,
         },
         headers={"x-dashboard-secret": DASHBOARD_SECRET},
@@ -580,12 +735,13 @@ def send_message_by_platform(conversation, text):
     platform = conversation["platform"]
     business_id = conversation["business_id"]
     customer_id = conversation["customer_id"]
+    chat_id = conversation.get("chat_id") or customer_id
 
     if platform == "instagram":
         return send_instagram_dm_from_backend(business_id, customer_id, text)
 
     if platform == "telegram":
-        return send_telegram_message_from_backend(customer_id, text)
+        return send_telegram_message_from_backend(customer_id, text, chat_id=chat_id)
 
     if platform == "whatsapp":
         return send_whatsapp_message_from_backend(customer_id, text)
@@ -777,12 +933,7 @@ def render_social_inbox(businesses):
                 ):
                     st.session_state["selected_conversation_id"] = conv["conversation_id"]
                     st.session_state["selected_conversation"] = conv
-                    mark_conversation_read(
-                        conv["business_id"],
-                        conv["customer_id"],
-                        conv["platform"],
-                        conv["channel"],
-                    )
+                    mark_conversation_read_for_conversation(conv)
                     st.rerun()
 
     with right:
@@ -809,12 +960,7 @@ def render_social_inbox(businesses):
             unsafe_allow_html=True,
         )
 
-        ai_enabled = get_chat_ai_enabled(
-            conv["business_id"],
-            conv["platform"],
-            conv["channel"],
-            conv["customer_id"],
-        )
+        ai_enabled = get_chat_ai_enabled_for_conversation(conv)
 
         new_ai_enabled = st.toggle(
             f"AI auto-reply for this {conv['platform']} chat",
@@ -823,22 +969,11 @@ def render_social_inbox(businesses):
         )
 
         if new_ai_enabled != ai_enabled:
-            set_chat_ai_enabled(
-                conv["business_id"],
-                conv["platform"],
-                conv["channel"],
-                conv["customer_id"],
-                new_ai_enabled,
-            )
+            set_chat_ai_enabled_for_conversation(conv, new_ai_enabled)
             st.success("AI setting updated.")
             st.rerun()
 
-        messages = get_conversation_messages(
-            conv["business_id"],
-            conv["customer_id"],
-            conv["platform"],
-            conv["channel"],
-        )
+        messages = get_conversation_messages_for_conversation(conv)
 
         st.divider()
 
