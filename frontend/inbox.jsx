@@ -82,7 +82,6 @@ const STATS_POLL_MS = 20000;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
 const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
-const LANDING_LOGO = '/brand/milana-premium-logo.png';
 const DASHBOARD_HASH = '#dashboard';
 const UI_LANG_STORAGE_KEY = 'instaagent_ui_lang';
 
@@ -420,7 +419,6 @@ function LandingPage({ onOpenDashboard, lang, setLang }) {
     <main className="landing-page">
       <nav className="landing-nav">
         <a className="landing-brand" href="#top">
-          <img src={LANDING_LOGO} alt="Milana Premium logo" />
           <span>{l.appName}</span>
         </a>
         <div className="landing-links">
@@ -438,9 +436,7 @@ function LandingPage({ onOpenDashboard, lang, setLang }) {
       </nav>
 
       <section id="top" className="landing-hero">
-        <img className="hero-logo-bg" src={LANDING_LOGO} alt="" aria-hidden="true" />
         <div className="landing-hero-inner">
-          <img className="hero-logo" src={LANDING_LOGO} alt="Milana Premium logo" />
           <p className="eyebrow">{l.eyebrow}</p>
           <h1>{l.heroTitle}</h1>
           <p className="hero-copy">{l.heroCopy}</p>
@@ -560,7 +556,6 @@ function LandingPage({ onOpenDashboard, lang, setLang }) {
 
       <footer className="landing-footer">
         <div>
-          <img src={LANDING_LOGO} alt="Milana Premium logo" />
           <strong>Instaagent</strong>
           <p>AI sales assistant for Instagram, Telegram, and WhatsApp.</p>
         </div>
