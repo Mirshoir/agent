@@ -645,6 +645,7 @@ function firstValue(...values) {
 }
 
 function sendRouteFor(conv) {
+  if (conv.platform === 'instagram' && isInstagramCommentChannel(conv.channel)) return 'Instagram Comment API';
   if (conv.platform === 'instagram') return 'Instagram DM API';
   if (conv.platform === 'whatsapp') return 'WhatsApp Cloud API';
   if (conv.platform === 'telegram' && conv.channel === 'telegram_user_private') return 'Telegram user client';
