@@ -441,7 +441,6 @@ function LandingPage({ onOpenDashboard, lang, setLang }) {
       <section id="top" className="landing-hero">
         <img className="hero-logo-bg" src={LANDING_LOGO} alt="" aria-hidden="true" />
         <div className="landing-hero-inner">
-          <img className="hero-logo" src={LANDING_LOGO} alt="Milana Premium logo" />
           <p className="eyebrow">{l.eyebrow}</p>
           <h1>{l.heroTitle}</h1>
           <p className="hero-copy">{l.heroCopy}</p>
