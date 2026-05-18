@@ -310,6 +310,32 @@ def conversation_scope(platform: str, channel: str, customer_id: str, chat_id: s
     return customer_id
 
 
+def extract_instagram_comment_post_id(row: dict) -> str:
+    raw = row.get("raw_payload") or {}
+    media = raw.get("media") if isinstance(raw, dict) else {}
+    return normalize_id(
+        row.get("post_id")
+        or row.get("media_id")
+        or (media or {}).get("id")
+    )
+
+
+def encode_comment_scope(customer_id: str, post_id: str) -> str:
+    customer_id = normalize_id(customer_id)
+    post_id = normalize_id(post_id)
+    if not post_id:
+        return customer_id
+    return f"{customer_id}__post__{post_id}"
+
+
+def decode_comment_scope(scope: str) -> tuple[str, str]:
+    scope = normalize_id(scope)
+    if "__post__" not in scope:
+        return scope, ""
+    customer_id, post_id = scope.split("__post__", 1)
+    return normalize_id(customer_id), normalize_id(post_id)
+
+
 def instagram_reply_window_closed(result: dict) -> bool:
     error = result.get("error") if isinstance(result, dict) else {}
     if not isinstance(error, dict):
@@ -599,6 +625,12 @@ def transform_message_to_react(row: dict) -> dict:
         message['type'] = 'text'
         message['text'] = content
 
+    raw_payload = row.get("raw_payload") or {}
+    media = raw_payload.get("media") if isinstance(raw_payload, dict) else {}
+    message["post_id"] = normalize_id(row.get("post_id") or row.get("media_id") or (media or {}).get("id"))
+    message["post_permalink"] = row.get("post_permalink") or raw_payload.get("post_permalink") or ""
+    message["post_image_url"] = row.get("post_image_url") or raw_payload.get("post_image_url") or ""
+
     return message
 
 
@@ -613,8 +645,11 @@ def transform_conversation_to_react(key: str, rows: list, business: dict = None)
         return None
 
     platform, business_id, channel, customer_id = parts
+    comment_customer_id, comment_post_id = decode_comment_scope(customer_id) if (
+        platform == "instagram" and "comment" in normalize_id(channel).lower()
+    ) else (customer_id, "")
     latest_chat_id = normalize_id(latest_row.get("chat_id"))
-    effective_scope = latest_chat_id if platform == "telegram" and channel in ("telegram_bot_group", "telegram_chat") else customer_id
+    effective_scope = latest_chat_id if platform == "telegram" and channel in ("telegram_bot_group", "telegram_chat") else comment_customer_id
 
     customer_name = latest_row.get('customer_name') or f'Customer {effective_scope[-4:]}'
     ai_enabled = is_chat_ai_enabled(platform, channel, effective_scope, business_id)
@@ -624,6 +659,10 @@ def transform_conversation_to_react(key: str, rows: list, business: dict = None)
         'name': customer_name,
         'handle': f'@{effective_scope}',
         'platform': platform,
+        'isCommentThread': platform == "instagram" and "comment" in normalize_id(channel).lower(),
+        'postId': comment_post_id or extract_instagram_comment_post_id(latest_row),
+        'postPermalink': (latest_row.get("raw_payload") or {}).get("post_permalink", ""),
+        'postImageUrl': (latest_row.get("raw_payload") or {}).get("post_image_url", ""),
         'avatar': generate_avatar(customer_name),
         'lang': business.get('language', 'uz') if business else 'uz',
         'online': False,
@@ -1387,21 +1426,9 @@ def infer_ai_provider(model: str) -> str:
 
 def get_ai_provider(business: dict) -> str:
     provider = str(business.get("ai_provider") or "").strip().lower()
-    model = str(business.get("ai_model") or "").strip().lower()
-
-    inferred_from_model = infer_ai_provider(model) if model else ""
-
-    # Deterministic routing: explicit model family wins over stale provider value.
-    # Example: ai_provider=mistral + ai_model=gemini-2.5-flash should route to gemini.
-    if inferred_from_model in AI_DEFAULT_MODELS and (
-        model.startswith(("gemini", "gpt-", "o1", "o3", "o4", "claude"))
-    ):
-        return inferred_from_model
-
     if provider in AI_DEFAULT_MODELS:
         return provider
-
-    return inferred_from_model or "mistral"
+    return infer_ai_provider(business.get("ai_model"))
 
 
 def get_ai_api_key(business: dict, provider: str) -> str:
@@ -1428,9 +1455,6 @@ def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
     if not api_key:
         log("Missing AI API key", {"provider": provider, "model": model})
         return ""
-
-    # Runtime trace to verify which model/provider is actually used.
-    log(f"{log_label} routing", {"provider": provider, "model": model})
 
     if provider in {"mistral", "openai"}:
         url = "https://api.mistral.ai/v1/chat/completions"
@@ -1931,6 +1955,10 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
 async def process_instagram_comment_event(entry_id: str, change: dict):
     value = change.get("value", {})
     comment_id = normalize_id(value.get("comment_id") or value.get("id"))
+    from_user = value.get("from") or {}
+    commenter_id = normalize_id(from_user.get("id"))
+    commenter_username = normalize_id(from_user.get("username"))
+    post_id = normalize_id((value.get("media") or {}).get("id"))
     comment_text = value.get("message") or value.get("text") or ""
 
     if not comment_id or not comment_text:
@@ -1953,13 +1981,51 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     if not access_token:
         return
 
+    inbound_payload = dict(value)
+    inbound_payload["post_id"] = post_id
+    if not inbound_payload.get("post_permalink"):
+        inbound_payload["post_permalink"] = f"https://www.instagram.com/p/{post_id}/" if post_id else ""
+
+    save_inbox_message(
+        business=business,
+        platform="instagram",
+        sender_id=commenter_id or comment_id,
+        recipient_id=entry_id,
+        message_text=comment_text,
+        direction="inbound",
+        platform_message_id=comment_id,
+        raw_payload=inbound_payload,
+        customer_name=commenter_username or f"IG User {str(commenter_id or comment_id)[-4:]}",
+        is_read=False,
+        channel="instagram_comment",
+    )
+
     reply_text = get_ai_reply(comment_text, business, "instagram", "", "comment")
     reply_text = remove_urls(reply_text)
 
     if wants_catalog(comment_text):
         reply_text = "Katalogni DM orqali yuboramiz 😊 Iltimos, bizga xabar yozing."
 
-    reply_to_comment(access_token, comment_id, reply_text, business)
+    send_result = reply_to_comment(access_token, comment_id, reply_text, business)
+    raw_result = safe_json(send_result) if send_result is not None else {}
+    if send_result is not None and send_result.ok:
+        outbound_payload = dict(raw_result) if isinstance(raw_result, dict) else {}
+        outbound_payload["post_id"] = post_id
+        save_inbox_message(
+            business=business,
+            platform="instagram",
+            sender_id=entry_id,
+            recipient_id=commenter_id or comment_id,
+            message_text=reply_text,
+            direction="outbound",
+            platform_message_id=normalize_id(raw_result.get("id")) if isinstance(raw_result, dict) else "",
+            raw_payload=outbound_payload,
+            customer_name=commenter_username or f"IG User {str(commenter_id or comment_id)[-4:]}",
+            is_read=True,
+            channel="instagram_comment",
+        )
+
+    mark_processed(processed_comment_ids, comment_id)
 
 
 # ============================================================================
@@ -2575,6 +2641,9 @@ async def get_conversations_v2(
             customer_id = str(row.get("customer_id") or "").strip()
             chat_id = str(row.get("chat_id") or "").strip()
             scope = conversation_scope(platform_name, channel, customer_id, chat_id)
+            if platform_name == "instagram" and "comment" in channel:
+                post_id = extract_instagram_comment_post_id(row)
+                scope = encode_comment_scope(customer_id, post_id)
 
             if not business_id or not scope:
                 continue
@@ -2639,9 +2708,13 @@ async def get_conversation_messages_v2(
                 status_code=400
             )
 
-        platform, business_id, channel, customer_id = parts
+        platform, business_id, channel, customer_scope = parts
         platform = normalize_id(platform).lower()
         channel = standard_channel(platform, channel)
+        customer_id = customer_scope
+        post_id = ""
+        if platform == "instagram" and "comment" in channel:
+            customer_id, post_id = decode_comment_scope(customer_scope)
 
         query = (
             supabase.table("inbox_messages")
@@ -2656,6 +2729,8 @@ async def get_conversation_messages_v2(
             query = query.eq("customer_id", str(customer_id))
             if channel:
                 query = query.eq("channel", channel)
+            if platform == "instagram" and "comment" in channel and post_id:
+                query = query.eq("raw_payload->media->>id", post_id)
 
         result = query.order("created_at", desc=False).limit(limit).execute()
         rows = result.data or []
@@ -2676,6 +2751,8 @@ async def get_conversation_messages_v2(
                 mark_query = mark_query.eq("customer_id", str(customer_id))
                 if channel:
                     mark_query = mark_query.eq("channel", channel)
+                if platform == "instagram" and "comment" in channel and post_id:
+                    mark_query = mark_query.eq("raw_payload->media->>id", post_id)
             mark_query.execute()
         except Exception:
             pass
