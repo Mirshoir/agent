@@ -1387,9 +1387,21 @@ def infer_ai_provider(model: str) -> str:
 
 def get_ai_provider(business: dict) -> str:
     provider = str(business.get("ai_provider") or "").strip().lower()
+    model = str(business.get("ai_model") or "").strip().lower()
+
+    inferred_from_model = infer_ai_provider(model) if model else ""
+
+    # Deterministic routing: explicit model family wins over stale provider value.
+    # Example: ai_provider=mistral + ai_model=gemini-2.5-flash should route to gemini.
+    if inferred_from_model in AI_DEFAULT_MODELS and (
+        model.startswith(("gemini", "gpt-", "o1", "o3", "o4", "claude"))
+    ):
+        return inferred_from_model
+
     if provider in AI_DEFAULT_MODELS:
         return provider
-    return infer_ai_provider(business.get("ai_model"))
+
+    return inferred_from_model or "mistral"
 
 
 def get_ai_api_key(business: dict, provider: str) -> str:
@@ -1416,6 +1428,9 @@ def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
     if not api_key:
         log("Missing AI API key", {"provider": provider, "model": model})
         return ""
+
+    # Runtime trace to verify which model/provider is actually used.
+    log(f"{log_label} routing", {"provider": provider, "model": model})
 
     if provider in {"mistral", "openai"}:
         url = "https://api.mistral.ai/v1/chat/completions"
