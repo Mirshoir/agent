@@ -336,6 +336,35 @@ def decode_comment_scope(scope: str) -> tuple[str, str]:
     return normalize_id(customer_id), normalize_id(post_id)
 
 
+def is_own_instagram_comment_actor(business: dict, entry_id: str, commenter_id: str, commenter_username: str = "") -> bool:
+    """
+    Ignore comment events authored by our own Instagram business account/page.
+    These webhook echoes were creating duplicate comment threads.
+    """
+    entry_id = normalize_id(entry_id)
+    commenter_id = normalize_id(commenter_id)
+    commenter_username = normalize_id(commenter_username).lower()
+
+    own_ids = {
+        normalize_id((business or {}).get("instagram_business_id")),
+        normalize_id((business or {}).get("facebook_page_id")),
+        entry_id,
+    }
+    own_ids.discard("")
+    if commenter_id and commenter_id in own_ids:
+        return True
+
+    own_usernames = {
+        normalize_id((business or {}).get("instagram_username")).lower(),
+        normalize_id((business or {}).get("business_name")).lower().replace(" ", ""),
+    }
+    own_usernames.discard("")
+    if commenter_username and commenter_username in own_usernames:
+        return True
+
+    return False
+
+
 def instagram_reply_window_closed(result: dict) -> bool:
     error = result.get("error") if isinstance(result, dict) else {}
     if not isinstance(error, dict):
@@ -1969,6 +1998,11 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
 
     business = find_business_for_webhook(entry_id)
     if not business:
+        return
+
+    # Prevent self-echo loops and duplicate self threads.
+    if is_own_instagram_comment_actor(business, entry_id, commenter_id, commenter_username):
+        mark_processed(processed_comment_ids, comment_id)
         return
 
     if not business.get("bot_enabled", True):
