@@ -365,6 +365,47 @@ def is_own_instagram_comment_actor(business: dict, entry_id: str, commenter_id: 
     return False
 
 
+def get_latest_instagram_comment_anchor(business_id: str, commenter_id: str, post_id: str = "") -> dict:
+    """
+    Find the most recent inbound customer comment for (business, commenter[, post]).
+    We reply to that comment_id so manual replies stay in the same comment thread.
+    """
+    business_id = normalize_id(business_id)
+    commenter_id = normalize_id(commenter_id)
+    post_id = normalize_id(post_id)
+    if not business_id or not commenter_id:
+        return {}
+
+    try:
+        rows = (
+            supabase.table("inbox_messages")
+            .select("*")
+            .eq("platform", "instagram")
+            .eq("business_id", business_id)
+            .eq("channel", "instagram_comment")
+            .eq("customer_id", commenter_id)
+            .eq("direction", "inbound")
+            .order("created_at", desc=True)
+            .limit(60)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return {}
+
+    if not rows:
+        return {}
+
+    if not post_id:
+        return rows[0]
+
+    for row in rows:
+        if extract_instagram_comment_post_id(row) == post_id:
+            return row
+    return rows[0]
+
+
 def instagram_reply_window_closed(result: dict) -> bool:
     error = result.get("error") if isinstance(result, dict) else {}
     if not isinstance(error, dict):
@@ -2832,10 +2873,13 @@ async def send_message_v2(
                 status_code=400
             )
 
-        platform, business_id, channel, customer_id = parts
+        platform, business_id, channel, customer_scope = parts
         platform = normalize_id(platform).lower()
         channel = standard_channel(platform, channel)
-        target_id = customer_id
+        target_id = customer_scope
+        post_id = ""
+        if platform == "instagram" and "comment" in channel:
+            target_id, post_id = decode_comment_scope(customer_scope)
 
         business = get_business_by_id(business_id)
         if not business:
@@ -2855,7 +2899,27 @@ async def send_message_v2(
                     status_code=400
                 )
 
-            ok, result = send_instagram_dm(access_token, customer_id, text, business)
+            if "comment" in channel:
+                anchor = get_latest_instagram_comment_anchor(
+                    business_id=business_id,
+                    commenter_id=target_id,
+                    post_id=post_id,
+                )
+                comment_id = normalize_id(
+                    anchor.get("external_message_id")
+                    or (anchor.get("raw_payload") or {}).get("id")
+                )
+                if not comment_id:
+                    return JSONResponse(
+                        {"error": "Comment anchor not found for this thread"},
+                        status_code=400,
+                    )
+
+                send_result = reply_to_comment(access_token, comment_id, text, business)
+                ok = bool(send_result and send_result.ok)
+                result = safe_json(send_result) if send_result is not None else {"error": "Send failed"}
+            else:
+                ok, result = send_instagram_dm(access_token, target_id, text, business)
 
         elif platform == "telegram":
             if channel == "telegram_user_private":
@@ -2896,8 +2960,8 @@ async def send_message_v2(
             recipient_id=target_id,
             message_text=text,
             direction="outbound",
-            platform_message_id=result.get("message_id") or result.get("messages", [{}])[0].get("id", ""),
-            raw_payload=result,
+            platform_message_id=normalize_id(result.get("message_id") or result.get("id") or result.get("messages", [{}])[0].get("id", "")),
+            raw_payload={**(result or {}), **({"post_id": post_id} if post_id else {})},
             channel=channel,
         )
 
