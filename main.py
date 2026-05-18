@@ -320,6 +320,28 @@ def extract_instagram_comment_post_id(row: dict) -> str:
     )
 
 
+def fetch_instagram_media_info(access_token: str, post_id: str, business: dict = None) -> dict:
+    post_id = normalize_id(post_id)
+    if not access_token or not post_id:
+        return {}
+    fields = "id,media_type,media_url,thumbnail_url,permalink"
+    oauth_provider = (business or {}).get("oauth_provider", "")
+    urls = [f"{GRAPH_FACEBOOK}/{post_id}"] if oauth_provider == "facebook_page" else [f"{GRAPH_INSTAGRAM}/{post_id}", f"{GRAPH_FACEBOOK}/{post_id}"]
+    for url in urls:
+        try:
+            res = requests.get(url, params={"access_token": access_token, "fields": fields}, timeout=20)
+            body = safe_json(res)
+            if not res.ok:
+                continue
+            return {
+                "post_permalink": body.get("permalink") or f"https://www.instagram.com/p/{post_id}/",
+                "post_image_url": body.get("media_url") or body.get("thumbnail_url") or "",
+            }
+        except Exception:
+            continue
+    return {"post_permalink": f"https://www.instagram.com/p/{post_id}/", "post_image_url": ""}
+
+
 def encode_comment_scope(customer_id: str, post_id: str) -> str:
     customer_id = normalize_id(customer_id)
     post_id = normalize_id(post_id)
@@ -2056,10 +2078,14 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     if not access_token:
         return
 
+    media_info = fetch_instagram_media_info(access_token, post_id, business)
+
     inbound_payload = dict(value)
     inbound_payload["post_id"] = post_id
     if not inbound_payload.get("post_permalink"):
-        inbound_payload["post_permalink"] = f"https://www.instagram.com/p/{post_id}/" if post_id else ""
+        inbound_payload["post_permalink"] = media_info.get("post_permalink") or (f"https://www.instagram.com/p/{post_id}/" if post_id else "")
+    if not inbound_payload.get("post_image_url"):
+        inbound_payload["post_image_url"] = media_info.get("post_image_url") or ""
 
     save_inbox_message(
         business=business,
@@ -2086,6 +2112,10 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     if send_result is not None and send_result.ok:
         outbound_payload = dict(raw_result) if isinstance(raw_result, dict) else {}
         outbound_payload["post_id"] = post_id
+        if not outbound_payload.get("post_permalink"):
+            outbound_payload["post_permalink"] = inbound_payload.get("post_permalink", "")
+        if not outbound_payload.get("post_image_url"):
+            outbound_payload["post_image_url"] = inbound_payload.get("post_image_url", "")
         save_inbox_message(
             business=business,
             platform="instagram",
@@ -2708,6 +2738,18 @@ async def get_conversations_v2(
         result = query.execute()
         rows = result.data or []
 
+        latest_comment_post_by_customer = {}
+        for row in rows:
+            business_id = row.get("business_id")
+            platform_name = normalize_id(row.get("platform", "instagram")).lower() or "instagram"
+            channel = standard_channel(platform_name, row.get("channel", ""))
+            customer_id = str(row.get("customer_id") or "").strip()
+            if not business_id or platform_name != "instagram" or "comment" not in channel or not customer_id:
+                continue
+            post_id = extract_instagram_comment_post_id(row)
+            if post_id and customer_id not in latest_comment_post_by_customer:
+                latest_comment_post_by_customer[customer_id] = post_id
+
         conversations_map = {}
         for row in rows:
             business_id = row.get("business_id")
@@ -2717,7 +2759,7 @@ async def get_conversations_v2(
             chat_id = str(row.get("chat_id") or "").strip()
             scope = conversation_scope(platform_name, channel, customer_id, chat_id)
             if platform_name == "instagram" and "comment" in channel:
-                post_id = extract_instagram_comment_post_id(row)
+                post_id = extract_instagram_comment_post_id(row) or latest_comment_post_by_customer.get(customer_id, "")
                 scope = encode_comment_scope(customer_id, post_id)
 
             if not business_id or not scope:
