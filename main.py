@@ -3364,20 +3364,14 @@ async def get_telegram_bot_media(
 # ============================================================================
 @app.get("/connect")
 async def connect():
-    return RedirectResponse("/connect-instagram")
+    return RedirectResponse("/connect-facebook")
 
 
 @app.get("/connect-instagram")
 async def connect_instagram():
-    params = {
-        "client_id": META_APP_ID,
-        "redirect_uri": INSTAGRAM_REDIRECT_URI,
-        "scope": "instagram_business_basic,instagram_business_manage_messages,instagram_business_manage_comments",
-        "response_type": "code",
-        "state": secrets.token_urlsafe(16),
-    }
-    auth_url = "https://www.instagram.com/oauth/authorize?" + urlencode(params)
-    return RedirectResponse(auth_url)
+    # Keep legacy route for older frontend buttons, but route through Facebook OAuth.
+    # Meta app-review/business onboarding needs Facebook Page selection (pages_show_list).
+    return RedirectResponse("/connect-facebook")
 
 
 @app.get("/auth/instagram/callback")
