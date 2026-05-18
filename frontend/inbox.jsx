@@ -82,6 +82,7 @@ const STATS_POLL_MS = 20000;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
 const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
+const LANDING_LOGO = '/brand/milana-premium-logo.png';
 const DASHBOARD_HASH = '#dashboard';
 const UI_LANG_STORAGE_KEY = 'instaagent_ui_lang';
 
@@ -297,9 +298,10 @@ function aiProviderForModel(model = '') {
 
 function aiProviderForBusiness(business = {}) {
   const stored = String(business.ai_provider || '').toLowerCase();
-  return AI_PROVIDERS.some(provider => provider.id === stored)
-    ? stored
-    : aiProviderForModel(business.ai_model);
+  const derived = aiProviderForModel(business.ai_model);
+  if (!AI_PROVIDERS.some(provider => provider.id === stored)) return derived;
+  if (business.ai_model && derived !== stored) return derived;
+  return stored;
 }
 
 function apiErrorMessage(data, status) {
@@ -419,6 +421,7 @@ function LandingPage({ onOpenDashboard, lang, setLang }) {
     <main className="landing-page">
       <nav className="landing-nav">
         <a className="landing-brand" href="#top">
+          <img src={LANDING_LOGO} alt="Milana Premium logo" />
           <span>{l.appName}</span>
         </a>
         <div className="landing-links">
@@ -436,7 +439,9 @@ function LandingPage({ onOpenDashboard, lang, setLang }) {
       </nav>
 
       <section id="top" className="landing-hero">
+        <img className="hero-logo-bg" src={LANDING_LOGO} alt="" aria-hidden="true" />
         <div className="landing-hero-inner">
+          <img className="hero-logo" src={LANDING_LOGO} alt="Milana Premium logo" />
           <p className="eyebrow">{l.eyebrow}</p>
           <h1>{l.heroTitle}</h1>
           <p className="hero-copy">{l.heroCopy}</p>
@@ -556,6 +561,7 @@ function LandingPage({ onOpenDashboard, lang, setLang }) {
 
       <footer className="landing-footer">
         <div>
+          <img src={LANDING_LOGO} alt="Milana Premium logo" />
           <strong>Instaagent</strong>
           <p>AI sales assistant for Instagram, Telegram, and WhatsApp.</p>
         </div>
@@ -1578,7 +1584,10 @@ function WorkspacePanel({
                   value={activeProvider.id}
                   onChange={(e) => {
                     const provider = AI_PROVIDERS.find(item => item.id === e.target.value) || AI_PROVIDERS[0];
-                    onBusinessSetting(selectedBusiness.id, { ai_model: provider.defaultModel }, true);
+                    onBusinessSetting(selectedBusiness.id, {
+                      ai_provider: provider.id,
+                      ai_model: provider.defaultModel,
+                    }, true);
                   }}
                 >
                   {AI_PROVIDERS.map(provider => (
@@ -1592,7 +1601,10 @@ function WorkspacePanel({
                   value={modelSelectValue}
                   onChange={(e) => {
                     if (e.target.value === 'custom') return;
-                    onBusinessSetting(selectedBusiness.id, { ai_model: e.target.value }, true);
+                    onBusinessSetting(selectedBusiness.id, {
+                      ai_model: e.target.value,
+                      ai_provider: aiProviderForModel(e.target.value),
+                    }, true);
                   }}
                 >
                   {activeProvider.models.map(model => (
@@ -1606,8 +1618,17 @@ function WorkspacePanel({
               <span>{w.customModel}</span>
               <input
                 value={activeModel}
-                onChange={(e) => onBusinessSetting(selectedBusiness.id, { ai_model: e.target.value }, false)}
-                onBlur={(e) => onBusinessSetting(selectedBusiness.id, { ai_model: e.target.value.trim() || activeProvider.defaultModel }, true)}
+                onChange={(e) => onBusinessSetting(selectedBusiness.id, {
+                  ai_model: e.target.value,
+                  ai_provider: aiProviderForModel(e.target.value),
+                }, false)}
+                onBlur={(e) => {
+                  const nextModel = e.target.value.trim() || activeProvider.defaultModel;
+                  onBusinessSetting(selectedBusiness.id, {
+                    ai_model: nextModel,
+                    ai_provider: aiProviderForModel(nextModel),
+                  }, true);
+                }}
               />
             </label>
             <div className="model-grid">
