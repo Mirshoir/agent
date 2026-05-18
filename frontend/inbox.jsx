@@ -624,9 +624,24 @@ function channelLabel(platform, channel) {
     if (channel === 'telegram_bot_private' || channel === 'private') return 'Bot DM';
     return channel || 'Telegram';
   }
-  if (platform === 'instagram') return channel === 'dm' || !channel ? 'Instagram DM' : channel;
+  if (platform === 'instagram') {
+    if (channel === 'dm' || !channel) return 'Instagram DM';
+    if (String(channel).toLowerCase().includes('comment')) return 'Instagram comments';
+    return channel;
+  }
   if (platform === 'whatsapp') return channel === 'whatsapp' || channel === 'whatsapp_cloud' || !channel ? 'WhatsApp' : channel;
   return channel || 'Inbox';
+}
+
+function isInstagramCommentChannel(channel = '') {
+  return String(channel || '').toLowerCase().includes('comment');
+}
+
+function firstValue(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && String(value).trim() !== '') return value;
+  }
+  return '';
 }
 
 function sendRouteFor(conv) {
@@ -703,6 +718,28 @@ function normalizeConversation(row) {
   const platform = row.platform || 'instagram';
   const channel = row.channel || parsedChannel || '';
   const channelName = row.channelName || channelLabel(platform || parsedPlatform, channel);
+  const isCommentThread = platform === 'instagram' && isInstagramCommentChannel(channel);
+  const rawPayload = row.raw_payload || row.rawPayload || {};
+  const postId = firstValue(
+    row.post_id,
+    row.media_id,
+    rawPayload.post_id,
+    rawPayload.media_id,
+    rawPayload?.entry?.[0]?.changes?.[0]?.value?.media?.id,
+    rawPayload?.entry?.[0]?.changes?.[0]?.value?.object_id,
+  );
+  const postImageUrl = firstValue(
+    row.post_image_url,
+    row.media_url,
+    rawPayload.post_image_url,
+    rawPayload.image_url,
+    rawPayload?.entry?.[0]?.changes?.[0]?.value?.media?.image?.src,
+  );
+  const postPermalink = firstValue(
+    row.post_permalink,
+    rawPayload.post_permalink,
+    rawPayload?.entry?.[0]?.changes?.[0]?.value?.media?.permalink,
+  );
   const lastAt = row.last_message_at || row.created_at || row.lastAt || '';
   return {
     id: row.id,
@@ -715,6 +752,10 @@ function normalizeConversation(row) {
     name,
     handle: row.handle || platformHandle({ ...row, customer_id: customerId, chat_id: chatId }),
     platform: platform || parsedPlatform,
+    isCommentThread,
+    postId: postId ? String(postId) : '',
+    postImageUrl: postImageUrl ? String(postImageUrl) : '',
+    postPermalink: postPermalink ? String(postPermalink) : '',
     avatar: avatarFor(name, customerId),
     online: false,
     needsHuman: row.needsHuman ?? (unread > 0),
@@ -768,6 +809,25 @@ function normalizeMessage(row, index) {
     mediaFileId: row.media_file_id || getWhatsAppMediaId(row),
     raw: row,
   };
+
+  message.postId = firstValue(
+    row.post_id,
+    row.media_id,
+    row.raw_payload?.post_id,
+    row.raw_payload?.media_id,
+    row.raw_payload?.entry?.[0]?.changes?.[0]?.value?.media?.id,
+  );
+  message.postImageUrl = firstValue(
+    row.post_image_url,
+    row.raw_payload?.post_image_url,
+    row.raw_payload?.image_url,
+    row.raw_payload?.entry?.[0]?.changes?.[0]?.value?.media?.image?.src,
+  );
+  message.postPermalink = firstValue(
+    row.post_permalink,
+    row.raw_payload?.post_permalink,
+    row.raw_payload?.entry?.[0]?.changes?.[0]?.value?.media?.permalink,
+  );
 
   if (type === 'catalog') {
     message.catalogText = text.replace('[Catalog button sent]', '').trim() || 'Catalog sent.';
@@ -1695,6 +1755,7 @@ function WorkspacePanel({
 function Rail({ t, activeView, onView }) {
   const items = [
     { id: 'inbox', icon: <I.Inbox />, label: t.inbox, dot: true },
+    { id: 'comments', icon: <I.Comment />, label: t.comments || 'Comments' },
     { id: 'insights', icon: <I.Chart />, label: t.insights },
     { id: 'leads', icon: <I.Star />, label: t.leads || 'Leads' },
     { id: 'knowledge', icon: <I.Book />, label: t.knowledge },
@@ -1745,7 +1806,7 @@ function Row({ c, selected, onClick, t }) {
 }
 
 // ---------- List column ----------
-function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError, liveMode, onRefresh, onSaveSecret }) {
+function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError, liveMode, onRefresh, onSaveSecret, activeView }) {
   const [filter, setFilter] = useState('all');
   const [platforms, setPlatforms] = useState({ instagram: true, telegram: true, whatsapp: true });
   const [search, setSearch] = useState('');
@@ -1760,6 +1821,8 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
 
   const filtered = useMemo(() => {
     return conversations.filter(c => {
+      if (activeView === 'comments' && !c.isCommentThread) return false;
+      if (activeView === 'inbox' && c.isCommentThread) return false;
       if (!platforms[c.platform]) return false;
       if (filter === 'needs' && !c.needsHuman) return false;
       if (filter === 'unread' && c.unread === 0) return false;
@@ -1770,7 +1833,7 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
       }
       return true;
     });
-  }, [conversations, filter, platforms, search]);
+  }, [conversations, filter, platforms, search, activeView]);
 
   const priority = filtered.filter(c => c.needsHuman || c.unread > 0);
   const rest = filtered.filter(c => !c.needsHuman && c.unread === 0);
@@ -2137,9 +2200,32 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
   }, [messages]);
 
   let lastDay = null;
+  const commentPost = useMemo(() => {
+    if (!conv?.isCommentThread) return null;
+    const source = messages.find(item => item.postImageUrl || item.postPermalink || item.postId) || {};
+    return {
+      imageUrl: source.postImageUrl || conv.postImageUrl || '',
+      permalink: source.postPermalink || conv.postPermalink || '',
+      postId: source.postId || conv.postId || '',
+    };
+  }, [conv, messages]);
 
   return (
     <section className="thread-col">
+      {conv?.isCommentThread && (
+        <div className="comment-post-pin">
+          <div className="comment-post-head">Pinned post</div>
+          {commentPost?.imageUrl ? (
+            <img className="comment-post-image" src={commentPost.imageUrl} alt="Instagram post preview" />
+          ) : (
+            <div className="comment-post-placeholder">Post image preview not available yet</div>
+          )}
+          <div className="comment-post-meta">
+            {commentPost?.postId && <span>Post ID: {commentPost.postId}</span>}
+            {commentPost?.permalink && <a href={commentPost.permalink} target="_blank" rel="noreferrer">Open on Instagram</a>}
+          </div>
+        </div>
+      )}
       <div className="messages" ref={scrollRef}>
         {threadLoading && <div className="empty">Loading conversation…</div>}
         {groups.map(m => {
@@ -2351,7 +2437,7 @@ function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onT
   const [accountOpen, setAccountOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
-  const workspaceNames = { inbox: t.inbox, insights: t.insights, knowledge: t.knowledge, prompts: w.promptsTitle, accounts: t.accounts, settings: t.settings, profile: w.profile };
+    const workspaceNames = { inbox: t.inbox, comments: t.comments || 'Comments', insights: t.insights, knowledge: t.knowledge, prompts: w.promptsTitle, accounts: t.accounts, settings: t.settings, profile: w.profile };
   return (
     <header className="topbar">
       <div className="brand">
@@ -2374,7 +2460,7 @@ function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onT
           )}
         </div>
       </div>
-      {activeView === 'inbox' ? (
+      {(activeView === 'inbox' || activeView === 'comments') ? (
         <ThreadHead
           conv={conv}
           aiOn={aiOn}
@@ -3052,7 +3138,7 @@ function App({ lang, setLang }) {
 
   const changeView = (view) => {
     setActiveView(view);
-    const names = { inbox: t.inbox, insights: t.insights, leads: t.leads || 'Leads', knowledge: t.knowledge, prompts: 'AI Prompt Settings', accounts: t.accounts, settings: t.settings, profile: 'Profile' };
+    const names = { inbox: t.inbox, comments: t.comments || 'Comments', insights: t.insights, leads: t.leads || 'Leads', knowledge: t.knowledge, prompts: 'AI Prompt Settings', accounts: t.accounts, settings: t.settings, profile: 'Profile' };
     showToast(`${names[view] || view} selected`);
   };
 
@@ -3068,7 +3154,7 @@ function App({ lang, setLang }) {
 
   const selectConversation = (conversationId) => {
     setSelectedId(conversationId);
-    setActiveView('inbox');
+    setActiveView(current => (current === 'comments' ? 'comments' : 'inbox'));
     setMoreOpen(false);
   };
 
@@ -3080,7 +3166,7 @@ function App({ lang, setLang }) {
 
   return (
     <>
-      <div className={`app ${activeView === 'inbox' ? '' : 'workspace-mode'}`}>
+      <div className={`app ${(activeView === 'inbox' || activeView === 'comments') ? '' : 'workspace-mode'}`}>
         <TopBar
           t={t}
           lang={lang}
@@ -3110,8 +3196,9 @@ function App({ lang, setLang }) {
           liveMode={liveMode}
           onRefresh={refreshWorkspace}
           onSaveSecret={saveSecretAndRefresh}
+          activeView={activeView}
         />
-        {activeView === 'inbox' ? (
+        {(activeView === 'inbox' || activeView === 'comments') ? (
           <ThreadColumn
             conv={conv}
             aiOn={aiOn}
@@ -3148,7 +3235,7 @@ function App({ lang, setLang }) {
             onOpenConversation={selectConversation}
           />
         )}
-        {activeView === 'inbox' && <DetailColumn conv={conv} t={t} stats={stats} onDelete={deleteConversation} />}
+        {(activeView === 'inbox' || activeView === 'comments') && <DetailColumn conv={conv} t={t} stats={stats} onDelete={deleteConversation} />}
       </div>
       <Toast message={toast} />
 
