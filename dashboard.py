@@ -239,6 +239,96 @@ def login_user(email, password):
         return None
 
 
+def list_dashboard_users():
+    try:
+        return (
+            supabase.table("dashboard_users")
+            .select("id,email,is_active,created_at")
+            .order("created_at", desc=True)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:
+        st.error(f"Could not load users: {e}")
+        return []
+
+
+def create_or_update_dashboard_user(email, password, is_active=True):
+    clean_email = normalize_email(email)
+    if not clean_email or not password:
+        raise ValueError("Email and password are required.")
+
+    payload = {
+        "email": clean_email,
+        "password_hash": hash_password(password),
+        "is_active": bool(is_active),
+    }
+    return (
+        supabase.table("dashboard_users")
+        .upsert(payload, on_conflict="email")
+        .execute()
+    )
+
+
+def set_dashboard_user_active(email, is_active):
+    clean_email = normalize_email(email)
+    if not clean_email:
+        return None
+    return (
+        supabase.table("dashboard_users")
+        .update({"is_active": bool(is_active)})
+        .eq("email", clean_email)
+        .execute()
+    )
+
+
+def assign_user_business(user_email, business_id, role="owner"):
+    clean_email = normalize_email(user_email)
+    if not clean_email or not business_id:
+        raise ValueError("Email and business are required.")
+    payload = {
+        "user_email": clean_email,
+        "business_id": business_id,
+        "role": role or "owner",
+    }
+    return (
+        supabase.table("business_users")
+        .upsert(payload, on_conflict="user_email,business_id")
+        .execute()
+    )
+
+
+def remove_user_business(user_email, business_id):
+    clean_email = normalize_email(user_email)
+    if not clean_email or not business_id:
+        return None
+    return (
+        supabase.table("business_users")
+        .delete()
+        .eq("user_email", clean_email)
+        .eq("business_id", business_id)
+        .execute()
+    )
+
+
+def get_user_business_links(user_email):
+    clean_email = normalize_email(user_email)
+    if not clean_email:
+        return []
+    try:
+        return (
+            supabase.table("business_users")
+            .select("business_id,role")
+            .eq("user_email", clean_email)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        return []
+
+
 def logout():
     for key in list(st.session_state.keys()):
         del st.session_state[key]
@@ -1061,6 +1151,120 @@ def render_overview(businesses):
             )
 
 
+def render_admin_users_page(businesses):
+    st.subheader("User Management")
+    st.caption("Create business logins, assign business access, reset passwords, and deactivate users.")
+
+    business_options = {
+        (b.get("business_name") or str(b.get("id"))): b["id"]
+        for b in businesses
+    }
+
+    with st.form("create_user_form"):
+        st.markdown("### Create or update login")
+        col1, col2 = st.columns(2)
+        with col1:
+            user_email = st.text_input("User email", placeholder="owner@company.com")
+        with col2:
+            user_password = st.text_input("Temporary password", type="password")
+        col3, col4 = st.columns(2)
+        with col3:
+            user_active = st.toggle("Active", value=True)
+        with col4:
+            user_role = st.selectbox("Role", ["owner", "manager", "agent"])
+        assigned_business = st.selectbox("Assign business", list(business_options.keys()) if business_options else [])
+        submit_create = st.form_submit_button("Create / Update user", type="primary")
+
+        if submit_create:
+            try:
+                create_or_update_dashboard_user(user_email, user_password, user_active)
+                if assigned_business:
+                    assign_user_business(user_email, business_options[assigned_business], user_role)
+                st.success("User saved and business access assigned.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to save user: {e}")
+
+    st.divider()
+
+    users = list_dashboard_users()
+    if not users:
+        st.info("No users found.")
+        return
+
+    for idx, user in enumerate(users):
+        email = normalize_email(user.get("email"))
+        if not email:
+            continue
+        links = get_user_business_links(email)
+        link_text = ", ".join([f"{x.get('business_id')} ({x.get('role','owner')})" for x in links]) or "No business assigned"
+
+        with st.expander(f"{email} · {'active' if user.get('is_active') else 'inactive'}"):
+            st.caption(f"Created: {user.get('created_at')}")
+            st.caption(f"Business links: {link_text}")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                new_password = st.text_input("Reset password", type="password", key=f"pw_{idx}")
+                if st.button("Save new password", key=f"save_pw_{idx}", use_container_width=True):
+                    if not new_password:
+                        st.warning("Password cannot be empty.")
+                    else:
+                        try:
+                            create_or_update_dashboard_user(email, new_password, bool(user.get("is_active", True)))
+                            st.success("Password updated.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Password update failed: {e}")
+
+            with col2:
+                activate = not bool(user.get("is_active", True))
+                btn = "Activate user" if activate else "Deactivate user"
+                if st.button(btn, key=f"toggle_{idx}", use_container_width=True):
+                    try:
+                        set_dashboard_user_active(email, activate)
+                        st.success("User status updated.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Status update failed: {e}")
+
+            if business_options:
+                st.markdown("#### Business access")
+                c1, c2, c3 = st.columns([2, 1, 1])
+                with c1:
+                    selected_business = st.selectbox(
+                        "Business",
+                        list(business_options.keys()),
+                        key=f"biz_pick_{idx}",
+                    )
+                with c2:
+                    selected_role = st.selectbox("Role", ["owner", "manager", "agent"], key=f"role_pick_{idx}")
+                with c3:
+                    if st.button("Assign", key=f"assign_{idx}", use_container_width=True):
+                        try:
+                            assign_user_business(email, business_options[selected_business], selected_role)
+                            st.success("Business assigned.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Assign failed: {e}")
+
+                if links:
+                    for j, link in enumerate(links):
+                        bid = link.get("business_id")
+                        role = link.get("role", "owner")
+                        row_c1, row_c2 = st.columns([4, 1])
+                        with row_c1:
+                            st.write(f"{bid} ({role})")
+                        with row_c2:
+                            if st.button("Remove", key=f"unlink_{idx}_{j}", use_container_width=True):
+                                try:
+                                    remove_user_business(email, bid)
+                                    st.success("Business access removed.")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Remove failed: {e}")
+
+
 def login_screen():
     st.markdown('<div class="login-card">', unsafe_allow_html=True)
     st.title("InsaAgent Login")
@@ -1100,10 +1304,10 @@ with st.sidebar:
 
     st.divider()
 
-    page = st.radio(
-        "Menu",
-        ["Overview", "Social Sales Chat", "Business Settings", "Webhook Info"],
-    )
+    menu_items = ["Overview", "Social Sales Chat", "Business Settings", "Webhook Info"]
+    if is_admin:
+        menu_items.insert(3, "User Management")
+    page = st.radio("Menu", menu_items)
 
 if is_admin:
     businesses = get_all_businesses()
@@ -1134,6 +1338,12 @@ elif page == "Business Settings":
     )
 
     business_editor(selected_business)
+
+elif page == "User Management":
+    if not is_admin:
+        st.error("Only admin can access user management.")
+    else:
+        render_admin_users_page(get_all_businesses())
 
 elif page == "Webhook Info":
     st.subheader("Webhook URLs")
