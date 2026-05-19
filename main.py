@@ -1309,6 +1309,35 @@ def fallback_prompt_suggestion(field: str, current_prompt: str = "", goal: str =
     }
 
 
+def is_valid_prompt_suggestion(text: str) -> bool:
+    candidate = (text or "").strip()
+    if not candidate:
+        return False
+    if len(candidate) < 120:
+        return False
+    if candidate.count("\n") < 3:
+        return False
+
+    lower = candidate.lower()
+    required_markers = ["- reply", "- do not", "- ask"]
+    if not any(marker in lower for marker in required_markers):
+        return False
+
+    bad_starts = (
+        "xabaringiz qabul qilindi",
+        "assalomu alaykum",
+        "salom",
+        "hello",
+        "hi ",
+        "thanks",
+        "thank you",
+    )
+    if lower.startswith(bad_starts):
+        return False
+
+    return True
+
+
 def generate_ai_prompt_suggestion(business: dict, field: str, current_prompt: str, goal: str) -> dict:
     field = normalize_id(field)
     if field not in AI_PROMPT_SETTING_FIELDS:
@@ -1321,7 +1350,7 @@ def generate_ai_prompt_suggestion(business: dict, field: str, current_prompt: st
         "ai_max_tokens": max(450, int(business.get("ai_max_tokens", 130) or 130)),
     }
 
-    messages = [
+    base_messages = [
         {
             "role": "system",
             "content": """
@@ -1339,7 +1368,12 @@ Always follow Instaagent standards:
 - handle angry customers calmly
 - good for Instagram, Telegram, and WhatsApp
 
-Return only the improved prompt text. Do not include markdown fences or explanations.
+Hard requirements:
+- Output 8-12 concise bullet rules.
+- Do not greet, acknowledge, or chat with the user.
+- Do not output a sample reply to a customer.
+- Return only the improved prompt text.
+- Do not include markdown fences or explanations.
 """.strip(),
         },
         {
@@ -1357,14 +1391,47 @@ Write a better prompt section that a sales assistant bot can follow.
         },
     ]
 
+    reply = ""
     try:
-        reply = clean_sales_reply(call_ai_chat(messages, business_for_generation, "AI prompt generator"), "")
+        first_try = clean_sales_reply(
+            call_ai_chat(base_messages, business_for_generation, "AI prompt generator"),
+            "",
+        )
+        if is_valid_prompt_suggestion(first_try):
+            reply = first_try
     except Exception as exc:
-        log("Prompt generator failed", str(exc))
-        reply = ""
+        log("Prompt generator first pass failed", str(exc))
 
     if not reply:
-        return fallback
+        retry_messages = base_messages + [
+            {
+                "role": "user",
+                "content": """
+Your last output was not a valid prompt block.
+Regenerate now as strict rules only:
+- 8-12 bullets
+- each bullet starts with '-'
+- no greeting
+- no acknowledgement
+- no conversation text
+""".strip(),
+            }
+        ]
+        try:
+            second_try = clean_sales_reply(
+                call_ai_chat(retry_messages, business_for_generation, "AI prompt generator retry"),
+                "",
+            )
+            if is_valid_prompt_suggestion(second_try):
+                reply = second_try
+        except Exception as exc:
+            log("Prompt generator retry failed", str(exc))
+
+    if not reply:
+        return {
+            **fallback,
+            "explanation": f"{fallback.get('explanation', '')} Used safe fallback because AI output was not a valid prompt block.".strip(),
+        }
 
     return {
         "suggested_prompt": reply,
