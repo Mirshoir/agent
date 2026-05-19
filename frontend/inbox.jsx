@@ -3386,14 +3386,6 @@ function Root() {
     }
   }, [showDashboard, authUser]);
 
-  useEffect(() => {
-    if (showSignIn && authUser) {
-      window.location.hash = DASHBOARD_HASH;
-      setShowSignIn(false);
-      setShowDashboard(true);
-    }
-  }, [showSignIn, authUser]);
-
   const openDashboard = () => {
     if (!authUser) {
       window.location.hash = SIGNIN_HASH;
@@ -3405,6 +3397,11 @@ function Root() {
   };
 
   const openSignIn = () => {
+    // Treat explicit Sign In as "switch account": clear current auth first.
+    writeAuthUser(null);
+    setAuthUser(null);
+    setAuthBusinesses([]);
+    setShowDashboard(false);
     window.location.hash = SIGNIN_HASH;
     setShowSignIn(true);
   };
