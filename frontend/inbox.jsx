@@ -443,7 +443,7 @@ function LandingPage({ onOpenDashboard, onOpenSignIn, lang, setLang, isSignedIn 
             <button key={code} className={lang === code ? 'on' : ''} onClick={() => setLang(code)}>{code}</button>
           ))}
         </div>
-        {!isSignedIn ? <button className="landing-signin-btn" onClick={onOpenSignIn}>{l.signIn}</button> : null}
+        <button className="landing-signin-btn" onClick={onOpenSignIn}>{l.signIn}</button>
         <button onClick={onOpenDashboard}>{l.openDashboard}</button>
       </nav>
 
