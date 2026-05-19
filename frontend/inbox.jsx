@@ -85,6 +85,7 @@ const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
 const LANDING_LOGO = '/brand/milana-premium-logo.png';
 const DASHBOARD_HASH = '#dashboard';
 const UI_LANG_STORAGE_KEY = 'instaagent_ui_lang';
+const SIGN_IN_URL = import.meta.env.VITE_SIGNIN_URL || window.INSTAAGENT_SIGNIN_URL || 'https://instaagent.streamlit.app';
 
 const LANDING_PREVIEWS = [
   ['inbox', '/screenshots/inbox.png'],
@@ -101,6 +102,7 @@ const LANDING_TEXT = {
     navDashboard: 'Dashboard',
     navAiControl: 'AI Control',
     navFaq: 'FAQ',
+    signIn: 'Sign In',
     openDashboard: 'Open Dashboard',
     eyebrow: 'Instaagent for Milana Premium and modern sales teams',
     heroTitle: 'AI Sales Assistant for Instagram, Telegram, and WhatsApp',
@@ -150,6 +152,7 @@ const LANDING_TEXT = {
     navDashboard: 'Dashboard',
     navAiControl: 'AI nazorati',
     navFaq: 'FAQ',
+    signIn: 'Kirish',
     openDashboard: 'Dashboardni ochish',
     eyebrow: 'Milana Premium va zamonaviy savdo jamoalari uchun Instaagent',
     heroTitle: 'Instagram, Telegram va WhatsApp uchun AI savdo yordamchisi',
@@ -199,6 +202,7 @@ const LANDING_TEXT = {
     navDashboard: 'Дашборд',
     navAiControl: 'Контроль AI',
     navFaq: 'FAQ',
+    signIn: 'Войти',
     openDashboard: 'Открыть дашборд',
     eyebrow: 'Instaagent для Milana Premium и современных отделов продаж',
     heroTitle: 'AI-ассистент продаж для Instagram, Telegram и WhatsApp',
@@ -435,6 +439,7 @@ function LandingPage({ onOpenDashboard, lang, setLang }) {
             <button key={code} className={lang === code ? 'on' : ''} onClick={() => setLang(code)}>{code}</button>
           ))}
         </div>
+        <a className="landing-signin-btn" href={SIGN_IN_URL}>{l.signIn}</a>
         <button onClick={onOpenDashboard}>{l.openDashboard}</button>
       </nav>
 
