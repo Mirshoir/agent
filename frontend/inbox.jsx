@@ -334,8 +334,11 @@ function apiErrorMessage(data, status) {
 
 function apiHeaders() {
   const headers = { Accept: 'application/json' };
+  const authUser = readAuthUser();
+  const authToken = String(authUser?.token || '').trim();
+  if (authToken) headers.Authorization = `Bearer ${authToken}`;
   const savedSecret = dashboardSecret();
-  if (savedSecret && savedSecret !== 'YOUR_DASHBOARD_SECRET') headers['x-dashboard-secret'] = savedSecret;
+  if (!authToken && savedSecret && savedSecret !== 'YOUR_DASHBOARD_SECRET') headers['x-dashboard-secret'] = savedSecret;
   return headers;
 }
 
@@ -615,9 +618,11 @@ function LoginPage({ lang, onSuccess, onBack }) {
     try {
       const response = await API.postJson('/api/v2/auth/login', { email, password });
       const user = response?.data?.user || { email };
+      const token = String(response?.data?.token || '');
       const businesses = Array.isArray(response?.data?.businesses) ? response.data.businesses : [];
-      writeAuthUser(user);
-      onSuccess?.(user, businesses);
+      const authPayload = { ...user, token };
+      writeAuthUser(authPayload);
+      onSuccess?.(authPayload, businesses);
     } catch (e) {
       setError(e.message || 'Login failed');
     } finally {
