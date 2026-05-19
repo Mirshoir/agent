@@ -3,6 +3,9 @@ import re
 import time
 import secrets
 import base64
+import json
+import hashlib
+import hmac
 import tempfile
 import shutil
 import subprocess
@@ -122,6 +125,7 @@ FACEBOOK_REDIRECT_URI = os.getenv(
 
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://instaagent.streamlit.app")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://agent-1-xi6h.onrender.com")
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
 
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
@@ -242,6 +246,19 @@ class ManualWhatsAppReply(BaseModel):
     text: str
 
 
+class BusinessChannelPayload(BaseModel):
+    platform: str
+    account_label: str
+    account_external_id: str
+    is_active: bool = True
+    config: dict = {}
+
+
+class DashboardLoginRequest(BaseModel):
+    email: str
+    password: str
+
+
 # ============================================================================
 # HELPERS - GENERAL
 # ============================================================================
@@ -255,6 +272,10 @@ def log(title, data=None):
 
 def normalize_id(value) -> str:
     return str(value or "").strip()
+
+
+def normalize_email(value) -> str:
+    return str(value or "").strip().lower()
 
 
 def safe_token(token: str) -> str:
@@ -385,6 +406,20 @@ def is_own_instagram_comment_actor(business: dict, entry_id: str, commenter_id: 
         return True
 
     return False
+
+
+def normalize_email(value: str) -> str:
+    return str(value or "").strip().lower()
+
+
+def hash_dashboard_password(password: str) -> str:
+    return hashlib.sha256((str(password) + str(DASHBOARD_SECRET)).encode()).hexdigest()
+
+
+def verify_dashboard_password(password: str, password_hash: str) -> bool:
+    if not password or not password_hash:
+        return False
+    return hmac.compare_digest(hash_dashboard_password(password), str(password_hash))
 
 
 def get_latest_instagram_comment_anchor(business_id: str, commenter_id: str, post_id: str = "") -> dict:
@@ -960,6 +995,18 @@ def sanitize_business_row(row: dict):
     ]:
         if key in clean:
             clean[key] = safe_token(clean.get(key, ""))
+    return clean
+
+
+def sanitize_channel_row(row: dict):
+    if not row:
+        return None
+    clean = dict(row)
+    cfg = dict(clean.get("config") or {})
+    for key in ("access_token", "page_access_token", "bot_token", "session_file_b64"):
+        if key in cfg:
+            cfg[key] = safe_token(cfg.get(key, ""))
+    clean["config"] = cfg
     return clean
 
 
@@ -2660,6 +2707,127 @@ def get_instagram_user(access_token: str):
     return res.json() if res.ok else {}
 
 
+def encode_oauth_state(owner_email: str = "") -> str:
+    payload = {
+        "owner_email": normalize_email(owner_email),
+        "nonce": secrets.token_urlsafe(10),
+    }
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def decode_oauth_state(state: str) -> dict:
+    try:
+        if not state:
+            return {}
+        padded = state + ("=" * (-len(state) % 4))
+        raw = base64.urlsafe_b64decode(padded.encode()).decode()
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def exchange_facebook_code_for_user_token(code: str) -> str:
+    res = requests.get(
+        f"{GRAPH_FACEBOOK}/oauth/access_token",
+        params={
+            "client_id": META_APP_ID,
+            "client_secret": META_APP_SECRET,
+            "redirect_uri": FACEBOOK_REDIRECT_URI,
+            "code": code,
+        },
+        timeout=30,
+    )
+    log("Facebook short-lived token exchange", {"status": res.status_code, "body": res.text})
+    res.raise_for_status()
+    return normalize_id((res.json() or {}).get("access_token"))
+
+
+def exchange_facebook_long_lived_token(short_lived_token: str) -> str:
+    if not short_lived_token:
+        return ""
+    try:
+        res = requests.get(
+            f"{GRAPH_FACEBOOK}/oauth/access_token",
+            params={
+                "grant_type": "fb_exchange_token",
+                "client_id": META_APP_ID,
+                "client_secret": META_APP_SECRET,
+                "fb_exchange_token": short_lived_token,
+            },
+            timeout=30,
+        )
+        if not res.ok:
+            return short_lived_token
+        return normalize_id((res.json() or {}).get("access_token")) or short_lived_token
+    except Exception:
+        return short_lived_token
+
+
+def get_facebook_user_profile(user_token: str) -> dict:
+    if not user_token:
+        return {}
+    try:
+        res = requests.get(
+            f"{GRAPH_FACEBOOK}/me",
+            params={"fields": "id,name,email", "access_token": user_token},
+            timeout=30,
+        )
+        return res.json() if res.ok else {}
+    except Exception:
+        return {}
+
+
+def get_facebook_pages_with_instagram(user_token: str):
+    if not user_token:
+        return []
+    res = requests.get(
+        f"{GRAPH_FACEBOOK}/me/accounts",
+        params={
+            "fields": "id,name,access_token,instagram_business_account{id,username}",
+            "access_token": user_token,
+        },
+        timeout=30,
+    )
+    log("Facebook pages fetch", {"status": res.status_code, "body": res.text})
+    if not res.ok:
+        return []
+    data = res.json() or {}
+    return data.get("data", []) if isinstance(data, dict) else []
+
+
+def subscribe_page_to_webhooks(page_id: str, page_access_token: str):
+    page_id = normalize_id(page_id)
+    if not page_id or not page_access_token:
+        return False, {"error": "Missing page_id or page_access_token"}
+    try:
+        res = requests.post(
+            f"{GRAPH_FACEBOOK}/{page_id}/subscribed_apps",
+            params={"subscribed_fields": "messages,messaging_postbacks,comments", "access_token": page_access_token},
+            timeout=30,
+        )
+        body = safe_json(res)
+        log("Page webhook subscribe", {"page_id": page_id, "status": res.status_code, "body": body})
+        return res.ok, body
+    except Exception as exc:
+        return False, {"error": str(exc)}
+
+
+def assign_business_owner(user_email: str, business_id: str, role: str = "owner"):
+    clean_email = normalize_email(user_email)
+    business_id = normalize_id(business_id)
+    if not clean_email or not business_id:
+        return
+    try:
+        supabase.table("business_users").upsert(
+            {"user_email": clean_email, "business_id": business_id, "role": role},
+            on_conflict="user_email,business_id",
+        ).execute()
+    except Exception as e:
+        log("business_users upsert failed", str(e))
+
+
 def upsert_business(
         instagram_business_id: str,
         username: str,
@@ -2667,6 +2835,7 @@ def upsert_business(
         oauth_provider: str = "instagram_direct",
         facebook_page_id: str = "",
         facebook_page_name: str = "",
+        page_access_token: str = "",
 ):
     instagram_business_id = normalize_id(instagram_business_id)
     facebook_page_id = normalize_id(facebook_page_id)
@@ -2676,7 +2845,7 @@ def upsert_business(
         "instagram_business_id": instagram_business_id,
         "business_name": username or f"instagram_{instagram_business_id}",
         "access_token": access_token or "",
-        "page_access_token": None,
+        "page_access_token": page_access_token or None,
         "token_preview": safe_token(access_token),
         "oauth_provider": oauth_provider,
         "facebook_page_id": facebook_page_id or None,
@@ -2786,10 +2955,73 @@ async def api_health_deep(
 # API ROUTES - V2 (REACT UI)
 # ============================================================================
 
+@app.post("/api/v2/auth/login")
+async def dashboard_login(payload: DashboardLoginRequest):
+    email = normalize_email(payload.email)
+    password = str(payload.password or "")
+    if not email or not password:
+        return JSONResponse({"status": "error", "error": "Email and password are required."}, status_code=400)
+
+    try:
+        user_result = (
+            supabase.table("dashboard_users")
+            .select("*")
+            .eq("email", email)
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        users = user_result.data or []
+        if not users:
+            return JSONResponse({"status": "error", "error": "Invalid email or password."}, status_code=401)
+
+        user = users[0]
+        if not verify_dashboard_password(password, user.get("password_hash", "")):
+            return JSONResponse({"status": "error", "error": "Invalid email or password."}, status_code=401)
+
+        businesses = []
+        if ADMIN_EMAIL and email == normalize_email(ADMIN_EMAIL):
+            businesses = (supabase.table("businesses").select("*").order("created_at", desc=True).execute().data or [])
+        else:
+            links = (
+                supabase.table("business_users")
+                .select("business_id,role")
+                .eq("user_email", email)
+                .execute()
+                .data
+                or []
+            )
+            business_ids = [row.get("business_id") for row in links if row.get("business_id")]
+            if business_ids:
+                businesses = (
+                    supabase.table("businesses")
+                    .select("*")
+                    .in_("id", business_ids)
+                    .order("created_at", desc=True)
+                    .execute()
+                    .data
+                    or []
+                )
+
+        return {
+            "status": "ok",
+            "data": {
+                "user": {
+                    "id": user.get("id"),
+                    "email": email,
+                    "is_admin": bool(ADMIN_EMAIL and email == normalize_email(ADMIN_EMAIL)),
+                },
+                "businesses": businesses,
+            },
+        }
+    except Exception as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
 @app.get("/api/v2/conversations")
 async def get_conversations_v2(
         platform: str = "all",
         search: str = "",
+        business_id: str = "",
         x_dashboard_secret: str = Header(default=""),
 ):
     """Get all conversations in React UI format"""
@@ -2798,6 +3030,9 @@ async def get_conversations_v2(
 
     try:
         query = supabase.table("inbox_messages").select("*").order("created_at", desc=True).limit(900)
+        clean_business_id = normalize_id(business_id)
+        if clean_business_id:
+            query = query.eq("business_id", clean_business_id)
 
         if platform != "all":
             query = query.eq("platform", platform)
@@ -3469,13 +3704,14 @@ async def instagram_callback(request: Request):
 
 
 @app.get("/connect-facebook")
-async def connect_facebook():
+async def connect_facebook(owner_email: str = ""):
+    state = encode_oauth_state(owner_email)
     params = {
         "client_id": META_APP_ID,
         "redirect_uri": FACEBOOK_REDIRECT_URI,
-        "scope": "pages_show_list,pages_read_engagement,pages_manage_metadata,pages_messaging,instagram_basic,instagram_manage_messages,instagram_manage_comments",
+        "scope": "pages_show_list,pages_read_engagement,pages_manage_metadata,pages_messaging,instagram_basic,instagram_manage_messages,instagram_manage_comments,email",
         "response_type": "code",
-        "state": secrets.token_urlsafe(16),
+        "state": state,
     }
     auth_url = f"https://www.facebook.com/{GRAPH_VERSION}/dialog/oauth?" + urlencode(params)
     return RedirectResponse(auth_url)
@@ -3483,7 +3719,63 @@ async def connect_facebook():
 
 @app.get("/auth/facebook/callback")
 async def facebook_callback(request: Request):
-    return PlainTextResponse("Facebook callback available.", status_code=200)
+    code = request.query_params.get("code", "")
+    if not code:
+        error = request.query_params.get("error_description") or request.query_params.get("error") or "Missing code"
+        return PlainTextResponse(f"Facebook OAuth error: {error}", status_code=400)
+
+    state_data = decode_oauth_state(request.query_params.get("state", ""))
+    state_owner_email = normalize_email(state_data.get("owner_email"))
+
+    try:
+        short_lived = exchange_facebook_code_for_user_token(code)
+        if not short_lived:
+            raise ValueError("Could not exchange Facebook code for token")
+
+        user_token = exchange_facebook_long_lived_token(short_lived)
+        profile = get_facebook_user_profile(user_token)
+        profile_email = normalize_email(profile.get("email"))
+        owner_email = state_owner_email or profile_email or normalize_email(ADMIN_EMAIL)
+
+        pages = get_facebook_pages_with_instagram(user_token)
+        created = []
+        for page in pages:
+            page_id = normalize_id(page.get("id"))
+            page_name = page.get("name") or ""
+            page_access_token = normalize_id(page.get("access_token"))
+            ig = page.get("instagram_business_account") or {}
+            ig_id = normalize_id(ig.get("id"))
+            ig_username = ig.get("username") or f"instagram_{ig_id}" if ig_id else ""
+
+            if not ig_id:
+                continue
+
+            saved = upsert_business(
+                instagram_business_id=ig_id,
+                username=ig_username,
+                access_token=user_token,
+                oauth_provider="facebook_page",
+                facebook_page_id=page_id,
+                facebook_page_name=page_name,
+                page_access_token=page_access_token,
+            )
+
+            saved_row = (saved or [{}])[0] if isinstance(saved, list) else (saved or {})
+            business_id = normalize_id(saved_row.get("id"))
+            if owner_email and business_id:
+                assign_business_owner(owner_email, business_id, role="owner")
+
+            subscribe_page_to_webhooks(page_id, page_access_token)
+            created.append({"business_id": business_id, "instagram_id": ig_id, "page_id": page_id})
+
+        if not created:
+            return RedirectResponse(f"{DASHBOARD_URL}?connected=facebook_no_instagram")
+
+        return RedirectResponse(f"{DASHBOARD_URL}?connected=facebook_success&count={len(created)}")
+
+    except Exception as e:
+        log("Facebook OAuth error", str(e))
+        return PlainTextResponse(f"Facebook OAuth error: {str(e)}", status_code=500)
 
 
 # ============================================================================
@@ -3831,6 +4123,58 @@ async def api_get_businesses(x_dashboard_secret: str = Header(default="")):
     result = supabase.table("businesses").select("*").order("created_at", desc=True).execute()
     rows = [sanitize_business_row(row) for row in (result.data or [])]
     return {"status": "ok", "count": len(rows), "data": rows}
+
+
+@app.get("/api/businesses/{business_id}/channels")
+async def api_get_business_channels(business_id: str, x_dashboard_secret: str = Header(default="")):
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    rows = (
+        supabase.table("business_channels")
+        .select("*")
+        .eq("business_id", normalize_id(business_id))
+        .order("created_at", desc=True)
+        .execute()
+        .data
+        or []
+    )
+    clean = [sanitize_channel_row(row) for row in rows]
+    return {"status": "ok", "count": len(clean), "data": clean}
+
+
+@app.post("/api/businesses/{business_id}/channels")
+async def api_upsert_business_channel(
+    business_id: str,
+    payload: BusinessChannelPayload,
+    x_dashboard_secret: str = Header(default=""),
+):
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    row = {
+        "business_id": normalize_id(business_id),
+        "platform": normalize_id(payload.platform).lower(),
+        "account_label": normalize_id(payload.account_label),
+        "account_external_id": normalize_id(payload.account_external_id),
+        "is_active": bool(payload.is_active),
+        "config": payload.config or {},
+    }
+    result = (
+        supabase.table("business_channels")
+        .upsert(row, on_conflict="business_id,platform,account_external_id")
+        .execute()
+    )
+    data = [sanitize_channel_row(x) for x in (result.data or [])]
+    return {"status": "ok", "data": data}
+
+
+@app.delete("/api/business-channels/{channel_id}")
+async def api_delete_business_channel(channel_id: str, x_dashboard_secret: str = Header(default="")):
+    if require_dashboard_secret(x_dashboard_secret):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    supabase.table("business_channels").delete().eq("id", normalize_id(channel_id)).execute()
+    return {"status": "ok"}
 
 
 @app.get("/api/conversations")
