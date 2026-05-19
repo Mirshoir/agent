@@ -2515,7 +2515,7 @@ function DetailColumn({ conv, t, stats, onDelete }) {
 }
 
 // ---------- Top bar ----------
-function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onToggleAi, onRefresh, onToast, onPin, onArchive, onDelete, onMore, moreOpen }) {
+function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onToggleAi, onRefresh, onToast, onPin, onArchive, onDelete, onMore, moreOpen, onLogout }) {
   const [accountOpen, setAccountOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
@@ -2581,6 +2581,14 @@ function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onT
             <div className="pop-menu profile-menu">
               <button onClick={() => onToast('Profile settings are local for now')}>Profile settings</button>
               <button onClick={() => { window.localStorage.removeItem('instaagent_dashboard_secret'); onToast('Dashboard secret cleared'); }}>Clear secret</button>
+              <button
+                onClick={() => {
+                  setProfileOpen(false);
+                  onLogout?.();
+                }}
+              >
+                Log out
+              </button>
             </div>
           )}
         </div>
@@ -2594,7 +2602,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "theme": "light"
 }/*EDITMODE-END*/;
 
-function App({ lang, setLang, initialBusinessId = '' }) {
+function App({ lang, setLang, initialBusinessId = '', onLogout }) {
   const t = window.STRINGS[lang];
 
   const [conversations, setConversations] = useState(window.CONVERSATIONS);
@@ -3267,6 +3275,7 @@ function App({ lang, setLang, initialBusinessId = '' }) {
           onDelete={deleteConversation}
           onMore={() => setMoreOpen(v => !v)}
           moreOpen={moreOpen}
+          onLogout={onLogout}
         />
         <Rail t={t} activeView={activeView} onView={changeView} />
         <ListColumn
@@ -3360,7 +3369,7 @@ function Root() {
 
   useEffect(() => {
     const onHashChange = () => setShowDashboard(window.location.hash === DASHBOARD_HASH);
-    const onHashChangeSignIn = () => setShowSignIn(window.location.hash === SIGNIN_HASH);
+    const onHashChangeSignIn = () => setShowSignIn(window.location.hash === SIGNIN_HASH && !readAuthUser());
     window.addEventListener('hashchange', onHashChange);
     window.addEventListener('hashchange', onHashChangeSignIn);
     return () => {
@@ -3376,6 +3385,14 @@ function Root() {
       setShowDashboard(false);
     }
   }, [showDashboard, authUser]);
+
+  useEffect(() => {
+    if (showSignIn && authUser) {
+      window.location.hash = DASHBOARD_HASH;
+      setShowSignIn(false);
+      setShowDashboard(true);
+    }
+  }, [showSignIn, authUser]);
 
   const openDashboard = () => {
     if (!authUser) {
@@ -3400,8 +3417,17 @@ function Root() {
     setShowSignIn(false);
   };
 
+  const onLogout = () => {
+    writeAuthUser(null);
+    setAuthUser(null);
+    setAuthBusinesses([]);
+    window.location.hash = '#top';
+    setShowDashboard(false);
+    setShowSignIn(false);
+  };
+
   return showDashboard
-    ? <App lang={lang} setLang={setLang} initialBusinessId={authBusinesses[0]?.id || ''} />
+    ? <App lang={lang} setLang={setLang} initialBusinessId={authBusinesses[0]?.id || ''} onLogout={onLogout} />
     : (showSignIn
       ? <LoginPage lang={lang} onSuccess={onSignedIn} onBack={() => { window.location.hash = '#top'; setShowSignIn(false); }} />
       : <LandingPage onOpenDashboard={openDashboard} onOpenSignIn={openSignIn} lang={lang} setLang={setLang} isSignedIn={Boolean(authUser)} />);
