@@ -84,8 +84,9 @@ const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
 const LANDING_LOGO = '/brand/milana-premium-logo.png';
 const DASHBOARD_HASH = '#dashboard';
+const SIGNIN_HASH = '#signin';
 const UI_LANG_STORAGE_KEY = 'instaagent_ui_lang';
-const SIGN_IN_URL = import.meta.env.VITE_SIGNIN_URL || window.INSTAAGENT_SIGNIN_URL || 'https://instaagent.streamlit.app';
+const AUTH_STORAGE_KEY = 'instaagent_auth_user';
 
 const LANDING_PREVIEWS = [
   ['inbox', '/screenshots/inbox.png'],
@@ -419,7 +420,7 @@ const EMOJI_SETS = [
   { label: 'Symbols', items: '✅ ❌ ❗ ❓ ⁉️ ⚠️ 🚫 🔴 🟠 🟡 🟢 🔵 🟣 ⚫ ⚪ 🟤 ⬆️ ⬇️ ⬅️ ➡️ 🔁 🔄 🆕 🆗 🆒 🆘 💲 #️⃣ *️⃣ 0️⃣ 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣ 8️⃣ 9️⃣'.split(' ') },
 ];
 
-function LandingPage({ onOpenDashboard, lang, setLang }) {
+function LandingPage({ onOpenDashboard, onOpenSignIn, lang, setLang, isSignedIn }) {
   const l = LANDING_TEXT[lang] || LANDING_TEXT.en;
   return (
     <main className="landing-page">
@@ -439,7 +440,7 @@ function LandingPage({ onOpenDashboard, lang, setLang }) {
             <button key={code} className={lang === code ? 'on' : ''} onClick={() => setLang(code)}>{code}</button>
           ))}
         </div>
-        <a className="landing-signin-btn" href={SIGN_IN_URL}>{l.signIn}</a>
+        {!isSignedIn ? <button className="landing-signin-btn" onClick={onOpenSignIn}>{l.signIn}</button> : null}
         <button onClick={onOpenDashboard}>{l.openDashboard}</button>
       </nav>
 
@@ -578,6 +579,77 @@ function LandingPage({ onOpenDashboard, lang, setLang }) {
           <button onClick={onOpenDashboard}>Dashboard link</button>
         </nav>
       </footer>
+    </main>
+  );
+}
+
+function readAuthUser() {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(AUTH_STORAGE_KEY) || 'null');
+    if (!value || typeof value !== 'object') return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function writeAuthUser(user) {
+  if (!user) {
+    window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    return;
+  }
+  window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(user));
+}
+
+function LoginPage({ lang, onSuccess, onBack }) {
+  const l = LANDING_TEXT[lang] || LANDING_TEXT.en;
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const submit = async (event) => {
+    event.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      const response = await API.postJson('/api/v2/auth/login', { email, password });
+      const user = response?.data?.user || { email };
+      const businesses = Array.isArray(response?.data?.businesses) ? response.data.businesses : [];
+      writeAuthUser(user);
+      onSuccess?.(user, businesses);
+    } catch (e) {
+      setError(e.message || 'Login failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <main className="landing-page">
+      <nav className="landing-nav">
+        <a className="landing-brand" href="#top">
+          <img src={LANDING_LOGO} alt="Milana Premium logo" />
+          <span>{l.appName}</span>
+        </a>
+        <div className="landing-links" />
+        <button className="secondary" onClick={onBack}>{l.navFeatures}</button>
+      </nav>
+      <section className="landing-section" style={{ maxWidth: 540, margin: '32px auto 0' }}>
+        <h2>{l.signIn}</h2>
+        <form onSubmit={submit} className="feature-card" style={{ marginTop: 16 }}>
+          <label className="field-row">
+            <span>Email</span>
+            <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required />
+          </label>
+          <label className="field-row">
+            <span>Password</span>
+            <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required />
+          </label>
+          {error ? <p style={{ color: 'var(--danger)', margin: '6px 0 12px' }}>{error}</p> : null}
+          <button type="submit" disabled={loading}>{loading ? 'Signing in...' : l.signIn}</button>
+        </form>
+      </section>
     </main>
   );
 }
@@ -2517,7 +2589,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "theme": "light"
 }/*EDITMODE-END*/;
 
-function App({ lang, setLang }) {
+function App({ lang, setLang, initialBusinessId = '' }) {
   const t = window.STRINGS[lang];
 
   const [conversations, setConversations] = useState(window.CONVERSATIONS);
@@ -2533,7 +2605,7 @@ function App({ lang, setLang }) {
   const [toast, setToast] = useState('');
   const [moreOpen, setMoreOpen] = useState(false);
   const [businesses, setBusinesses] = useState([]);
-  const [selectedBusinessId, setSelectedBusinessId] = useState('');
+  const [selectedBusinessId, setSelectedBusinessId] = useState(initialBusinessId || '');
   const [promptSettings, setPromptSettings] = useState({});
   const [promptLoading, setPromptLoading] = useState(false);
   const [promptSaving, setPromptSaving] = useState(false);
@@ -2736,7 +2808,8 @@ function App({ lang, setLang }) {
   const loadConversations = async ({ sideLoad = true, silent = false } = {}) => {
     if (!silent) setLoading(true);
     try {
-      const data = await API.get('/api/v2/conversations');
+      const qs = selectedBusinessId ? `?business_id=${encodeURIComponent(selectedBusinessId)}` : '';
+      const data = await API.get(`/api/v2/conversations${qs}`);
       const selectedCurrent = selectedIdRef.current;
       const next = (data.data || [])
         .map(normalizeConversation)
@@ -3272,6 +3345,9 @@ function App({ lang, setLang }) {
 function Root() {
   const [lang, setLang] = useState(() => window.localStorage.getItem(UI_LANG_STORAGE_KEY) || 'en');
   const [showDashboard, setShowDashboard] = useState(() => window.location.hash === DASHBOARD_HASH || urlParams.get('dashboard') === '1');
+  const [showSignIn, setShowSignIn] = useState(() => window.location.hash === SIGNIN_HASH);
+  const [authUser, setAuthUser] = useState(() => readAuthUser());
+  const [authBusinesses, setAuthBusinesses] = useState([]);
 
   useEffect(() => {
     window.localStorage.setItem(UI_LANG_STORAGE_KEY, lang);
@@ -3279,18 +3355,51 @@ function Root() {
 
   useEffect(() => {
     const onHashChange = () => setShowDashboard(window.location.hash === DASHBOARD_HASH);
+    const onHashChangeSignIn = () => setShowSignIn(window.location.hash === SIGNIN_HASH);
     window.addEventListener('hashchange', onHashChange);
-    return () => window.removeEventListener('hashchange', onHashChange);
+    window.addEventListener('hashchange', onHashChangeSignIn);
+    return () => {
+      window.removeEventListener('hashchange', onHashChange);
+      window.removeEventListener('hashchange', onHashChangeSignIn);
+    };
   }, []);
 
+  useEffect(() => {
+    if (showDashboard && !authUser) {
+      window.location.hash = SIGNIN_HASH;
+      setShowSignIn(true);
+      setShowDashboard(false);
+    }
+  }, [showDashboard, authUser]);
+
   const openDashboard = () => {
+    if (!authUser) {
+      window.location.hash = SIGNIN_HASH;
+      setShowSignIn(true);
+      return;
+    }
     window.location.hash = DASHBOARD_HASH;
     setShowDashboard(true);
   };
 
+  const openSignIn = () => {
+    window.location.hash = SIGNIN_HASH;
+    setShowSignIn(true);
+  };
+
+  const onSignedIn = (user, businesses = []) => {
+    setAuthUser(user || null);
+    setAuthBusinesses(Array.isArray(businesses) ? businesses : []);
+    window.location.hash = DASHBOARD_HASH;
+    setShowDashboard(true);
+    setShowSignIn(false);
+  };
+
   return showDashboard
-    ? <App lang={lang} setLang={setLang} />
-    : <LandingPage onOpenDashboard={openDashboard} lang={lang} setLang={setLang} />;
+    ? <App lang={lang} setLang={setLang} initialBusinessId={authBusinesses[0]?.id || ''} />
+    : (showSignIn
+      ? <LoginPage lang={lang} onSuccess={onSignedIn} onBack={() => { window.location.hash = '#top'; setShowSignIn(false); }} />
+      : <LandingPage onOpenDashboard={openDashboard} onOpenSignIn={openSignIn} lang={lang} setLang={setLang} isSignedIn={Boolean(authUser)} />);
 }
 
 createRoot(document.getElementById('root')).render(<Root />);
