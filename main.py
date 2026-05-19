@@ -422,6 +422,90 @@ def verify_dashboard_password(password: str, password_hash: str) -> bool:
     return hmac.compare_digest(hash_dashboard_password(password), str(password_hash))
 
 
+AUTH_TOKEN_TTL_SECONDS = int(os.getenv("DASHBOARD_AUTH_TTL_SECONDS", str(60 * 60 * 24 * 30)))
+
+
+def create_dashboard_auth_token(email: str, is_admin: bool = False) -> str:
+    payload = {
+        "email": normalize_email(email),
+        "is_admin": bool(is_admin),
+        "exp": int(time.time()) + AUTH_TOKEN_TTL_SECONDS,
+    }
+    payload_b64 = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()).decode().rstrip("=")
+    signature = hmac.new(str(DASHBOARD_SECRET).encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
+    return f"{payload_b64}.{signature}"
+
+
+def decode_dashboard_auth_token(token: str) -> Optional[dict]:
+    token = normalize_id(token)
+    if "." not in token:
+        return None
+    payload_b64, signature = token.rsplit(".", 1)
+    expected = hmac.new(str(DASHBOARD_SECRET).encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return None
+
+    padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+    except Exception:
+        return None
+
+    exp = int(payload.get("exp") or 0)
+    if exp and exp < int(time.time()):
+        return None
+    payload["email"] = normalize_email(payload.get("email", ""))
+    payload["is_admin"] = bool(payload.get("is_admin", False))
+    return payload
+
+
+def list_user_business_ids(email: str) -> list[str]:
+    email = normalize_email(email)
+    if not email:
+        return []
+    rows = (
+        supabase.table("business_users")
+        .select("business_id")
+        .eq("user_email", email)
+        .execute()
+        .data
+        or []
+    )
+    return [normalize_id(row.get("business_id")) for row in rows if normalize_id(row.get("business_id"))]
+
+
+def parse_auth_header(authorization: str) -> str:
+    value = normalize_id(authorization)
+    if value.lower().startswith("bearer "):
+        return normalize_id(value[7:])
+    return ""
+
+
+def resolve_dashboard_access(authorization: str = "", x_dashboard_secret: str = "") -> Optional[dict]:
+    token = parse_auth_header(authorization)
+    if token:
+        payload = decode_dashboard_auth_token(token)
+        if not payload:
+            return None
+        email = normalize_email(payload.get("email"))
+        is_admin = bool(payload.get("is_admin"))
+        business_ids = [] if is_admin else list_user_business_ids(email)
+        return {"email": email, "is_admin": is_admin, "business_ids": business_ids}
+
+    # Backward-compatible admin/system path
+    if not require_dashboard_secret(x_dashboard_secret):
+        return {"email": "system", "is_admin": True, "business_ids": []}
+    return None
+
+
+def can_access_business(access: dict, business_id: str) -> bool:
+    if not access:
+        return False
+    if access.get("is_admin"):
+        return True
+    return normalize_id(business_id) in set(access.get("business_ids") or [])
+
+
 def get_latest_instagram_comment_anchor(business_id: str, commenter_id: str, post_id: str = "") -> dict:
     """
     Find the most recent inbound customer comment for (business, commenter[, post]).
@@ -3003,14 +3087,17 @@ async def dashboard_login(payload: DashboardLoginRequest):
                     or []
                 )
 
+        is_admin = bool(ADMIN_EMAIL and email == normalize_email(ADMIN_EMAIL))
+        token = create_dashboard_auth_token(email=email, is_admin=is_admin)
         return {
             "status": "ok",
             "data": {
                 "user": {
                     "id": user.get("id"),
                     "email": email,
-                    "is_admin": bool(ADMIN_EMAIL and email == normalize_email(ADMIN_EMAIL)),
+                    "is_admin": is_admin,
                 },
+                "token": token,
                 "businesses": businesses,
             },
         }
@@ -3022,17 +3109,26 @@ async def get_conversations_v2(
         platform: str = "all",
         search: str = "",
         business_id: str = "",
+        authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
     """Get all conversations in React UI format"""
-    if require_dashboard_secret(x_dashboard_secret):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     try:
         query = supabase.table("inbox_messages").select("*").order("created_at", desc=True).limit(900)
         clean_business_id = normalize_id(business_id)
         if clean_business_id:
+            if not can_access_business(access, clean_business_id):
+                return {"status": "ok", "count": 0, "data": []}
             query = query.eq("business_id", clean_business_id)
+        elif not access.get("is_admin"):
+            allowed = access.get("business_ids") or []
+            if not allowed:
+                return {"status": "ok", "count": 0, "data": []}
+            query = query.in_("business_id", allowed)
 
         if platform != "all":
             query = query.eq("platform", platform)
@@ -3113,10 +3209,12 @@ async def get_conversations_v2(
 async def get_conversation_messages_v2(
         conversation_id: str,
         limit: int = 250,
+        authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
     """Get all messages for a conversation"""
-    if require_dashboard_secret(x_dashboard_secret):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     try:
@@ -3128,6 +3226,8 @@ async def get_conversation_messages_v2(
             )
 
         platform, business_id, channel, customer_scope = parts
+        if not can_access_business(access, business_id):
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
         platform = normalize_id(platform).lower()
         channel = standard_channel(platform, channel)
         customer_id = customer_scope
@@ -3193,10 +3293,12 @@ async def get_conversation_messages_v2(
 @app.post("/api/v2/send-message")
 async def send_message_v2(
         request: Request,
+        authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
     """Send a message via the React UI"""
-    if require_dashboard_secret(x_dashboard_secret):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     try:
@@ -3218,6 +3320,8 @@ async def send_message_v2(
             )
 
         platform, business_id, channel, customer_scope = parts
+        if not can_access_business(access, business_id):
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
         platform = normalize_id(platform).lower()
         channel = standard_channel(platform, channel)
         target_id = customer_scope
@@ -3323,10 +3427,12 @@ async def send_message_v2(
 async def toggle_ai_v2(
         conversation_id: str,
         request: Request,
+        authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
     """Toggle AI for a specific conversation"""
-    if require_dashboard_secret(x_dashboard_secret):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     try:
@@ -3338,6 +3444,8 @@ async def toggle_ai_v2(
             )
 
         platform, business_id, channel, customer_id = parts
+        if not can_access_business(access, business_id):
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
         platform = normalize_id(platform).lower()
         channel = standard_channel(platform, channel)
 
@@ -3369,10 +3477,12 @@ async def toggle_ai_v2(
 @app.delete("/api/v2/conversation/{conversation_id}")
 async def delete_conversation_v2(
         conversation_id: str,
+        authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
     """Delete a dashboard conversation from inbox_messages only."""
-    if require_dashboard_secret(x_dashboard_secret):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     try:
@@ -3384,6 +3494,8 @@ async def delete_conversation_v2(
             )
 
         platform, business_id, channel, customer_id = parts
+        if not can_access_business(access, business_id):
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
         platform = normalize_id(platform).lower()
         channel = standard_channel(platform, channel)
 
@@ -3422,10 +3534,12 @@ async def delete_conversation_v2(
 @app.get("/api/v2/conversation/{conversation_id}")
 async def get_conversation_details_v2(
         conversation_id: str,
+        authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
     """Get full conversation details"""
-    if require_dashboard_secret(x_dashboard_secret):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     try:
@@ -3437,6 +3551,8 @@ async def get_conversation_details_v2(
             )
 
         platform, business_id, channel, customer_id = parts
+        if not can_access_business(access, business_id):
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
         platform = normalize_id(platform).lower()
         channel = standard_channel(platform, channel)
 
@@ -3485,23 +3601,40 @@ async def get_conversation_details_v2(
 
 @app.get("/api/v2/stats")
 async def get_stats_v2(
+        authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
     """Get dashboard statistics"""
-    if require_dashboard_secret(x_dashboard_secret):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     try:
-        businesses = get_all_businesses()
+        if access.get("is_admin"):
+            businesses = get_all_businesses()
+            scoped_ids = []
+        else:
+            scoped_ids = access.get("business_ids") or []
+            businesses = []
+            if scoped_ids:
+                businesses = (
+                    supabase.table("businesses")
+                    .select("*")
+                    .in_("id", scoped_ids)
+                    .order("created_at", desc=True)
+                    .execute()
+                    .data
+                    or []
+                )
         return {
             'status': 'ok',
             'data': {
-                'total_messages': get_message_count(),
+                'total_messages': get_message_count(business_ids=scoped_ids) if not access.get("is_admin") else get_message_count(),
                 'total_accounts': len(businesses),
                 'active_accounts': sum(1 for b in businesses if b.get("bot_enabled")),
-                'instagram_messages': get_message_count('instagram'),
-                'telegram_messages': get_message_count('telegram'),
-                'whatsapp_messages': get_message_count('whatsapp'),
+                'instagram_messages': get_message_count('instagram', scoped_ids) if not access.get("is_admin") else get_message_count('instagram'),
+                'telegram_messages': get_message_count('telegram', scoped_ids) if not access.get("is_admin") else get_message_count('telegram'),
+                'whatsapp_messages': get_message_count('whatsapp', scoped_ids) if not access.get("is_admin") else get_message_count('whatsapp'),
                 'active_conversations': 0,
                 'needing_human': 0,
             }
@@ -4116,19 +4249,36 @@ async def dashboard_send_voice_file(
 
 
 @app.get("/api/businesses")
-async def api_get_businesses(x_dashboard_secret: str = Header(default="")):
-    if require_dashboard_secret(x_dashboard_secret):
+async def api_get_businesses(
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
 
-    result = supabase.table("businesses").select("*").order("created_at", desc=True).execute()
+    query = supabase.table("businesses").select("*").order("created_at", desc=True)
+    if not access.get("is_admin"):
+        allowed = access.get("business_ids") or []
+        if not allowed:
+            return {"status": "ok", "count": 0, "data": []}
+        query = query.in_("id", allowed)
+    result = query.execute()
     rows = [sanitize_business_row(row) for row in (result.data or [])]
     return {"status": "ok", "count": len(rows), "data": rows}
 
 
 @app.get("/api/businesses/{business_id}/channels")
-async def api_get_business_channels(business_id: str, x_dashboard_secret: str = Header(default="")):
-    if require_dashboard_secret(x_dashboard_secret):
+async def api_get_business_channels(
+    business_id: str,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
     rows = (
         supabase.table("business_channels")
@@ -4147,10 +4297,14 @@ async def api_get_business_channels(business_id: str, x_dashboard_secret: str = 
 async def api_upsert_business_channel(
     business_id: str,
     payload: BusinessChannelPayload,
+    authorization: str = Header(default=""),
     x_dashboard_secret: str = Header(default=""),
 ):
-    if require_dashboard_secret(x_dashboard_secret):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
     row = {
         "business_id": normalize_id(business_id),
@@ -4170,9 +4324,27 @@ async def api_upsert_business_channel(
 
 
 @app.delete("/api/business-channels/{channel_id}")
-async def api_delete_business_channel(channel_id: str, x_dashboard_secret: str = Header(default="")):
-    if require_dashboard_secret(x_dashboard_secret):
+async def api_delete_business_channel(
+    channel_id: str,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    if not access.get("is_admin"):
+        row = (
+            supabase.table("business_channels")
+            .select("business_id")
+            .eq("id", normalize_id(channel_id))
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        business_id = normalize_id(row[0].get("business_id")) if row else ""
+        if not can_access_business(access, business_id):
+            return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
     supabase.table("business_channels").delete().eq("id", normalize_id(channel_id)).execute()
     return {"status": "ok"}
 
@@ -4385,9 +4557,16 @@ async def api_toggle_chat_ai(
 
 
 @app.post("/api/business-settings")
-async def api_update_business_settings(body: BusinessSettingsUpdate, x_dashboard_secret: str = Header(default="")):
-    if require_dashboard_secret(x_dashboard_secret):
+async def api_update_business_settings(
+    body: BusinessSettingsUpdate,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    if not can_access_business(access, body.business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
     business = get_business_by_id(body.business_id)
     if not business:
@@ -4402,9 +4581,16 @@ async def api_update_business_settings(body: BusinessSettingsUpdate, x_dashboard
 
 
 @app.get("/api/ai-prompt-settings/{business_id}")
-async def api_get_ai_prompt_settings(business_id: str, x_dashboard_secret: str = Header(default="")):
-    if require_dashboard_secret(x_dashboard_secret):
+async def api_get_ai_prompt_settings(
+    business_id: str,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
     business = get_business_by_id(business_id)
     if not business:
@@ -4414,9 +4600,16 @@ async def api_get_ai_prompt_settings(business_id: str, x_dashboard_secret: str =
 
 
 @app.post("/api/v2/ai-prompt/generate")
-async def api_generate_ai_prompt(body: AIPromptGenerateRequest, x_dashboard_secret: str = Header(default="")):
-    if require_dashboard_secret(x_dashboard_secret):
+async def api_generate_ai_prompt(
+    body: AIPromptGenerateRequest,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    if not can_access_business(access, body.business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
     business = get_business_by_id(body.business_id)
     if not business:
@@ -4442,9 +4635,16 @@ async def api_generate_ai_prompt(body: AIPromptGenerateRequest, x_dashboard_secr
 
 
 @app.post("/api/ai-prompt-settings")
-async def api_update_ai_prompt_settings(body: AIPromptSettingsUpdate, x_dashboard_secret: str = Header(default="")):
-    if require_dashboard_secret(x_dashboard_secret):
+async def api_update_ai_prompt_settings(
+    body: AIPromptSettingsUpdate,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    if not can_access_business(access, body.business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
     business = get_business_by_id(body.business_id)
     if not business:
