@@ -2,6 +2,7 @@ import os
 import hmac
 import html
 import hashlib
+import base64
 import requests
 import streamlit as st
 from dotenv import load_dotenv
@@ -346,6 +347,21 @@ def get_all_businesses():
     )
 
 
+def create_business(payload):
+    return supabase.table("businesses").insert(payload).execute()
+
+
+def delete_business(business_id):
+    if not business_id:
+        return None
+    # Remove user links first to avoid orphaned assignments in looser schemas.
+    try:
+        supabase.table("business_users").delete().eq("business_id", business_id).execute()
+    except Exception:
+        pass
+    return supabase.table("businesses").delete().eq("id", business_id).execute()
+
+
 def get_user_businesses(user_email):
     links = (
         supabase.table("business_users")
@@ -379,6 +395,50 @@ def get_user_businesses(user_email):
         b["user_role"] = role_map.get(b["id"], "owner")
 
     return businesses
+
+
+def mask_secret(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if len(raw) <= 10:
+        return "*" * len(raw)
+    return f"{raw[:4]}...{raw[-4:]}"
+
+
+def list_business_channels(business_id):
+    if not business_id:
+        return []
+    try:
+        return (
+            supabase.table("business_channels")
+            .select("*")
+            .eq("business_id", business_id)
+            .order("created_at", desc=True)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as e:
+        st.warning(f"Could not load business channels. Create table `business_channels` first. ({e})")
+        return []
+
+
+def upsert_business_channel(payload):
+    return (
+        supabase.table("business_channels")
+        .upsert(payload, on_conflict="id")
+        .execute()
+    )
+
+
+def remove_business_channel(channel_id):
+    return (
+        supabase.table("business_channels")
+        .delete()
+        .eq("id", channel_id)
+        .execute()
+    )
 
 
 def get_message_count(platform=None, business_ids=None):
@@ -960,6 +1020,134 @@ def business_editor(business):
                 st.error(f"Save failed: {e}")
 
 
+def render_account_connections_page(businesses):
+    st.subheader("Account Connections")
+    st.caption("Manual onboarding for multi-account businesses. Add all Instagram, Telegram, and WhatsApp accounts here.")
+
+    if not businesses:
+        st.info("No businesses available.")
+        return
+
+    business_options = {f"{b.get('business_name') or b['id']} ({b['id'][:8]})": b for b in businesses}
+    selected_label = st.selectbox("Select business", list(business_options.keys()))
+    selected_business = business_options[selected_label]
+    business_id = selected_business["id"]
+
+    channels = list_business_channels(business_id)
+
+    st.markdown("### Connected accounts")
+    if not channels:
+        st.info("No connected accounts yet.")
+    else:
+        for idx, ch in enumerate(channels):
+            platform = ch.get("platform", "")
+            label = ch.get("account_label") or ch.get("account_external_id") or f"{platform} account"
+            config = ch.get("config") or {}
+            title = f"{platform.upper()} · {label}"
+            with st.expander(title):
+                st.write(f"Status: {'active' if ch.get('is_active', True) else 'paused'}")
+                st.write(f"External ID: {ch.get('account_external_id') or '-'}")
+                if platform == "instagram":
+                    st.write(f"IG token: {mask_secret(config.get('access_token')) or '-'}")
+                    st.write(f"Page token: {mask_secret(config.get('page_access_token')) or '-'}")
+                elif platform == "telegram_bot":
+                    st.write(f"Bot token: {mask_secret(config.get('bot_token')) or '-'}")
+                elif platform == "telegram_user":
+                    st.write(f"Session file: {config.get('session_filename') or '-'}")
+                elif platform == "whatsapp":
+                    st.write(f"Access token: {mask_secret(config.get('access_token')) or '-'}")
+                    st.write(f"Phone Number ID: {config.get('phone_number_id') or '-'}")
+                    st.write(f"WABA ID: {config.get('waba_id') or '-'}")
+
+                if st.button("Remove account", key=f"remove_channel_{idx}_{ch.get('id')}", type="secondary"):
+                    try:
+                        remove_business_channel(ch.get("id"))
+                        st.success("Account removed.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not remove account: {e}")
+
+    st.divider()
+    st.markdown("### Add / update account")
+    platform = st.selectbox(
+        "Platform type",
+        ["instagram", "telegram_bot", "telegram_user", "whatsapp"],
+        format_func=lambda x: {
+            "instagram": "Instagram Business",
+            "telegram_bot": "Telegram Bot",
+            "telegram_user": "Telegram User (.session)",
+            "whatsapp": "WhatsApp Cloud",
+        }[x],
+    )
+    account_label = st.text_input("Account label", placeholder="Main IG, TG bot #1, WA sales #2")
+    account_external_id = st.text_input("External ID", placeholder="IG business ID / page ID / bot username / phone id")
+    active = st.toggle("Active", value=True)
+
+    config = {}
+    if platform == "instagram":
+        ig_business_id = st.text_input("Instagram Business ID")
+        page_id = st.text_input("Facebook Page ID (optional)")
+        access_token = st.text_area("Instagram access token", height=100)
+        page_access_token = st.text_area("Facebook page access token (optional)", height=100)
+        config = {
+            "instagram_business_id": ig_business_id.strip(),
+            "facebook_page_id": page_id.strip(),
+            "access_token": access_token.strip(),
+            "page_access_token": page_access_token.strip(),
+        }
+        if not account_external_id.strip():
+            account_external_id = ig_business_id.strip()
+
+    elif platform == "telegram_bot":
+        bot_token = st.text_area("Telegram bot token", height=100)
+        bot_username = st.text_input("Bot username (optional)")
+        config = {"bot_token": bot_token.strip(), "bot_username": bot_username.strip()}
+
+    elif platform == "telegram_user":
+        session_file = st.file_uploader("Upload .session file", type=["session"])
+        session_name = st.text_input("Session name", placeholder="milana_user.session")
+        session_b64 = ""
+        if session_file is not None:
+            session_b64 = base64.b64encode(session_file.getvalue()).decode()
+        config = {
+            "session_filename": session_name.strip() or (session_file.name if session_file else ""),
+            "session_file_b64": session_b64,
+        }
+
+    elif platform == "whatsapp":
+        waba_id = st.text_input("WhatsApp Business Account ID")
+        phone_number_id = st.text_input("Phone Number ID")
+        wa_access_token = st.text_area("WhatsApp access token", height=100)
+        config = {
+            "waba_id": waba_id.strip(),
+            "phone_number_id": phone_number_id.strip(),
+            "access_token": wa_access_token.strip(),
+        }
+        if not account_external_id.strip():
+            account_external_id = phone_number_id.strip()
+
+    if st.button("Save account connection", type="primary"):
+        if not account_label.strip():
+            st.warning("Account label is required.")
+        elif not account_external_id.strip():
+            st.warning("External ID is required.")
+        else:
+            payload = {
+                "business_id": business_id,
+                "platform": platform,
+                "account_label": account_label.strip(),
+                "account_external_id": account_external_id.strip(),
+                "is_active": bool(active),
+                "config": config,
+            }
+            try:
+                upsert_business_channel(payload)
+                st.success("Account connection saved.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not save account: {e}")
+
+
 def render_social_inbox(businesses):
     business_ids = [b["id"] for b in businesses]
 
@@ -1155,6 +1343,133 @@ def render_admin_users_page(businesses):
     st.subheader("User Management")
     st.caption("Create business logins, assign business access, reset passwords, and deactivate users.")
 
+    with st.form("create_business_form"):
+        st.markdown("### Register new business")
+        c1, c2 = st.columns(2)
+        with c1:
+            business_name = st.text_input("Business name", placeholder="Milana Premium")
+            business_type = st.text_input("Business type", placeholder="Textile / Retail / E-commerce")
+            owner_email = st.text_input("Owner email (optional)", placeholder="owner@company.com")
+        with c2:
+            instagram_business_id = st.text_input("Instagram Business ID (optional)")
+            facebook_page_id = st.text_input("Facebook Page ID (optional)")
+            default_language = st.selectbox("Default language", ["uz", "ru", "en"], index=0)
+
+        access_token = st.text_area("Instagram/Meta token (optional)", height=80)
+        page_access_token = st.text_area("Facebook page token (optional)", height=80)
+
+        submit_business = st.form_submit_button("Create business", type="primary")
+
+        if submit_business:
+            if not business_name.strip():
+                st.warning("Business name is required.")
+            else:
+                payload = {
+                    "business_name": business_name.strip(),
+                    "business_type": business_type.strip() or "General",
+                    "instagram_business_id": instagram_business_id.strip() or f"manual_{business_name.strip().lower().replace(' ', '_')}",
+                    "facebook_page_id": facebook_page_id.strip() or None,
+                    "access_token": access_token.strip() or "",
+                    "page_access_token": page_access_token.strip() or None,
+                    "oauth_provider": "manual",
+                    "token_preview": (access_token.strip()[:10] + "...") if access_token.strip() else "",
+                    "language": default_language,
+                    "tone": "friendly, polite, sales-focused",
+                    "bot_enabled": True,
+                    "auto_reply_dms": True,
+                    "auto_reply_comments": True,
+                    "knowledge": "",
+                    "products": "",
+                    "prices": "",
+                    "delivery_info": "",
+                    "working_hours": "",
+                    "faq": "",
+                    "catalog_link": "",
+                    "sales_phone": "",
+                    "ai_model": "mistral-small-latest",
+                    "ai_provider": "mistral",
+                    "ai_temperature": 0.5,
+                    "ai_max_tokens": 130,
+                }
+                try:
+                    created = create_business(payload).data or []
+                    if created and owner_email.strip():
+                        assign_user_business(owner_email.strip(), created[0]["id"], "owner")
+                    st.success("Business created successfully.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to create business: {e}")
+
+    st.divider()
+
+    st.markdown("### Manage all businesses")
+    st.caption("Edit or delete any registered business.")
+
+    if not businesses:
+        st.info("No businesses found.")
+    else:
+        for idx, business in enumerate(businesses):
+            bid = business.get("id")
+            bname = business.get("business_name") or bid
+            with st.expander(f"{bname} · {str(bid)[:8]}"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    edit_name = st.text_input("Business name", value=business.get("business_name", ""), key=f"biz_name_{idx}")
+                    edit_type = st.text_input("Business type", value=business.get("business_type", ""), key=f"biz_type_{idx}")
+                    edit_lang = st.selectbox(
+                        "Language",
+                        ["uz", "ru", "en"],
+                        index=["uz", "ru", "en"].index(business.get("language", "uz")) if business.get("language", "uz") in ["uz", "ru", "en"] else 0,
+                        key=f"biz_lang_{idx}",
+                    )
+                with c2:
+                    edit_ig_id = st.text_input("Instagram Business ID", value=business.get("instagram_business_id", ""), key=f"biz_ig_{idx}")
+                    edit_page_id = st.text_input("Facebook Page ID", value=business.get("facebook_page_id", "") or "", key=f"biz_page_{idx}")
+                    edit_enabled = st.toggle("Automation enabled", value=bool(business.get("bot_enabled", True)), key=f"biz_enabled_{idx}")
+
+                c3, c4 = st.columns(2)
+                with c3:
+                    if st.button("Save business changes", key=f"save_biz_{idx}", type="primary", use_container_width=True):
+                        try:
+                            safe_update_business(
+                                business,
+                                {
+                                    "business_name": edit_name.strip(),
+                                    "business_type": edit_type.strip(),
+                                    "language": edit_lang,
+                                    "instagram_business_id": edit_ig_id.strip(),
+                                    "facebook_page_id": edit_page_id.strip() or None,
+                                    "bot_enabled": bool(edit_enabled),
+                                },
+                            )
+                            st.success("Business updated.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Update failed: {e}")
+                with c4:
+                    confirm_key = f"confirm_delete_{idx}"
+                    if confirm_key not in st.session_state:
+                        st.session_state[confirm_key] = False
+
+                    if not st.session_state[confirm_key]:
+                        if st.button("Delete business", key=f"ask_delete_{idx}", use_container_width=True):
+                            st.session_state[confirm_key] = True
+                            st.rerun()
+                    else:
+                        if st.button("Confirm delete", key=f"do_delete_{idx}", use_container_width=True):
+                            try:
+                                delete_business(bid)
+                                st.success("Business deleted.")
+                                st.session_state.pop(confirm_key, None)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Delete failed: {e}")
+                        if st.button("Cancel", key=f"cancel_delete_{idx}", use_container_width=True):
+                            st.session_state[confirm_key] = False
+                            st.rerun()
+
+    st.divider()
+
     business_options = {
         (b.get("business_name") or str(b.get("id"))): b["id"]
         for b in businesses
@@ -1304,7 +1619,7 @@ with st.sidebar:
 
     st.divider()
 
-    menu_items = ["Overview", "Social Sales Chat", "Business Settings", "Webhook Info"]
+    menu_items = ["Overview", "Social Sales Chat", "Business Settings", "Account Connections", "Webhook Info"]
     if is_admin:
         menu_items.insert(3, "User Management")
     page = st.radio("Menu", menu_items)
@@ -1338,6 +1653,9 @@ elif page == "Business Settings":
     )
 
     business_editor(selected_business)
+
+elif page == "Account Connections":
+    render_account_connections_page(businesses)
 
 elif page == "User Management":
     if not is_admin:
