@@ -38,16 +38,52 @@ if (window.localStorage.getItem('instaagent_dashboard_secret') === 'YOUR_DASHBOA
   window.localStorage.removeItem('instaagent_dashboard_secret');
 }
 
+const OWNER_EMAIL_STORAGE_KEY = 'instaagent_owner_email';
+const OWNER_EMAIL_PARAM = 'owner_email';
+
+function normalizeOwnerEmail(value = '') {
+  return String(value || '').trim().toLowerCase();
+}
+
+function ownerEmailFromUrl() {
+  return normalizeOwnerEmail(
+    urlParams.get(OWNER_EMAIL_PARAM) ||
+    urlParams.get('owner') ||
+    urlParams.get('email') ||
+    ''
+  );
+}
+
+function ownerEmailFromStorage() {
+  return normalizeOwnerEmail(window.localStorage.getItem(OWNER_EMAIL_STORAGE_KEY) || '');
+}
+
+function resolvedOwnerEmail() {
+  return ownerEmailFromUrl() || ownerEmailFromStorage() || normalizeOwnerEmail(window.INSTAAGENT_OWNER_EMAIL || '');
+}
+
+if (ownerEmailFromUrl()) {
+  window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, ownerEmailFromUrl());
+}
+
+function scopedPath(path) {
+  const ownerEmail = resolvedOwnerEmail();
+  if (!ownerEmail) return path;
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}${OWNER_EMAIL_PARAM}=${encodeURIComponent(ownerEmail)}`;
+}
+
 const API = {
   async get(path) {
-    const res = await fetch(`${API_BASE}${path}`, { headers: apiHeaders() });
+    const res = await fetch(`${API_BASE}${scopedPath(path)}`, { headers: apiHeaders() });
     const data = await res.json();
     if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
     return data;
   },
   async post(path, params = {}) {
     const qs = new URLSearchParams(params);
-    const res = await fetch(`${API_BASE}${path}?${qs.toString()}`, {
+    const endpoint = `${scopedPath(path)}${qs.toString() ? `${scopedPath(path).includes('?') ? '&' : '?'}${qs.toString()}` : ''}`;
+    const res = await fetch(`${API_BASE}${endpoint}`, {
       method: 'POST',
       headers: apiHeaders(),
     });
@@ -56,17 +92,17 @@ const API = {
     return data;
   },
   async postJson(path, body = {}) {
-    const res = await fetch(`${API_BASE}${path}`, {
+    const res = await fetch(`${API_BASE}${scopedPath(path)}`, {
       method: 'POST',
       headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, owner_email: body?.owner_email || resolvedOwnerEmail() || undefined }),
     });
     const data = await res.json();
     if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
     return data;
   },
   async delete(path) {
-    const res = await fetch(`${API_BASE}${path}`, {
+    const res = await fetch(`${API_BASE}${scopedPath(path)}`, {
       method: 'DELETE',
       headers: apiHeaders(),
     });
@@ -82,11 +118,8 @@ const STATS_POLL_MS = 20000;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
 const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
-const LANDING_LOGO = '/brand/milana-premium-logo.png';
 const DASHBOARD_HASH = '#dashboard';
-const SIGNIN_HASH = '#signin';
 const UI_LANG_STORAGE_KEY = 'instaagent_ui_lang';
-const AUTH_STORAGE_KEY = 'instaagent_auth_user';
 
 const LANDING_PREVIEWS = [
   ['inbox', '/screenshots/inbox.png'],
@@ -103,7 +136,6 @@ const LANDING_TEXT = {
     navDashboard: 'Dashboard',
     navAiControl: 'AI Control',
     navFaq: 'FAQ',
-    signIn: 'Sign In',
     openDashboard: 'Open Dashboard',
     eyebrow: 'Instaagent for Milana Premium and modern sales teams',
     heroTitle: 'AI Sales Assistant for Instagram, Telegram, and WhatsApp',
@@ -153,7 +185,6 @@ const LANDING_TEXT = {
     navDashboard: 'Dashboard',
     navAiControl: 'AI nazorati',
     navFaq: 'FAQ',
-    signIn: 'Kirish',
     openDashboard: 'Dashboardni ochish',
     eyebrow: 'Milana Premium va zamonaviy savdo jamoalari uchun Instaagent',
     heroTitle: 'Instagram, Telegram va WhatsApp uchun AI savdo yordamchisi',
@@ -203,7 +234,6 @@ const LANDING_TEXT = {
     navDashboard: 'Дашборд',
     navAiControl: 'Контроль AI',
     navFaq: 'FAQ',
-    signIn: 'Войти',
     openDashboard: 'Открыть дашборд',
     eyebrow: 'Instaagent для Milana Premium и современных отделов продаж',
     heroTitle: 'AI-ассистент продаж для Instagram, Telegram и WhatsApp',
@@ -303,10 +333,9 @@ function aiProviderForModel(model = '') {
 
 function aiProviderForBusiness(business = {}) {
   const stored = String(business.ai_provider || '').toLowerCase();
-  const derived = aiProviderForModel(business.ai_model);
-  if (!AI_PROVIDERS.some(provider => provider.id === stored)) return derived;
-  if (business.ai_model && derived !== stored) return derived;
-  return stored;
+  return AI_PROVIDERS.some(provider => provider.id === stored)
+    ? stored
+    : aiProviderForModel(business.ai_model);
 }
 
 function apiErrorMessage(data, status) {
@@ -334,11 +363,10 @@ function apiErrorMessage(data, status) {
 
 function apiHeaders() {
   const headers = { Accept: 'application/json' };
-  const authUser = readAuthUser();
-  const authToken = String(authUser?.token || '').trim();
-  if (authToken) headers.Authorization = `Bearer ${authToken}`;
   const savedSecret = dashboardSecret();
-  if (!authToken && savedSecret && savedSecret !== 'YOUR_DASHBOARD_SECRET') headers['x-dashboard-secret'] = savedSecret;
+  if (savedSecret && savedSecret !== 'YOUR_DASHBOARD_SECRET') headers['x-dashboard-secret'] = savedSecret;
+  const ownerEmail = resolvedOwnerEmail();
+  if (ownerEmail) headers['x-owner-email'] = ownerEmail;
   return headers;
 }
 
@@ -378,6 +406,26 @@ function withMediaToken(url) {
   } catch (e) {
     return url;
   }
+}
+
+function businessOwnerEmail(business = {}) {
+  return normalizeOwnerEmail(
+    business.owner_email ||
+    business.business_owner_email ||
+    business.user_email ||
+    business.email ||
+    ''
+  );
+}
+
+function conversationOwnerEmail(row = {}) {
+  return normalizeOwnerEmail(
+    row.owner_email ||
+    row.business_owner_email ||
+    row.user_email ||
+    row.email ||
+    ''
+  );
 }
 
 function fileToDataUrl(file) {
@@ -423,13 +471,12 @@ const EMOJI_SETS = [
   { label: 'Symbols', items: '✅ ❌ ❗ ❓ ⁉️ ⚠️ 🚫 🔴 🟠 🟡 🟢 🔵 🟣 ⚫ ⚪ 🟤 ⬆️ ⬇️ ⬅️ ➡️ 🔁 🔄 🆕 🆗 🆒 🆘 💲 #️⃣ *️⃣ 0️⃣ 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣ 8️⃣ 9️⃣'.split(' ') },
 ];
 
-function LandingPage({ onOpenDashboard, onOpenSignIn, lang, setLang, isSignedIn }) {
+function LandingPage({ onOpenDashboard, lang, setLang }) {
   const l = LANDING_TEXT[lang] || LANDING_TEXT.en;
   return (
     <main className="landing-page">
       <nav className="landing-nav">
         <a className="landing-brand" href="#top">
-          <img src={LANDING_LOGO} alt="Milana Premium logo" />
           <span>{l.appName}</span>
         </a>
         <div className="landing-links">
@@ -443,12 +490,10 @@ function LandingPage({ onOpenDashboard, onOpenSignIn, lang, setLang, isSignedIn 
             <button key={code} className={lang === code ? 'on' : ''} onClick={() => setLang(code)}>{code}</button>
           ))}
         </div>
-        <button className="landing-signin-btn" onClick={onOpenSignIn}>{l.signIn}</button>
         <button onClick={onOpenDashboard}>{l.openDashboard}</button>
       </nav>
 
       <section id="top" className="landing-hero">
-        <img className="hero-logo-bg" src={LANDING_LOGO} alt="" aria-hidden="true" />
         <div className="landing-hero-inner">
           <p className="eyebrow">{l.eyebrow}</p>
           <h1>{l.heroTitle}</h1>
@@ -569,7 +614,6 @@ function LandingPage({ onOpenDashboard, onOpenSignIn, lang, setLang, isSignedIn 
 
       <footer className="landing-footer">
         <div>
-          <img src={LANDING_LOGO} alt="Milana Premium logo" />
           <strong>Instaagent</strong>
           <p>AI sales assistant for Instagram, Telegram, and WhatsApp.</p>
         </div>
@@ -582,79 +626,6 @@ function LandingPage({ onOpenDashboard, onOpenSignIn, lang, setLang, isSignedIn 
           <button onClick={onOpenDashboard}>Dashboard link</button>
         </nav>
       </footer>
-    </main>
-  );
-}
-
-function readAuthUser() {
-  try {
-    const value = JSON.parse(window.localStorage.getItem(AUTH_STORAGE_KEY) || 'null');
-    if (!value || typeof value !== 'object') return null;
-    return value;
-  } catch {
-    return null;
-  }
-}
-
-function writeAuthUser(user) {
-  if (!user) {
-    window.localStorage.removeItem(AUTH_STORAGE_KEY);
-    return;
-  }
-  window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(user));
-}
-
-function LoginPage({ lang, onSuccess, onBack }) {
-  const l = LANDING_TEXT[lang] || LANDING_TEXT.en;
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
-  const submit = async (event) => {
-    event.preventDefault();
-    setError('');
-    setLoading(true);
-    try {
-      const response = await API.postJson('/api/v2/auth/login', { email, password });
-      const user = response?.data?.user || { email };
-      const token = String(response?.data?.token || '');
-      const businesses = Array.isArray(response?.data?.businesses) ? response.data.businesses : [];
-      const authPayload = { ...user, token };
-      writeAuthUser(authPayload);
-      onSuccess?.(authPayload, businesses);
-    } catch (e) {
-      setError(e.message || 'Login failed');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <main className="landing-page">
-      <nav className="landing-nav">
-        <a className="landing-brand" href="#top">
-          <img src={LANDING_LOGO} alt="Milana Premium logo" />
-          <span>{l.appName}</span>
-        </a>
-        <div className="landing-links" />
-        <button className="secondary" onClick={onBack}>{l.navFeatures}</button>
-      </nav>
-      <section className="landing-section" style={{ maxWidth: 540, margin: '32px auto 0' }}>
-        <h2>{l.signIn}</h2>
-        <form onSubmit={submit} className="feature-card" style={{ marginTop: 16 }}>
-          <label className="field-row">
-            <span>Email</span>
-            <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required />
-          </label>
-          <label className="field-row">
-            <span>Password</span>
-            <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required />
-          </label>
-          {error ? <p style={{ color: 'var(--danger)', margin: '6px 0 12px' }}>{error}</p> : null}
-          <button type="submit" disabled={loading}>{loading ? 'Signing in...' : l.signIn}</button>
-        </form>
-      </section>
     </main>
   );
 }
@@ -705,28 +676,12 @@ function channelLabel(platform, channel) {
     if (channel === 'telegram_bot_private' || channel === 'private') return 'Bot DM';
     return channel || 'Telegram';
   }
-  if (platform === 'instagram') {
-    if (channel === 'dm' || !channel) return 'Instagram DM';
-    if (String(channel).toLowerCase().includes('comment')) return 'Instagram comments';
-    return channel;
-  }
+  if (platform === 'instagram') return channel === 'dm' || !channel ? 'Instagram DM' : channel;
   if (platform === 'whatsapp') return channel === 'whatsapp' || channel === 'whatsapp_cloud' || !channel ? 'WhatsApp' : channel;
   return channel || 'Inbox';
 }
 
-function isInstagramCommentChannel(channel = '') {
-  return String(channel || '').toLowerCase().includes('comment');
-}
-
-function firstValue(...values) {
-  for (const value of values) {
-    if (value !== undefined && value !== null && String(value).trim() !== '') return value;
-  }
-  return '';
-}
-
 function sendRouteFor(conv) {
-  if (conv.platform === 'instagram' && isInstagramCommentChannel(conv.channel)) return 'Instagram Comment API';
   if (conv.platform === 'instagram') return 'Instagram DM API';
   if (conv.platform === 'whatsapp') return 'WhatsApp Cloud API';
   if (conv.platform === 'telegram' && conv.channel === 'telegram_user_private') return 'Telegram user client';
@@ -800,28 +755,6 @@ function normalizeConversation(row) {
   const platform = row.platform || 'instagram';
   const channel = row.channel || parsedChannel || '';
   const channelName = row.channelName || channelLabel(platform || parsedPlatform, channel);
-  const isCommentThread = platform === 'instagram' && isInstagramCommentChannel(channel);
-  const rawPayload = row.raw_payload || row.rawPayload || {};
-  const postId = firstValue(
-    row.post_id,
-    row.media_id,
-    rawPayload.post_id,
-    rawPayload.media_id,
-    rawPayload?.entry?.[0]?.changes?.[0]?.value?.media?.id,
-    rawPayload?.entry?.[0]?.changes?.[0]?.value?.object_id,
-  );
-  const postImageUrl = firstValue(
-    row.post_image_url,
-    row.media_url,
-    rawPayload.post_image_url,
-    rawPayload.image_url,
-    rawPayload?.entry?.[0]?.changes?.[0]?.value?.media?.image?.src,
-  );
-  const postPermalink = firstValue(
-    row.post_permalink,
-    rawPayload.post_permalink,
-    rawPayload?.entry?.[0]?.changes?.[0]?.value?.media?.permalink,
-  );
   const lastAt = row.last_message_at || row.created_at || row.lastAt || '';
   return {
     id: row.id,
@@ -834,10 +767,6 @@ function normalizeConversation(row) {
     name,
     handle: row.handle || platformHandle({ ...row, customer_id: customerId, chat_id: chatId }),
     platform: platform || parsedPlatform,
-    isCommentThread,
-    postId: postId ? String(postId) : '',
-    postImageUrl: postImageUrl ? String(postImageUrl) : '',
-    postPermalink: postPermalink ? String(postPermalink) : '',
     avatar: avatarFor(name, customerId),
     online: false,
     needsHuman: row.needsHuman ?? (unread > 0),
@@ -891,25 +820,6 @@ function normalizeMessage(row, index) {
     mediaFileId: row.media_file_id || getWhatsAppMediaId(row),
     raw: row,
   };
-
-  message.postId = firstValue(
-    row.post_id,
-    row.media_id,
-    row.raw_payload?.post_id,
-    row.raw_payload?.media_id,
-    row.raw_payload?.entry?.[0]?.changes?.[0]?.value?.media?.id,
-  );
-  message.postImageUrl = firstValue(
-    row.post_image_url,
-    row.raw_payload?.post_image_url,
-    row.raw_payload?.image_url,
-    row.raw_payload?.entry?.[0]?.changes?.[0]?.value?.media?.image?.src,
-  );
-  message.postPermalink = firstValue(
-    row.post_permalink,
-    row.raw_payload?.post_permalink,
-    row.raw_payload?.entry?.[0]?.changes?.[0]?.value?.media?.permalink,
-  );
 
   if (type === 'catalog') {
     message.catalogText = text.replace('[Catalog button sent]', '').trim() || 'Catalog sent.';
@@ -1488,6 +1398,8 @@ function WorkspacePanel({
   leadStages,
   onLeadStageChange,
   onOpenConversation,
+  ownerEmail,
+  onOwnerEmailSave,
 }) {
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId) || businesses[0] || {};
@@ -1726,10 +1638,7 @@ function WorkspacePanel({
                   value={activeProvider.id}
                   onChange={(e) => {
                     const provider = AI_PROVIDERS.find(item => item.id === e.target.value) || AI_PROVIDERS[0];
-                    onBusinessSetting(selectedBusiness.id, {
-                      ai_provider: provider.id,
-                      ai_model: provider.defaultModel,
-                    }, true);
+                    onBusinessSetting(selectedBusiness.id, { ai_model: provider.defaultModel }, true);
                   }}
                 >
                   {AI_PROVIDERS.map(provider => (
@@ -1743,10 +1652,7 @@ function WorkspacePanel({
                   value={modelSelectValue}
                   onChange={(e) => {
                     if (e.target.value === 'custom') return;
-                    onBusinessSetting(selectedBusiness.id, {
-                      ai_model: e.target.value,
-                      ai_provider: aiProviderForModel(e.target.value),
-                    }, true);
+                    onBusinessSetting(selectedBusiness.id, { ai_model: e.target.value }, true);
                   }}
                 >
                   {activeProvider.models.map(model => (
@@ -1760,17 +1666,8 @@ function WorkspacePanel({
               <span>{w.customModel}</span>
               <input
                 value={activeModel}
-                onChange={(e) => onBusinessSetting(selectedBusiness.id, {
-                  ai_model: e.target.value,
-                  ai_provider: aiProviderForModel(e.target.value),
-                }, false)}
-                onBlur={(e) => {
-                  const nextModel = e.target.value.trim() || activeProvider.defaultModel;
-                  onBusinessSetting(selectedBusiness.id, {
-                    ai_model: nextModel,
-                    ai_provider: aiProviderForModel(nextModel),
-                  }, true);
-                }}
+                onChange={(e) => onBusinessSetting(selectedBusiness.id, { ai_model: e.target.value }, false)}
+                onBlur={(e) => onBusinessSetting(selectedBusiness.id, { ai_model: e.target.value.trim() || activeProvider.defaultModel }, true)}
               />
             </label>
             <div className="model-grid">
@@ -1823,6 +1720,14 @@ function WorkspacePanel({
       {view === 'profile' && (
         <div className="settings-view">
           <div className="metric-card"><span>API base</span><b>{API_BASE}</b></div>
+          <label className="field-row">
+            <span>Business owner email</span>
+            <input
+              defaultValue={ownerEmail || ''}
+              placeholder="owner@business.com"
+              onBlur={(e) => onOwnerEmailSave(e.target.value)}
+            />
+          </label>
           <div className="panel-actions">
             <button onClick={() => { window.localStorage.removeItem('instaagent_dashboard_secret'); onToast('Dashboard secret cleared'); }}>Clear secret</button>
             <button onClick={() => navigator.clipboard?.writeText(API_BASE).then(() => onToast('API base copied'))}>Copy API base</button>
@@ -1837,7 +1742,6 @@ function WorkspacePanel({
 function Rail({ t, activeView, onView }) {
   const items = [
     { id: 'inbox', icon: <I.Inbox />, label: t.inbox, dot: true },
-    { id: 'comments', icon: <I.Comment />, label: t.comments || 'Comments' },
     { id: 'insights', icon: <I.Chart />, label: t.insights },
     { id: 'leads', icon: <I.Star />, label: t.leads || 'Leads' },
     { id: 'knowledge', icon: <I.Book />, label: t.knowledge },
@@ -1888,7 +1792,7 @@ function Row({ c, selected, onClick, t }) {
 }
 
 // ---------- List column ----------
-function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError, liveMode, onRefresh, onSaveSecret, activeView }) {
+function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError, liveMode, onRefresh, onSaveSecret }) {
   const [filter, setFilter] = useState('all');
   const [platforms, setPlatforms] = useState({ instagram: true, telegram: true, whatsapp: true });
   const [search, setSearch] = useState('');
@@ -1903,8 +1807,6 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
 
   const filtered = useMemo(() => {
     return conversations.filter(c => {
-      if (activeView === 'comments' && !c.isCommentThread) return false;
-      if (activeView === 'inbox' && c.isCommentThread) return false;
       if (!platforms[c.platform]) return false;
       if (filter === 'needs' && !c.needsHuman) return false;
       if (filter === 'unread' && c.unread === 0) return false;
@@ -1915,7 +1817,7 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
       }
       return true;
     });
-  }, [conversations, filter, platforms, search, activeView]);
+  }, [conversations, filter, platforms, search]);
 
   const priority = filtered.filter(c => c.needsHuman || c.unread > 0);
   const rest = filtered.filter(c => !c.needsHuman && c.unread === 0);
@@ -2282,32 +2184,9 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
   }, [messages]);
 
   let lastDay = null;
-  const commentPost = useMemo(() => {
-    if (!conv?.isCommentThread) return null;
-    const source = messages.find(item => item.postImageUrl || item.postPermalink || item.postId) || {};
-    return {
-      imageUrl: source.postImageUrl || conv.postImageUrl || '',
-      permalink: source.postPermalink || conv.postPermalink || '',
-      postId: source.postId || conv.postId || '',
-    };
-  }, [conv, messages]);
 
   return (
     <section className="thread-col">
-      {conv?.isCommentThread && (
-        <div className="comment-post-pin">
-          <div className="comment-post-head">Pinned post</div>
-          {commentPost?.imageUrl ? (
-            <img className="comment-post-image" src={commentPost.imageUrl} alt="Instagram post preview" />
-          ) : (
-            <div className="comment-post-placeholder">Post image preview not available yet</div>
-          )}
-          <div className="comment-post-meta">
-            {commentPost?.postId && <span>Post ID: {commentPost.postId}</span>}
-            {commentPost?.permalink && <a href={commentPost.permalink} target="_blank" rel="noreferrer">Open on Instagram</a>}
-          </div>
-        </div>
-      )}
       <div className="messages" ref={scrollRef}>
         {threadLoading && <div className="empty">Loading conversation…</div>}
         {groups.map(m => {
@@ -2515,11 +2394,11 @@ function DetailColumn({ conv, t, stats, onDelete }) {
 }
 
 // ---------- Top bar ----------
-function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onToggleAi, onRefresh, onToast, onPin, onArchive, onDelete, onMore, moreOpen, onLogout }) {
+function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onToggleAi, onRefresh, onToast, onPin, onArchive, onDelete, onMore, moreOpen }) {
   const [accountOpen, setAccountOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
-    const workspaceNames = { inbox: t.inbox, comments: t.comments || 'Comments', insights: t.insights, knowledge: t.knowledge, prompts: w.promptsTitle, accounts: t.accounts, settings: t.settings, profile: w.profile };
+  const workspaceNames = { inbox: t.inbox, insights: t.insights, knowledge: t.knowledge, prompts: w.promptsTitle, accounts: t.accounts, settings: t.settings, profile: w.profile };
   return (
     <header className="topbar">
       <div className="brand">
@@ -2542,7 +2421,7 @@ function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onT
           )}
         </div>
       </div>
-      {(activeView === 'inbox' || activeView === 'comments') ? (
+      {activeView === 'inbox' ? (
         <ThreadHead
           conv={conv}
           aiOn={aiOn}
@@ -2581,14 +2460,6 @@ function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onT
             <div className="pop-menu profile-menu">
               <button onClick={() => onToast('Profile settings are local for now')}>Profile settings</button>
               <button onClick={() => { window.localStorage.removeItem('instaagent_dashboard_secret'); onToast('Dashboard secret cleared'); }}>Clear secret</button>
-              <button
-                onClick={() => {
-                  setProfileOpen(false);
-                  onLogout?.();
-                }}
-              >
-                Log out
-              </button>
             </div>
           )}
         </div>
@@ -2602,7 +2473,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "theme": "light"
 }/*EDITMODE-END*/;
 
-function App({ lang, setLang, initialBusinessId = '', onLogout }) {
+function App({ lang, setLang }) {
   const t = window.STRINGS[lang];
 
   const [conversations, setConversations] = useState(window.CONVERSATIONS);
@@ -2618,7 +2489,8 @@ function App({ lang, setLang, initialBusinessId = '', onLogout }) {
   const [toast, setToast] = useState('');
   const [moreOpen, setMoreOpen] = useState(false);
   const [businesses, setBusinesses] = useState([]);
-  const [selectedBusinessId, setSelectedBusinessId] = useState(initialBusinessId || '');
+  const [selectedBusinessId, setSelectedBusinessId] = useState('');
+  const [ownerEmail, setOwnerEmail] = useState(resolvedOwnerEmail());
   const [promptSettings, setPromptSettings] = useState({});
   const [promptLoading, setPromptLoading] = useState(false);
   const [promptSaving, setPromptSaving] = useState(false);
@@ -2633,6 +2505,7 @@ function App({ lang, setLang, initialBusinessId = '', onLogout }) {
   const threadPollBusy = useRef(false);
   const inboxPollBusy = useRef(false);
   const statsPollBusy = useRef(false);
+  const businessesRef = useRef([]);
   const conv = conversations.find(c => c.id === selectedId);
   const aiOn = conv ? conv.aiOn : false;
   const messages = threads[selectedId] || window.getThread(selectedId);
@@ -2673,15 +2546,18 @@ function App({ lang, setLang, initialBusinessId = '', onLogout }) {
     }
   };
 
-  const loadBusinesses = async ({ silent = false } = {}) => {
+  const loadBusinesses = async ({ silent = false, ownerEmailOverride = '' } = {}) => {
     try {
       const data = await API.get('/api/businesses');
-      const rows = data.data || [];
+      const ownerScoped = normalizeOwnerEmail(ownerEmailOverride || ownerEmail);
+      const rows = (data.data || []).filter(row => !ownerScoped || businessOwnerEmail(row) === ownerScoped);
+      businessesRef.current = rows;
       setBusinesses(rows);
-      setSelectedBusinessId(current => current || rows[0]?.id || '');
+      setSelectedBusinessId(current => rows.some(item => item.id === current) ? current : rows[0]?.id || '');
       return rows;
     } catch (e) {
       if (!silent) showToast(e.message);
+      businessesRef.current = [];
       return [];
     }
   };
@@ -2818,14 +2694,23 @@ function App({ lang, setLang, initialBusinessId = '', onLogout }) {
     });
   };
 
-  const loadConversations = async ({ sideLoad = true, silent = false } = {}) => {
+  const loadConversations = async ({ sideLoad = true, silent = false, ownerEmailOverride = '' } = {}) => {
     if (!silent) setLoading(true);
     try {
-      const qs = selectedBusinessId ? `?business_id=${encodeURIComponent(selectedBusinessId)}` : '';
-      const data = await API.get(`/api/v2/conversations${qs}`);
+      if (sideLoad || !businessesRef.current.length) {
+        await loadBusinesses({ silent: true, ownerEmailOverride });
+      }
+      const data = await API.get('/api/v2/conversations');
       const selectedCurrent = selectedIdRef.current;
+      const ownerScoped = normalizeOwnerEmail(ownerEmailOverride || ownerEmail);
+      const allowedBusinessIds = new Set((businessesRef.current || []).map(row => row.id).filter(Boolean));
       const next = (data.data || [])
         .map(normalizeConversation)
+        .filter(item => {
+          if (allowedBusinessIds.size && item.businessId) return allowedBusinessIds.has(item.businessId);
+          if (!ownerScoped) return true;
+          return conversationOwnerEmail(item) === ownerScoped;
+        })
         .filter(item => !deletedConversationsRef.current[item.id])
         .map(item => Object.prototype.hasOwnProperty.call(aiOverridesRef.current, item.id)
           ? { ...item, aiOn: aiOverridesRef.current[item.id] === true }
@@ -2838,7 +2723,7 @@ function App({ lang, setLang, initialBusinessId = '', onLogout }) {
       setApiError('');
       if (sideLoad) {
         loadStats();
-        loadBusinesses({ silent });
+        loadBusinesses({ silent: true });
       }
       return true;
     } catch (e) {
@@ -2865,6 +2750,20 @@ function App({ lang, setLang, initialBusinessId = '', onLogout }) {
       window.localStorage.removeItem('instaagent_dashboard_secret');
     }
     loadConversations();
+  };
+
+  const saveOwnerEmailScope = async (value) => {
+    const clean = normalizeOwnerEmail(value);
+    if (clean) {
+      window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, clean);
+    } else {
+      window.localStorage.removeItem(OWNER_EMAIL_STORAGE_KEY);
+    }
+    setOwnerEmail(clean);
+    setSelectedBusinessId('');
+    await loadBusinesses({ ownerEmailOverride: clean });
+    await loadConversations({ sideLoad: false, ownerEmailOverride: clean });
+    showToast(clean ? `Owner scoped to ${clean}` : 'Owner scope cleared');
   };
 
   const loadThread = async (conversationId, { silent = false } = {}) => {
@@ -3023,6 +2922,10 @@ function App({ lang, setLang, initialBusinessId = '', onLogout }) {
   useEffect(() => {
     loadConversations();
   }, []);
+
+  useEffect(() => {
+    businessesRef.current = businesses;
+  }, [businesses]);
 
   useEffect(() => {
     if (selectedBusinessId) loadPromptSettings(selectedBusinessId, { silent: true });
@@ -3229,7 +3132,7 @@ function App({ lang, setLang, initialBusinessId = '', onLogout }) {
 
   const changeView = (view) => {
     setActiveView(view);
-    const names = { inbox: t.inbox, comments: t.comments || 'Comments', insights: t.insights, leads: t.leads || 'Leads', knowledge: t.knowledge, prompts: 'AI Prompt Settings', accounts: t.accounts, settings: t.settings, profile: 'Profile' };
+    const names = { inbox: t.inbox, insights: t.insights, leads: t.leads || 'Leads', knowledge: t.knowledge, prompts: 'AI Prompt Settings', accounts: t.accounts, settings: t.settings, profile: 'Profile' };
     showToast(`${names[view] || view} selected`);
   };
 
@@ -3245,7 +3148,7 @@ function App({ lang, setLang, initialBusinessId = '', onLogout }) {
 
   const selectConversation = (conversationId) => {
     setSelectedId(conversationId);
-    setActiveView(current => (current === 'comments' ? 'comments' : 'inbox'));
+    setActiveView('inbox');
     setMoreOpen(false);
   };
 
@@ -3257,7 +3160,7 @@ function App({ lang, setLang, initialBusinessId = '', onLogout }) {
 
   return (
     <>
-      <div className={`app ${(activeView === 'inbox' || activeView === 'comments') ? '' : 'workspace-mode'}`}>
+      <div className={`app ${activeView === 'inbox' ? '' : 'workspace-mode'}`}>
         <TopBar
           t={t}
           lang={lang}
@@ -3275,7 +3178,6 @@ function App({ lang, setLang, initialBusinessId = '', onLogout }) {
           onDelete={deleteConversation}
           onMore={() => setMoreOpen(v => !v)}
           moreOpen={moreOpen}
-          onLogout={onLogout}
         />
         <Rail t={t} activeView={activeView} onView={changeView} />
         <ListColumn
@@ -3288,9 +3190,8 @@ function App({ lang, setLang, initialBusinessId = '', onLogout }) {
           liveMode={liveMode}
           onRefresh={refreshWorkspace}
           onSaveSecret={saveSecretAndRefresh}
-          activeView={activeView}
         />
-        {(activeView === 'inbox' || activeView === 'comments') ? (
+        {activeView === 'inbox' ? (
           <ThreadColumn
             conv={conv}
             aiOn={aiOn}
@@ -3325,9 +3226,11 @@ function App({ lang, setLang, initialBusinessId = '', onLogout }) {
             leadStages={leadStages}
             onLeadStageChange={setLeadStage}
             onOpenConversation={selectConversation}
+            ownerEmail={ownerEmail}
+            onOwnerEmailSave={saveOwnerEmailScope}
           />
         )}
-        {(activeView === 'inbox' || activeView === 'comments') && <DetailColumn conv={conv} t={t} stats={stats} onDelete={deleteConversation} />}
+        {activeView === 'inbox' && <DetailColumn conv={conv} t={t} stats={stats} onDelete={deleteConversation} />}
       </div>
       <Toast message={toast} />
 
@@ -3359,9 +3262,6 @@ function App({ lang, setLang, initialBusinessId = '', onLogout }) {
 function Root() {
   const [lang, setLang] = useState(() => window.localStorage.getItem(UI_LANG_STORAGE_KEY) || 'en');
   const [showDashboard, setShowDashboard] = useState(() => window.location.hash === DASHBOARD_HASH || urlParams.get('dashboard') === '1');
-  const [showSignIn, setShowSignIn] = useState(() => window.location.hash === SIGNIN_HASH);
-  const [authUser, setAuthUser] = useState(() => readAuthUser());
-  const [authBusinesses, setAuthBusinesses] = useState([]);
 
   useEffect(() => {
     window.localStorage.setItem(UI_LANG_STORAGE_KEY, lang);
@@ -3369,65 +3269,18 @@ function Root() {
 
   useEffect(() => {
     const onHashChange = () => setShowDashboard(window.location.hash === DASHBOARD_HASH);
-    const onHashChangeSignIn = () => setShowSignIn(window.location.hash === SIGNIN_HASH && !readAuthUser());
     window.addEventListener('hashchange', onHashChange);
-    window.addEventListener('hashchange', onHashChangeSignIn);
-    return () => {
-      window.removeEventListener('hashchange', onHashChange);
-      window.removeEventListener('hashchange', onHashChangeSignIn);
-    };
+    return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  useEffect(() => {
-    if (showDashboard && !authUser) {
-      window.location.hash = SIGNIN_HASH;
-      setShowSignIn(true);
-      setShowDashboard(false);
-    }
-  }, [showDashboard, authUser]);
-
   const openDashboard = () => {
-    if (!authUser) {
-      window.location.hash = SIGNIN_HASH;
-      setShowSignIn(true);
-      return;
-    }
     window.location.hash = DASHBOARD_HASH;
     setShowDashboard(true);
-  };
-
-  const openSignIn = () => {
-    // Treat explicit Sign In as "switch account": clear current auth first.
-    writeAuthUser(null);
-    setAuthUser(null);
-    setAuthBusinesses([]);
-    setShowDashboard(false);
-    window.location.hash = SIGNIN_HASH;
-    setShowSignIn(true);
-  };
-
-  const onSignedIn = (user, businesses = []) => {
-    setAuthUser(user || null);
-    setAuthBusinesses(Array.isArray(businesses) ? businesses : []);
-    window.location.hash = DASHBOARD_HASH;
-    setShowDashboard(true);
-    setShowSignIn(false);
-  };
-
-  const onLogout = () => {
-    writeAuthUser(null);
-    setAuthUser(null);
-    setAuthBusinesses([]);
-    window.location.hash = '#top';
-    setShowDashboard(false);
-    setShowSignIn(false);
   };
 
   return showDashboard
-    ? <App lang={lang} setLang={setLang} initialBusinessId={authBusinesses[0]?.id || ''} onLogout={onLogout} />
-    : (showSignIn
-      ? <LoginPage lang={lang} onSuccess={onSignedIn} onBack={() => { window.location.hash = '#top'; setShowSignIn(false); }} />
-      : <LandingPage onOpenDashboard={openDashboard} onOpenSignIn={openSignIn} lang={lang} setLang={setLang} isSignedIn={Boolean(authUser)} />);
+    ? <App lang={lang} setLang={setLang} />
+    : <LandingPage onOpenDashboard={openDashboard} lang={lang} setLang={setLang} />;
 }
 
 createRoot(document.getElementById('root')).render(<Root />);
