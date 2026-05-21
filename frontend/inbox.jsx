@@ -2085,11 +2085,21 @@ function Message({ m, conv, t, onReplyComment }) {
             <video className="media-video" src={m.mediaUrl} controls />
           ) : m.mediaUrl && (m.mediaKind === 'photo' || m.mediaUrl.match(/\.(png|jpe?g|webp|gif)(\?|$)/i)) ? (
             <img className="media-img" src={m.mediaUrl} alt={m.label || 'attachment'} />
+          ) : m.mediaKind === 'file' && m.mediaUrl ? (
+            <a className="file-chip" href={m.mediaUrl} target="_blank" rel="noreferrer">
+              <I.Paperclip />
+              <span>{m.label || 'open file'}</span>
+            </a>
           ) : m.mediaKind === 'file' ? (
             <div className="file-chip">
               <I.Paperclip />
               <span>{m.label || 'document'}</span>
             </div>
+          ) : m.mediaUrl ? (
+            <a className="file-chip" href={m.mediaUrl} target="_blank" rel="noreferrer">
+              <I.Paperclip />
+              <span>{m.label || 'open media'}</span>
+            </a>
           ) : (
             <span className="ph" data-label={m.label || 'photo'} />
           )}
