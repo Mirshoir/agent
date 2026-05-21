@@ -847,6 +847,17 @@ input, textarea { background: none; border: 0; outline: 0; }
   padding: 8px 10px 4px;
   font-size: 13.5px;
 }
+.open-post-link {
+  display: inline-flex;
+  margin: 2px 10px 8px;
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.open-post-link:hover {
+  color: var(--accent-strong, var(--accent));
+}
 .file-chip {
   display: flex; align-items: center; gap: 8px;
   min-width: 220px;
