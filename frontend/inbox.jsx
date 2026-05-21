@@ -857,6 +857,7 @@ function normalizeConversation(row) {
     postId: row.postId || row.post_id || '',
     postPermalink: row.postPermalink || row.post_permalink || '',
     postImageUrl: row.postImageUrl || row.post_image_url || '',
+    postMediaType: (row.postMediaType || row.post_media_type || '').toLowerCase(),
     name,
     handle: row.handle || platformHandle({ ...row, customer_id: customerId, chat_id: chatId }),
     platform: platform || parsedPlatform,
@@ -911,6 +912,7 @@ function normalizeMessage(row, index) {
     mediaKind: media || '',
     mediaUrl: withMediaToken(row.media_url || row.mediaUrl || telegramUserMediaUrl(row)),
     mediaFileId: row.media_file_id || getWhatsAppMediaId(row),
+    commentId: String(row.external_message_id || row.comment_id || row.raw_payload?.id || '').trim(),
     raw: row,
   };
 
@@ -936,6 +938,7 @@ function resolveCommentPostPreview(conv, messages = []) {
     postId: conv?.postId || '',
     postPermalink: conv?.postPermalink || '',
     postImageUrl: conv?.postImageUrl || '',
+    postMediaType: (conv?.postMediaType || '').toLowerCase(),
   };
 
   if (base.postImageUrl && (base.postPermalink || base.postId)) return base;
@@ -946,13 +949,21 @@ function resolveCommentPostPreview(conv, messages = []) {
     const media = payload.media || {};
     const postImageUrl = raw.post_image_url || raw.postImageUrl || payload.post_image_url || '';
     const postPermalink = raw.post_permalink || raw.postPermalink || payload.post_permalink || '';
+    const postMediaType = String(raw.post_media_type || raw.postMediaType || payload.post_media_type || '').toLowerCase();
     const postId = raw.post_id || raw.postId || payload.post_id || payload.media_id || media.id || '';
-    if (postImageUrl || postPermalink || postId) {
-      return { postId, postPermalink, postImageUrl };
+    if (postImageUrl || postPermalink || postId || postMediaType) {
+      return { postId, postPermalink, postImageUrl, postMediaType };
     }
   }
 
   return base;
+}
+
+function isVideoPostPreview(post = {}) {
+  const type = String(post?.postMediaType || '').toLowerCase();
+  if (type.includes('video') || type.includes('reel')) return true;
+  const url = String(post?.postImageUrl || '').toLowerCase();
+  return /\.(mp4|mov|m4v|webm)(\?|$)/i.test(url);
 }
 
 // ---------- Small helpers ----------
@@ -2044,7 +2055,7 @@ function VoiceWave({ count = 28 }) {
 }
 
 // ---------- Message bubble ----------
-function Message({ m, conv, t }) {
+function Message({ m, conv, t, onReplyComment }) {
   if (m.side === 'system' && m.type === 'handoff') {
     return (
       <div className="handoff-banner">
@@ -2057,6 +2068,12 @@ function Message({ m, conv, t }) {
     );
   }
   const fromAi = m.from === 'ai';
+  const canReplyToComment = Boolean(
+    conv?.isCommentThread &&
+    m.side === 'inbound' &&
+    m.commentId &&
+    typeof onReplyComment === 'function'
+  );
   return (
     <div className={`msg-group ${m.side} ${fromAi ? 'from-ai' : ''}`}>
       {m.type === 'text' && (
@@ -2098,6 +2115,15 @@ function Message({ m, conv, t }) {
         <span>{m.time}</span>
         {m.side === 'outbound' && <span className="check"><I.DoubleCheck /></span>}
       </div>
+      {canReplyToComment && (
+        <button
+          type="button"
+          className="msg-reply-btn"
+          onClick={() => onReplyComment(m)}
+        >
+          Reply
+        </button>
+      )}
     </div>
   );
 }
@@ -2150,6 +2176,7 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
   const scrollRef = useRef(null);
   const imageInputRef = useRef(null);
   const attachInputRef = useRef(null);
+  const composerRef = useRef(null);
   const recorderRef = useRef(null);
   const recordingChunksRef = useRef([]);
   const recordingStreamRef = useRef(null);
@@ -2160,13 +2187,25 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
   const [recording, setRecording] = useState(false);
   const [recordingStartedAt, setRecordingStartedAt] = useState(0);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [replyTarget, setReplyTarget] = useState(null);
   const voiceRecordingSupported = ['telegram', 'whatsapp'].includes(conv.platform);
 
   const sendDraft = async () => {
     const text = draft.trim();
     if (!text || sending) return;
     setDraft('');
-    await onSend(text);
+    const sent = await onSend(text, { replyToCommentId: replyTarget?.commentId || '' });
+    if (sent !== false) setReplyTarget(null);
+  };
+
+  const selectReplyTarget = (message) => {
+    if (!message?.commentId) return;
+    const preview = String(message.text || message.mediaCaption || '').trim();
+    setReplyTarget({
+      commentId: message.commentId,
+      preview: preview || '[comment]',
+    });
+    requestAnimationFrame(() => composerRef.current?.focus());
   };
 
   const uploadImage = async (event) => {
@@ -2268,6 +2307,7 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
     const t2 = setTimeout(scroll, 400);
     const t3 = setTimeout(() => { el.style.scrollBehavior = 'smooth'; }, 500);
     setDraft('');
+    setReplyTarget(null);
     return () => {
       cancelAnimationFrame(r1); cancelAnimationFrame(r2);
       clearTimeout(t1); clearTimeout(t2); clearTimeout(t3);
@@ -2321,7 +2361,15 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
         {threadLoading && <div className="empty">Loading conversation…</div>}
         {conv.isCommentThread && (commentPost.postImageUrl || commentPost.postPermalink || commentPost.postId) && (
           <div className="post-preview-card">
-            {commentPost.postImageUrl ? (
+            {commentPost.postImageUrl && isVideoPostPreview(commentPost) ? (
+              <video
+                className="post-preview-video"
+                src={commentPost.postImageUrl}
+                controls
+                playsInline
+                preload="metadata"
+              />
+            ) : commentPost.postImageUrl ? (
               <img className="post-preview-image" src={commentPost.postImageUrl} alt="Instagram post" />
             ) : (
               <div className="post-preview-fallback">Instagram post</div>
@@ -2342,7 +2390,7 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
           return (
             <React.Fragment key={m.id}>
               {dayChanged && <div className="day-sep">{m.day}</div>}
-              <Message m={m} conv={conv} t={t} />
+              <Message m={m} conv={conv} t={t} onReplyComment={selectReplyTarget} />
             </React.Fragment>
           );
         })}
@@ -2366,6 +2414,12 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
 
       <div className="composer">
         <div className="composer-card">
+          {replyTarget?.commentId && (
+            <div className="reply-target-bar">
+              <span>Replying to: {replyTarget.preview.slice(0, 90)}</span>
+              <button type="button" onClick={() => setReplyTarget(null)}>Cancel</button>
+            </div>
+          )}
           <input
             ref={imageInputRef}
             type="file"
@@ -2381,6 +2435,7 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
             onChange={uploadImage}
           />
           <textarea
+            ref={composerRef}
             className="composer-input"
             placeholder={`${t.typing} ${conv.name.split(' ')[0]}…`}
             value={draft}
@@ -2478,7 +2533,15 @@ function DetailColumn({ conv, t, stats, onDelete, messages = [] }) {
         <h3>{t.channel}</h3>
         {conv.isCommentThread && (commentPost.postImageUrl || commentPost.postPermalink || commentPost.postId) && (
           <div className="detail-post-card">
-            {commentPost.postImageUrl ? (
+            {commentPost.postImageUrl && isVideoPostPreview(commentPost) ? (
+              <video
+                className="detail-post-video"
+                src={commentPost.postImageUrl}
+                controls
+                playsInline
+                preload="metadata"
+              />
+            ) : commentPost.postImageUrl ? (
               <img className="detail-post-image" src={commentPost.postImageUrl} alt="Instagram post" />
             ) : (
               <div className="detail-post-fallback">Instagram post</div>
@@ -2950,11 +3013,14 @@ function App({ lang, setLang, onSignOut }) {
     }
   };
 
-  const sendLiveMessage = async (conversation, text) => {
-    const result = await API.postJson('/api/v2/send-message', {
+  const sendLiveMessage = async (conversation, text, options = {}) => {
+    const payload = {
       conversation_id: conversation.apiId || conversation.id,
       text,
-    });
+    };
+    if (options.replyToCommentId) payload.reply_to_comment_id = options.replyToCommentId;
+
+    const result = await API.postJson('/api/v2/send-message', payload);
     const meta = result.meta || result.data || {};
     if (result.status !== 'ok') {
       throw new Error(apiErrorMessage(result, 200));
@@ -3054,8 +3120,8 @@ function App({ lang, setLang, onSignOut }) {
     }
   };
 
-  const sendMessage = async (text) => {
-    if (!conv) return;
+  const sendMessage = async (text, options = {}) => {
+    if (!conv) return false;
 
     if (!liveMode) {
       const localMessage = {
@@ -3066,18 +3132,20 @@ function App({ lang, setLang, onSignOut }) {
         text,
       };
       setThreads(prev => ({ ...prev, [conv.id]: [...(prev[conv.id] || []), localMessage] }));
-      return;
+      return true;
     }
 
     setSending(true);
     try {
-      await sendLiveMessage(conv, text);
+      await sendLiveMessage(conv, text, options);
       await loadThread(conv.id);
       await loadConversations();
       showToast('Message sent');
+      return true;
     } catch (e) {
       setApiError(e.message);
       showToast(e.message);
+      return false;
     } finally {
       setSending(false);
     }
