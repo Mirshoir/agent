@@ -2177,6 +2177,8 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
   const imageInputRef = useRef(null);
   const attachInputRef = useRef(null);
   const composerRef = useRef(null);
+  const emojiPanelRef = useRef(null);
+  const emojiToggleRef = useRef(null);
   const recorderRef = useRef(null);
   const recordingChunksRef = useRef([]);
   const recordingStreamRef = useRef(null);
@@ -2218,6 +2220,7 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
 
   const insertEmoji = (emoji) => {
     setDraft(current => `${current}${current && !current.endsWith(' ') ? ' ' : ''}${emoji}`);
+    setEmojiOpen(false);
   };
 
   const stopRecordingTracks = () => {
@@ -2327,6 +2330,29 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
     if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
     stopRecordingTracks();
   }, []);
+
+  useEffect(() => {
+    if (!emojiOpen) return undefined;
+
+    const closeOnOutsideTouch = (event) => {
+      const target = event.target;
+      if (!target) return;
+      if (emojiPanelRef.current?.contains(target)) return;
+      if (emojiToggleRef.current?.contains(target)) return;
+      setEmojiOpen(false);
+    };
+
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setEmojiOpen(false);
+    };
+
+    document.addEventListener('pointerdown', closeOnOutsideTouch, true);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideTouch, true);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [emojiOpen]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -2459,7 +2485,14 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
             >
               <I.Mic />
             </button>
-            <button className={`tool-btn ${emojiOpen ? 'active' : ''}`} title="Emoji" onClick={() => setEmojiOpen(open => !open)}><I.Smile /></button>
+            <button
+              ref={emojiToggleRef}
+              className={`tool-btn ${emojiOpen ? 'active' : ''}`}
+              title="Emoji"
+              onClick={() => setEmojiOpen(open => !open)}
+            >
+              <I.Smile />
+            </button>
             <div className="grow" />
             <span style={{ fontSize: 11, color: 'var(--muted)', marginRight: 6 }}>{t.kbdHint}</span>
             <button className={`send ${draft.trim() && !sending ? '' : 'disabled'}`} onClick={sendDraft}>
@@ -2475,7 +2508,7 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
             </div>
           )}
           {emojiOpen && (
-            <div className="emoji-panel">
+            <div ref={emojiPanelRef} className="emoji-panel">
               {EMOJI_SETS.map(group => (
                 <div className="emoji-group" key={group.label}>
                   <div className="emoji-label">{group.label}</div>
