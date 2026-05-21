@@ -856,6 +856,9 @@ input, textarea { background: none; border: 0; outline: 0; }
   color: var(--ink-2);
   font-size: 12.5px;
 }
+.file-chip:hover {
+  background: var(--surface-2);
+}
 .file-chip span {
   min-width: 0;
   overflow: hidden;
