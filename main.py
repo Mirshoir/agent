@@ -2231,26 +2231,107 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
 
     attachments = message.get("attachments", [])
     if attachments:
-        att = attachments[0]
-        att_type = att.get("type", "")
-        att_url = (att.get("payload") or {}).get("url", "")
+        attachment_had_media = False
+        for att in attachments:
+            if not isinstance(att, dict):
+                continue
 
-        if att_type == "image":
-            media_type = "photo"
-            media_url = att_url
-            message_text = message_text or "📸 Photo"
-        elif att_type == "video":
-            media_type = "video"
-            media_url = att_url
-            message_text = message_text or "🎥 Video"
-        elif att_type == "audio":
-            media_type = "audio"
-            media_url = att_url
-            message_text = message_text or "🎤 Audio"
-        elif att_type == "file":
-            media_type = "file"
-            media_url = att_url
-            message_text = message_text or "📎 File"
+            att_type = normalize_id(att.get("type")).lower()
+            payload = att.get("payload") if isinstance(att.get("payload"), dict) else {}
+
+            url_candidates = []
+
+            def collect_urls(value):
+                if isinstance(value, dict):
+                    for nested in value.values():
+                        collect_urls(nested)
+                    return
+                if isinstance(value, list):
+                    for nested in value:
+                        collect_urls(nested)
+                    return
+                if isinstance(value, str) and value.startswith(("http://", "https://")) and value not in url_candidates:
+                    url_candidates.append(value)
+
+            for key in ("url", "media_url", "image_url", "video_url", "external_url", "link", "permalink", "src"):
+                direct = payload.get(key)
+                if isinstance(direct, str) and direct.startswith(("http://", "https://")) and direct not in url_candidates:
+                    url_candidates.append(direct)
+
+            collect_urls(payload)
+            collect_urls(att)
+
+            att_url = url_candidates[0] if url_candidates else ""
+            att_url_l = att_url.lower()
+
+            inferred_type = None
+            if att_type in ("image", "photo"):
+                inferred_type = "photo"
+            elif att_type in ("video", "ig_reel", "reel"):
+                inferred_type = "video"
+            elif att_type in ("audio", "voice"):
+                inferred_type = "audio"
+            elif att_type in ("file", "document"):
+                inferred_type = "file"
+
+            if not inferred_type and att_url_l:
+                if re.search(r"\.(jpg|jpeg|png|gif|webp|bmp|heic|heif)(\?|$)", att_url_l):
+                    inferred_type = "photo"
+                elif re.search(r"\.(mp4|mov|m4v|webm|avi|mkv)(\?|$)", att_url_l):
+                    inferred_type = "video"
+                elif re.search(r"\.(mp3|m4a|wav|ogg|oga|aac|opus)(\?|$)", att_url_l):
+                    inferred_type = "audio"
+                elif any(token in att_url_l for token in ("/reel/", "ig_reel")):
+                    inferred_type = "video"
+
+            if not inferred_type and att_type in ("share", "ig_post", "ig_story", "story_mention", "embed", "fallback"):
+                inferred_type = "file"
+
+            if inferred_type:
+                attachment_had_media = True
+                media_type = inferred_type
+                media_url = att_url or media_url
+                if not message_text:
+                    if att_type in ("share", "ig_post", "ig_story", "story_mention", "ig_reel", "embed"):
+                        message_text = "🔁 Forwarded post"
+                    elif media_type == "photo":
+                        message_text = "📸 Photo"
+                    elif media_type == "video":
+                        message_text = "🎥 Video"
+                    elif media_type == "audio":
+                        message_text = "🎤 Audio"
+                    else:
+                        message_text = "📎 File"
+                if media_url:
+                    break
+
+        if attachment_had_media and not message_text:
+            message_text = "📎 Attachment"
+
+    if not message_text and not media_type:
+        share_url = ""
+        shares = message.get("shares")
+        if isinstance(shares, list):
+            for share in shares:
+                if not isinstance(share, dict):
+                    continue
+                for key in ("link", "url", "permalink"):
+                    candidate = normalize_id(share.get(key))
+                    if candidate.startswith(("http://", "https://")):
+                        share_url = candidate
+                        break
+                if share_url:
+                    break
+        if share_url:
+            lower_share = share_url.lower()
+            media_type = "video" if ("/reel/" in lower_share or re.search(r"\.(mp4|mov|m4v|webm)(\?|$)", lower_share)) else "file"
+            media_url = share_url
+            message_text = "🔁 Forwarded post"
+
+    if attachments and not message_text and not media_type:
+        # Do not drop unknown new attachment types from Meta; keep a visible placeholder.
+        media_type = "file"
+        message_text = "📎 Attachment"
 
     if not sender_id or not recipient_id:
         return
