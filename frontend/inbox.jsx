@@ -682,8 +682,7 @@ function SignInPage({ lang, onSignedIn, onBack }) {
       window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, ownerEmail);
       const data = await API.get('/api/businesses');
       const rows = data.data || [];
-      const ownerRows = rows.filter(row => businessOwnerEmail(row) === ownerEmail);
-      if (!ownerRows.length) throw new Error('No assigned accounts found for this user.');
+      if (!rows.length) throw new Error('No assigned accounts found for this user.');
       saveAuthSession(ownerEmail);
       onSignedIn(ownerEmail);
     } catch (err) {
@@ -2655,8 +2654,7 @@ function App({ lang, setLang, onSignOut }) {
   const loadBusinesses = async ({ silent = false, ownerEmailOverride = '' } = {}) => {
     try {
       const data = await API.get('/api/businesses');
-      const ownerScoped = normalizeOwnerEmail(ownerEmailOverride || ownerEmail);
-      const rows = (data.data || []).filter(row => !ownerScoped || businessOwnerEmail(row) === ownerScoped);
+      const rows = data.data || [];
       businessesRef.current = rows;
       setBusinesses(rows);
       setSelectedBusinessId(current => rows.some(item => item.id === current) ? current : rows[0]?.id || '');
