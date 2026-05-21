@@ -1789,6 +1789,7 @@ Safety rules:
 - Only mention a manager when the customer asks for a human or is ready to order.
 - Never mention AI, database, API, prompt, automation, or internal system.
 - Do not use markdown, bold formatting, or long paragraphs.
+- Never end a reply with an unfinished phrase such as "uchun:", "link:", "havola:", or "ko'rish uchun:".
 """
 
 
@@ -1796,7 +1797,9 @@ def wants_catalog(text: str) -> bool:
     text = (text or "").lower()
     keywords = [
         "catalog", "katalog", "каталог", "price", "prices", "narx", "narxlari",
-        "narhi", "цена", "цены", "прайс", "model", "models", "modellari",
+        "narhi", "qancha", "qanchadan", "necha pul", "nechpul", "nechi pul",
+        "цена", "цены", "стоимость", "сколько", "сколько стоит", "прайс",
+        "model", "models", "modellari",
         "модель", "модели", "collection", "kolleksiya", "коллекция",
         "photo", "photos", "rasm", "rasmlar", "фото", "mahsulot",
         "mahsulotlar", "товар", "товары",
@@ -1815,7 +1818,31 @@ def get_catalog_link(business: dict) -> str:
 def remove_urls(text: str) -> str:
     text = re.sub(r"https?://\S+", "", text or "").strip()
     text = re.sub(r"\s+", " ", text).strip()
-    return text
+    return strip_incomplete_reply(text)
+
+
+def strip_incomplete_reply(text: str) -> str:
+    text = normalize_id(text)
+    if not text:
+        return ""
+
+    trailing_patterns = [
+        r"\s*(?:joylashuv xaritasini\s*)?(?:ko['‘’`]?rish|ochish)\s+uchun\s*[:：]?\s*$",
+        r"\s*(?:xarita|lokatsiya|location|map|manzil linki|ссылка|карта)[^.!?]{0,100}\s*[:：]\s*$",
+        r"\s*(?:link|havola|ссылка)\s*[:：]\s*$",
+    ]
+    for pattern in trailing_patterns:
+        text = re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
+
+    # If URL removal leaves a final unfinished clause after a complete sentence, drop it.
+    if re.search(r"[:：]\s*$", text):
+        last_stop = max(text.rfind("."), text.rfind("!"), text.rfind("?"))
+        if last_stop >= 0:
+            fragment = text[last_stop + 1:].strip().lower()
+            if any(word in fragment for word in ["uchun", "link", "havola", "xarita", "map", "ссылка", "карта"]):
+                text = text[:last_stop + 1].strip()
+
+    return text.rstrip(" :：,;-").strip()
 
 
 def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
@@ -2054,6 +2081,7 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     for phrase in noisy_phrases:
         text = re.sub(re.escape(phrase), "", text, flags=re.IGNORECASE)
 
+    text = strip_incomplete_reply(text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
     # Keep at most one question per reply to avoid interrogation loops.
@@ -2073,6 +2101,7 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     if len(text) > 500:
         text = text[:500].rsplit(" ", 1)[0].strip()
 
+    text = strip_incomplete_reply(text)
     return text or "Tushunarli 👍"
 
 
@@ -2250,10 +2279,34 @@ def send_instagram_private_reply(access_token: str, comment_id: str, text: str, 
 
 def send_catalog_private_reply(access_token: str, comment_id: str, business: dict):
     catalog_link = get_catalog_link(business)
-    if not catalog_link:
+    comment_id = normalize_id(comment_id)
+    if not access_token or not comment_id or not catalog_link:
         return None
-    text = f"Katalog: {catalog_link}"
-    return send_instagram_private_reply(access_token, comment_id, text, business)
+
+    business = business or {}
+    business_name = normalize_id(business.get("business_name")) or "Milana Premium"
+    text = (
+        f"Assalomu alaykum! {business_name} katalogi shu yerda: "
+        "Qaysi mahsulotlar sizni qiziqtirmoqda?"
+    )
+    payload = {
+        "recipient": {"comment_id": comment_id},
+        "message": {
+            "attachment": {
+                "type": "template",
+                "payload": {
+                    "template_type": "button",
+                    "text": text[:640],
+                    "buttons": [{"type": "web_url", "url": catalog_link, "title": "Katalogni ko'rish"}],
+                },
+            }
+        },
+    }
+
+    if business.get("oauth_provider") == "facebook_page":
+        payload["messaging_type"] = "RESPONSE"
+
+    return send_instagram_payload(access_token, business, payload)
 
 
 def reply_to_comment(access_token: str, comment_id: str, text: str, business: dict = None):
