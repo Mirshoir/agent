@@ -573,6 +573,7 @@ def get_instagram_comment_anchor_by_comment_id(business_id: str, comment_id: str
     if not business_id or not comment_id:
         return {}
 
+    rows = []
     try:
         rows = (
             supabase.table("inbox_messages")
@@ -583,7 +584,7 @@ def get_instagram_comment_anchor_by_comment_id(business_id: str, comment_id: str
             .eq("direction", "inbound")
             .eq("external_message_id", comment_id)
             .order("created_at", desc=True)
-            .limit(5)
+            .limit(10)
             .execute()
             .data
             or []
@@ -591,12 +592,33 @@ def get_instagram_comment_anchor_by_comment_id(business_id: str, comment_id: str
     except Exception:
         rows = []
 
+    # Fallback path for legacy rows where external_message_id was not stored.
+    if not rows:
+        try:
+            recent = (
+                supabase.table("inbox_messages")
+                .select("*")
+                .eq("platform", "instagram")
+                .eq("business_id", business_id)
+                .eq("channel", "instagram_comment")
+                .eq("direction", "inbound")
+                .order("created_at", desc=True)
+                .limit(300)
+                .execute()
+                .data
+                or []
+            )
+            rows = [
+                r for r in recent
+                if normalize_id((r.get("raw_payload") or {}).get("id") or (r.get("raw_payload") or {}).get("comment_id")) == comment_id
+            ]
+        except Exception:
+            rows = []
+
     if not rows:
         return {}
-
     if not post_id:
         return rows[0]
-
     for row in rows:
         if extract_instagram_comment_post_id(row) == post_id:
             return row
@@ -3441,11 +3463,6 @@ async def send_message_v2(
                         comment_id=reply_to_comment_id,
                         post_id=post_id,
                     )
-                    if not anchor:
-                        return JSONResponse(
-                            {"error": "Selected comment not found in this thread"},
-                            status_code=400,
-                        )
                 else:
                     anchor = get_latest_instagram_comment_anchor(
                         business_id=business_id,
@@ -3458,6 +3475,8 @@ async def send_message_v2(
                     anchor.get("external_message_id")
                     or (anchor.get("raw_payload") or {}).get("id")
                 )
+                if reply_to_comment_id and not comment_id:
+                    comment_id = reply_to_comment_id
                 if not comment_id:
                     return JSONResponse(
                         {"error": "Comment anchor not found for this thread"},
