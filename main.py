@@ -893,6 +893,10 @@ def transform_message_to_react(row: dict) -> dict:
         message['text'] = content
 
     raw_payload = row.get("raw_payload") or {}
+    # Keep identifiers on every row (including plain text) so manual per-comment reply can target correctly.
+    message['external_message_id'] = external_message_id
+    message['comment_id'] = normalize_id(raw_payload.get("comment_id") or raw_payload.get("id") or external_message_id)
+    message['raw_payload'] = raw_payload
     message["post_id"] = extract_instagram_comment_post_id(row)
     message["post_permalink"] = row.get("post_permalink") or raw_payload.get("post_permalink") or ""
     message["post_image_url"] = row.get("post_image_url") or raw_payload.get("post_image_url") or ""
