@@ -10,7 +10,7 @@ import tempfile
 import shutil
 import subprocess
 import requests
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse, parse_qs, unquote
 from typing import Optional
 from datetime import datetime
 
@@ -273,6 +273,32 @@ def log(title, data=None):
 
 def normalize_id(value) -> str:
     return str(value or "").strip()
+
+
+def unwrap_meta_redirect_url(value: str) -> str:
+    value = normalize_id(value)
+    if not value:
+        return ""
+    try:
+        parsed = urlparse(value)
+        host = normalize_id(parsed.netloc).lower()
+        if host.endswith("instagram.com") or host.endswith("facebook.com"):
+            target = parse_qs(parsed.query).get("u", [""])[0]
+            target = unquote(normalize_id(target))
+            if target.startswith(("http://", "https://")):
+                return target
+    except Exception:
+        pass
+    return value
+
+
+def is_instagram_public_link(value: str) -> bool:
+    value = normalize_id(value).lower()
+    return (
+        value.startswith(("http://", "https://"))
+        and "instagram.com/" in value
+        and any(seg in value for seg in ("/reel/", "/p/", "/tv/", "/share/"))
+    )
 
 
 def normalize_email(value) -> str:
@@ -2228,6 +2254,10 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
 
     media_type = None
     media_url = None
+    post_permalink = ""
+    post_image_url = ""
+    post_media_type = ""
+    share_asset_id = ""
 
     attachments = message.get("attachments", [])
     if attachments:
@@ -2263,6 +2293,18 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
 
             att_url = url_candidates[0] if url_candidates else ""
             att_url_l = att_url.lower()
+            unwrapped_att_url = unwrap_meta_redirect_url(att_url)
+            if is_instagram_public_link(unwrapped_att_url):
+                post_permalink = post_permalink or unwrapped_att_url
+            elif is_instagram_public_link(att_url):
+                post_permalink = post_permalink or att_url
+            try:
+                parsed_att = urlparse(att_url)
+                candidate_asset_id = normalize_id(parse_qs(parsed_att.query).get("asset_id", [""])[0])
+                if candidate_asset_id:
+                    share_asset_id = share_asset_id or candidate_asset_id
+            except Exception:
+                pass
 
             inferred_type = None
             if att_type in ("image", "photo"):
@@ -2319,6 +2361,11 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                     candidate = normalize_id(share.get(key))
                     if candidate.startswith(("http://", "https://")):
                         share_url = candidate
+                        decoded = unwrap_meta_redirect_url(candidate)
+                        if is_instagram_public_link(decoded):
+                            post_permalink = post_permalink or decoded
+                        elif is_instagram_public_link(candidate):
+                            post_permalink = post_permalink or candidate
                         break
                 if share_url:
                     break
@@ -2352,6 +2399,34 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         if not business:
             return
 
+        access_token = get_business_access_token(business)
+        if share_asset_id and access_token:
+            try:
+                share_media_info = fetch_instagram_media_info(access_token, share_asset_id, business) or {}
+                resolved_permalink = normalize_id(share_media_info.get("post_permalink"))
+                if resolved_permalink:
+                    post_permalink = post_permalink or resolved_permalink
+                resolved_preview = normalize_id(share_media_info.get("post_image_url"))
+                if resolved_preview:
+                    post_image_url = resolved_preview
+                    if not media_url or "ig_messaging_cdn" in normalize_id(media_url):
+                        media_url = resolved_preview
+                resolved_media_type = normalize_id(share_media_info.get("post_media_type")).lower()
+                if resolved_media_type:
+                    post_media_type = resolved_media_type
+                    if media_type in (None, "file"):
+                        if "video" in resolved_media_type or "reel" in resolved_media_type:
+                            media_type = "video"
+                        elif "image" in resolved_media_type or "photo" in resolved_media_type:
+                            media_type = "photo"
+            except Exception as e:
+                log("Could not enrich forwarded Instagram share", str(e))
+
+        if not post_permalink and media_url:
+            maybe_link = unwrap_meta_redirect_url(media_url)
+            if is_instagram_public_link(maybe_link):
+                post_permalink = maybe_link
+
         save_inbox_message(
             business=business,
             platform="instagram",
@@ -2365,6 +2440,9 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             media_type=media_type,
             media_url=media_url,
             channel="dm",
+            post_permalink=post_permalink,
+            post_image_url=post_image_url,
+            post_media_type=post_media_type,
         )
 
         if not business.get("bot_enabled", True):
@@ -2379,7 +2457,6 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             mark_processed(processed_message_ids, message_id)
             return
 
-        access_token = get_business_access_token(business)
         if not access_token:
             return
 
