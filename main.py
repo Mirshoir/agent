@@ -1790,6 +1790,7 @@ Safety rules:
 - Never mention AI, database, API, prompt, automation, or internal system.
 - Do not use markdown, bold formatting, or long paragraphs.
 - Never end a reply with an unfinished phrase such as "uchun:", "link:", "havola:", or "ko'rish uchun:".
+- Every reply must finish as a complete sentence. Do not stop in the middle of a question or explanation.
 """
 
 
@@ -1845,6 +1846,27 @@ def strip_incomplete_reply(text: str) -> str:
     return text.rstrip(" :：,;-").strip()
 
 
+def complete_sentence_reply(text: str, limit: int = 950) -> str:
+    text = strip_incomplete_reply(text)
+    if not text:
+        return ""
+
+    if len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0].strip()
+        text = strip_incomplete_reply(text)
+
+    sentence_end = ".!?。！？"
+    soft_endings = ("😊", "👍", "🙌", "✅")
+    if text.endswith(tuple(sentence_end)) or text.endswith(soft_endings):
+        return text
+
+    last_stop = max(text.rfind("."), text.rfind("!"), text.rfind("?"), text.rfind("。"), text.rfind("！"), text.rfind("？"))
+    if last_stop >= 40:
+        return strip_incomplete_reply(text[:last_stop + 1])
+
+    return text.rstrip(" :：,;-").strip() + "."
+
+
 def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
     catalog_link = get_catalog_link(business)
     if catalog_link and catalog_link in (reply_text or ""):
@@ -1859,6 +1881,43 @@ def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
     if not reply_text:
         reply_text = "Albatta 😊 Katalogni quyidagi tugma orqali ko'rishingiz mumkin."
     return reply_text[:1000]
+
+
+def catalog_template_payload(recipient: dict, business: dict, text: str = "") -> dict:
+    catalog_link = get_catalog_link(business)
+    business_name = normalize_id((business or {}).get("business_name")) or "Milana Premium"
+    text = clean_ai_reply_for_catalog(text, business)
+    if not text:
+        text = f"{business_name} katalogi shu yerda. Qaysi mahsulotlar sizni qiziqtirmoqda?"
+
+    return {
+        "recipient": recipient,
+        "message": {
+            "attachment": {
+                "type": "template",
+                "payload": {
+                    "template_type": "generic",
+                    "elements": [
+                        {
+                            "title": "Katalogni ko'rish",
+                            "subtitle": text[:80],
+                            "default_action": {
+                                "type": "web_url",
+                                "url": catalog_link,
+                            },
+                            "buttons": [
+                                {
+                                    "type": "web_url",
+                                    "url": catalog_link,
+                                    "title": "Katalogni ko'rish",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            }
+        },
+    }
 
 
 AI_DEFAULT_MODELS = {
@@ -1906,7 +1965,7 @@ def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
     model = business.get("ai_model") or AI_DEFAULT_MODELS[provider]
     api_key = get_ai_api_key(business, provider)
     temperature = float(business.get("ai_temperature", 0.5) or 0.5)
-    max_tokens = int(business.get("ai_max_tokens", 130) or 130)
+    max_tokens = max(220, int(business.get("ai_max_tokens", 220) or 220))
 
     if not api_key:
         log("Missing AI API key", {"provider": provider, "model": model})
@@ -2081,7 +2140,7 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     for phrase in noisy_phrases:
         text = re.sub(re.escape(phrase), "", text, flags=re.IGNORECASE)
 
-    text = strip_incomplete_reply(text)
+    text = complete_sentence_reply(text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
     # Keep at most one question per reply to avoid interrogation loops.
@@ -2098,10 +2157,8 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     if price_ask and not has_number:
         text = "Narxni aniq aytishim uchun model yoki variantni yozing 😊"
 
-    if len(text) > 500:
-        text = text[:500].rsplit(" ", 1)[0].strip()
+    text = complete_sentence_reply(text, limit=900)
 
-    text = strip_incomplete_reply(text)
     return text or "Tushunarli 👍"
 
 
@@ -2238,21 +2295,7 @@ def send_catalog_button(access_token: str, recipient_id: str, business: dict, te
     if not access_token or not recipient_id or not catalog_link:
         return None
 
-    text = clean_ai_reply_for_catalog(text, business)
-
-    payload = {
-        "recipient": {"id": recipient_id},
-        "message": {
-            "attachment": {
-                "type": "template",
-                "payload": {
-                    "template_type": "button",
-                    "text": text[:640],
-                    "buttons": [{"type": "web_url", "url": catalog_link, "title": "Katalogni ko'rish"}],
-                },
-            }
-        },
-    }
+    payload = catalog_template_payload({"id": recipient_id}, business, text)
 
     if business.get("oauth_provider") == "facebook_page":
         payload["messaging_type"] = "RESPONSE"
@@ -2285,23 +2328,8 @@ def send_catalog_private_reply(access_token: str, comment_id: str, business: dic
 
     business = business or {}
     business_name = normalize_id(business.get("business_name")) or "Milana Premium"
-    text = (
-        f"Assalomu alaykum! {business_name} katalogi shu yerda: "
-        "Qaysi mahsulotlar sizni qiziqtirmoqda?"
-    )
-    payload = {
-        "recipient": {"comment_id": comment_id},
-        "message": {
-            "attachment": {
-                "type": "template",
-                "payload": {
-                    "template_type": "button",
-                    "text": text[:640],
-                    "buttons": [{"type": "web_url", "url": catalog_link, "title": "Katalogni ko'rish"}],
-                },
-            }
-        },
-    }
+    text = f"Assalomu alaykum! {business_name} katalogi shu yerda. Qaysi mahsulotlar sizni qiziqtirmoqda?"
+    payload = catalog_template_payload({"comment_id": comment_id}, business, text)
 
     if business.get("oauth_provider") == "facebook_page":
         payload["messaging_type"] = "RESPONSE"
