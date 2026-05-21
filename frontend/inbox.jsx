@@ -931,6 +931,30 @@ function normalizeMessage(row, index) {
   return message;
 }
 
+function resolveCommentPostPreview(conv, messages = []) {
+  const base = {
+    postId: conv?.postId || '',
+    postPermalink: conv?.postPermalink || '',
+    postImageUrl: conv?.postImageUrl || '',
+  };
+
+  if (base.postImageUrl && (base.postPermalink || base.postId)) return base;
+
+  for (const m of messages || []) {
+    const raw = m?.raw || {};
+    const payload = raw.raw_payload || {};
+    const media = payload.media || {};
+    const postImageUrl = raw.post_image_url || raw.postImageUrl || payload.post_image_url || '';
+    const postPermalink = raw.post_permalink || raw.postPermalink || payload.post_permalink || '';
+    const postId = raw.post_id || raw.postId || payload.post_id || payload.media_id || media.id || '';
+    if (postImageUrl || postPermalink || postId) {
+      return { postId, postPermalink, postImageUrl };
+    }
+  }
+
+  return base;
+}
+
 // ---------- Small helpers ----------
 function Avatar({ data, size = 38, platform, online }) {
   const style = { width: size, height: size, background: data.color, fontSize: size * 0.36 };
@@ -2287,6 +2311,7 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
     }
     return out;
   }, [messages]);
+  const commentPost = useMemo(() => resolveCommentPostPreview(conv, messages), [conv, messages]);
 
   let lastDay = null;
 
@@ -2294,6 +2319,23 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
     <section className="thread-col">
       <div className="messages" ref={scrollRef}>
         {threadLoading && <div className="empty">Loading conversation…</div>}
+        {conv.isCommentThread && (commentPost.postImageUrl || commentPost.postPermalink || commentPost.postId) && (
+          <div className="post-preview-card">
+            {commentPost.postImageUrl ? (
+              <img className="post-preview-image" src={commentPost.postImageUrl} alt="Instagram post" />
+            ) : (
+              <div className="post-preview-fallback">Instagram post</div>
+            )}
+            <div className="post-preview-meta">
+              <strong>Commented post</strong>
+              {commentPost.postPermalink ? (
+                <a href={commentPost.postPermalink} target="_blank" rel="noreferrer">Open on Instagram</a>
+              ) : (
+                <span>ID: {commentPost.postId || 'unknown'}</span>
+              )}
+            </div>
+          </div>
+        )}
         {groups.map(m => {
           const dayChanged = m.day && m.day !== lastDay;
           if (m.day) lastDay = m.day;
@@ -2405,8 +2447,9 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
 }
 
 // ---------- Detail column ----------
-function DetailColumn({ conv, t, stats, onDelete }) {
+function DetailColumn({ conv, t, stats, onDelete, messages = [] }) {
   if (!conv) return <aside className="detail-col" />;
+  const commentPost = resolveCommentPostPreview(conv, messages);
   return (
     <aside className="detail-col">
       <div className="cust-card">
@@ -2433,6 +2476,23 @@ function DetailColumn({ conv, t, stats, onDelete }) {
 
       <div className="detail-section">
         <h3>{t.channel}</h3>
+        {conv.isCommentThread && (commentPost.postImageUrl || commentPost.postPermalink || commentPost.postId) && (
+          <div className="detail-post-card">
+            {commentPost.postImageUrl ? (
+              <img className="detail-post-image" src={commentPost.postImageUrl} alt="Instagram post" />
+            ) : (
+              <div className="detail-post-fallback">Instagram post</div>
+            )}
+            <div className="detail-post-meta">
+              <span>Source post</span>
+              {commentPost.postPermalink ? (
+                <a href={commentPost.postPermalink} target="_blank" rel="noreferrer">Open on Instagram</a>
+              ) : (
+                <small>ID: {commentPost.postId || 'unknown'}</small>
+              )}
+            </div>
+          </div>
+        )}
         <div className="channel-facts">
           <span>{t.platform} <b>{conv.platform}</b></span>
           <span>{t.channel} <b>{conv.channelName || conv.channel || t.inbox}</b></span>
@@ -3335,7 +3395,7 @@ function App({ lang, setLang, onSignOut }) {
             onSignOut={onSignOut}
           />
         )}
-        {activeView === 'inbox' && <DetailColumn conv={conv} t={t} stats={stats} onDelete={deleteConversation} />}
+        {activeView === 'inbox' && <DetailColumn conv={conv} t={t} stats={stats} onDelete={deleteConversation} messages={messages} />}
       </div>
       <Toast message={toast} />
 
