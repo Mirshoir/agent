@@ -40,6 +40,7 @@ if (window.localStorage.getItem('instaagent_dashboard_secret') === 'YOUR_DASHBOA
 
 const OWNER_EMAIL_STORAGE_KEY = 'instaagent_owner_email';
 const OWNER_EMAIL_PARAM = 'owner_email';
+const DASHBOARD_AUTH_STORAGE_KEY = 'instaagent_dashboard_auth';
 
 function normalizeOwnerEmail(value = '') {
   return String(value || '').trim().toLowerCase();
@@ -64,6 +65,31 @@ function resolvedOwnerEmail() {
 
 if (ownerEmailFromUrl()) {
   window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, ownerEmailFromUrl());
+}
+
+function readAuthSession() {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(DASHBOARD_AUTH_STORAGE_KEY) || '{}');
+    if (!parsed || typeof parsed !== 'object') return null;
+    const ownerEmail = normalizeOwnerEmail(parsed.ownerEmail);
+    if (!ownerEmail) return null;
+    return { ownerEmail, at: parsed.at || '' };
+  } catch {
+    return null;
+  }
+}
+
+function saveAuthSession(ownerEmail) {
+  const clean = normalizeOwnerEmail(ownerEmail);
+  if (!clean) return;
+  window.localStorage.setItem(DASHBOARD_AUTH_STORAGE_KEY, JSON.stringify({ ownerEmail: clean, at: new Date().toISOString() }));
+  window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, clean);
+}
+
+function clearAuthSession() {
+  window.localStorage.removeItem(DASHBOARD_AUTH_STORAGE_KEY);
+  window.localStorage.removeItem(OWNER_EMAIL_STORAGE_KEY);
+  window.localStorage.removeItem('instaagent_dashboard_secret');
 }
 
 function scopedPath(path) {
@@ -630,6 +656,69 @@ function LandingPage({ onOpenDashboard, lang, setLang }) {
   );
 }
 
+function SignInPage({ lang, onSignedIn, onBack }) {
+  const l = LANDING_TEXT[lang] || LANDING_TEXT.en;
+  const [email, setEmail] = useState(resolvedOwnerEmail());
+  const [secret, setSecret] = useState(dashboardSecret());
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const submit = async (e) => {
+    e.preventDefault();
+    const ownerEmail = normalizeOwnerEmail(email);
+    const cleanSecret = String(secret || '').trim();
+    if (!ownerEmail) {
+      setError('Email is required.');
+      return;
+    }
+    if (!cleanSecret) {
+      setError('Access key is required.');
+      return;
+    }
+    setLoading(true);
+    setError('');
+    try {
+      window.localStorage.setItem('instaagent_dashboard_secret', cleanSecret);
+      window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, ownerEmail);
+      const data = await API.get('/api/businesses');
+      const rows = data.data || [];
+      const ownerRows = rows.filter(row => businessOwnerEmail(row) === ownerEmail);
+      if (!ownerRows.length) throw new Error('No assigned accounts found for this user.');
+      saveAuthSession(ownerEmail);
+      onSignedIn(ownerEmail);
+    } catch (err) {
+      setError(err.message || 'Sign in failed.');
+      clearAuthSession();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <main className="signin-shell">
+      <section className="signin-card">
+        <h1>{l.appName} Sign In</h1>
+        <p>Log in to see only your assigned Instagram, Telegram, and WhatsApp accounts.</p>
+        <form onSubmit={submit}>
+          <label>
+            <span>Email</span>
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="owner@company.com" autoComplete="username" />
+          </label>
+          <label>
+            <span>Access key</span>
+            <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="Dashboard secret" autoComplete="current-password" />
+          </label>
+          {error && <div className="signin-error">{error}</div>}
+          <div className="signin-actions">
+            <button type="submit" disabled={loading}>{loading ? 'Signing in...' : 'Sign In'}</button>
+            <button type="button" className="ghost" onClick={onBack}>Back</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  );
+}
+
 function hashHue(value) {
   let hash = 0;
   for (const ch of String(value || 'client')) hash = ((hash << 5) - hash) + ch.charCodeAt(0);
@@ -755,6 +844,7 @@ function normalizeConversation(row) {
   const platform = row.platform || 'instagram';
   const channel = row.channel || parsedChannel || '';
   const channelName = row.channelName || channelLabel(platform || parsedPlatform, channel);
+  const isCommentThread = Boolean(row.isCommentThread || (platform === 'instagram' && String(channel).toLowerCase().includes('comment')));
   const lastAt = row.last_message_at || row.created_at || row.lastAt || '';
   return {
     id: row.id,
@@ -764,6 +854,10 @@ function normalizeConversation(row) {
     chatId,
     channel,
     channelName,
+    isCommentThread,
+    postId: row.postId || row.post_id || '',
+    postPermalink: row.postPermalink || row.post_permalink || '',
+    postImageUrl: row.postImageUrl || row.post_image_url || '',
     name,
     handle: row.handle || platformHandle({ ...row, customer_id: customerId, chat_id: chatId }),
     platform: platform || parsedPlatform,
@@ -1337,14 +1431,12 @@ function LeadsBoard({ conversations, leadStages, setLeadStage, onOpenConversatio
     <div className="leads-board">
       {LEAD_STAGE_ORDER.map(stage => {
         const list = leads.filter(item => item.stage === stage);
-        const total = list.reduce((sum, item) => sum + item.amount, 0);
         return (
           <section className="lead-column" key={stage}>
             <header>
               <h3>{stageNames[stage]}</h3>
               <span>{list.length}</span>
             </header>
-            <div className="lead-volume">{w.leadAmount}: <b>${total.toLocaleString()}</b></div>
             <div className="lead-list">
               {!list.length && <div className="lead-empty">{w.leadEmpty}</div>}
               {list.map(lead => (
@@ -1400,6 +1492,7 @@ function WorkspacePanel({
   onOpenConversation,
   ownerEmail,
   onOwnerEmailSave,
+  onSignOut,
 }) {
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId) || businesses[0] || {};
@@ -1731,6 +1824,7 @@ function WorkspacePanel({
           <div className="panel-actions">
             <button onClick={() => { window.localStorage.removeItem('instaagent_dashboard_secret'); onToast('Dashboard secret cleared'); }}>Clear secret</button>
             <button onClick={() => navigator.clipboard?.writeText(API_BASE).then(() => onToast('API base copied'))}>Copy API base</button>
+            <button onClick={onSignOut}>Sign out</button>
           </div>
         </div>
       )}
@@ -1795,6 +1889,7 @@ function Row({ c, selected, onClick, t }) {
 function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError, liveMode, onRefresh, onSaveSecret }) {
   const [filter, setFilter] = useState('all');
   const [platforms, setPlatforms] = useState({ instagram: true, telegram: true, whatsapp: true });
+  const [instagramChannels, setInstagramChannels] = useState({ dm: true, comments: true });
   const [search, setSearch] = useState('');
   const [secretDraft, setSecretDraft] = useState(window.localStorage.getItem('instaagent_dashboard_secret') || '');
 
@@ -1808,6 +1903,11 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
   const filtered = useMemo(() => {
     return conversations.filter(c => {
       if (!platforms[c.platform]) return false;
+      if (c.platform === 'instagram') {
+        const isComment = Boolean(c.isCommentThread || String(c.channel || '').toLowerCase().includes('comment'));
+        if (isComment && !instagramChannels.comments) return false;
+        if (!isComment && !instagramChannels.dm) return false;
+      }
       if (filter === 'needs' && !c.needsHuman) return false;
       if (filter === 'unread' && c.unread === 0) return false;
       if (filter === 'ai' && (!c.aiOn || c.needsHuman)) return false;
@@ -1875,6 +1975,12 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
             <span className="pdot wa" /> {t.whatsapp}
           </button>
         </div>
+        {platforms.instagram && (
+          <div className="platform-toggle" style={{ marginTop: 8 }}>
+            <button className={instagramChannels.dm ? 'on' : ''} onClick={() => setInstagramChannels(v => ({ ...v, dm: !v.dm }))}>Instagram DMs</button>
+            <button className={instagramChannels.comments ? 'on' : ''} onClick={() => setInstagramChannels(v => ({ ...v, comments: !v.comments }))}>Instagram comments</button>
+          </div>
+        )}
       </div>
       <div className="list-scroll">
         {priority.length > 0 && (
@@ -2473,7 +2579,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "theme": "light"
 }/*EDITMODE-END*/;
 
-function App({ lang, setLang }) {
+function App({ lang, setLang, onSignOut }) {
   const t = window.STRINGS[lang];
 
   const [conversations, setConversations] = useState(window.CONVERSATIONS);
@@ -3228,6 +3334,7 @@ function App({ lang, setLang }) {
             onOpenConversation={selectConversation}
             ownerEmail={ownerEmail}
             onOwnerEmailSave={saveOwnerEmailScope}
+            onSignOut={onSignOut}
           />
         )}
         {activeView === 'inbox' && <DetailColumn conv={conv} t={t} stats={stats} onDelete={deleteConversation} />}
@@ -3262,6 +3369,14 @@ function App({ lang, setLang }) {
 function Root() {
   const [lang, setLang] = useState(() => window.localStorage.getItem(UI_LANG_STORAGE_KEY) || 'en');
   const [showDashboard, setShowDashboard] = useState(() => window.location.hash === DASHBOARD_HASH || urlParams.get('dashboard') === '1');
+  const [signedIn, setSignedIn] = useState(() => {
+    const ownerFromUrl = ownerEmailFromUrl();
+    if (ownerFromUrl && dashboardSecret()) {
+      saveAuthSession(ownerFromUrl);
+      return true;
+    }
+    return !!readAuthSession();
+  });
 
   useEffect(() => {
     window.localStorage.setItem(UI_LANG_STORAGE_KEY, lang);
@@ -3278,9 +3393,20 @@ function Root() {
     setShowDashboard(true);
   };
 
-  return showDashboard
-    ? <App lang={lang} setLang={setLang} />
-    : <LandingPage onOpenDashboard={openDashboard} lang={lang} setLang={setLang} />;
+  const backToLanding = () => {
+    window.location.hash = '';
+    setShowDashboard(false);
+  };
+
+  const signOut = () => {
+    clearAuthSession();
+    setSignedIn(false);
+    backToLanding();
+  };
+
+  if (!showDashboard) return <LandingPage onOpenDashboard={openDashboard} lang={lang} setLang={setLang} />;
+  if (!signedIn) return <SignInPage lang={lang} onSignedIn={() => setSignedIn(true)} onBack={backToLanding} />;
+  return <App lang={lang} setLang={setLang} onSignOut={signOut} />;
 }
 
 createRoot(document.getElementById('root')).render(<Root />);
