@@ -2231,6 +2231,31 @@ def send_catalog_button(access_token: str, recipient_id: str, business: dict, te
     return send_instagram_payload(access_token, business, payload)
 
 
+def send_instagram_private_reply(access_token: str, comment_id: str, text: str, business: dict = None):
+    comment_id = normalize_id(comment_id)
+    if not access_token or not comment_id or not text:
+        return None
+
+    business = business or {}
+    payload = {
+        "recipient": {"comment_id": comment_id},
+        "message": {"text": text[:1000]},
+    }
+
+    if business.get("oauth_provider") == "facebook_page":
+        payload["messaging_type"] = "RESPONSE"
+
+    return send_instagram_payload(access_token, business, payload)
+
+
+def send_catalog_private_reply(access_token: str, comment_id: str, business: dict):
+    catalog_link = get_catalog_link(business)
+    if not catalog_link:
+        return None
+    text = f"Katalog: {catalog_link}"
+    return send_instagram_private_reply(access_token, comment_id, text, business)
+
+
 def reply_to_comment(access_token: str, comment_id: str, text: str, business: dict = None):
     comment_id = normalize_id(comment_id)
     if not access_token or not comment_id or not text:
@@ -2590,11 +2615,31 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
         mark_processed(processed_comment_ids, comment_id)
         return
 
-    reply_text = get_ai_reply(comment_text, business, "instagram", commenter_id or comment_id, "instagram_comment")
-    reply_text = remove_urls(reply_text)
-
     if wants_catalog(comment_text):
-        reply_text = "Katalogni DM orqali yuboramiz 😊 Iltimos, bizga xabar yozing."
+        catalog_link = get_catalog_link(business)
+        dm_result = send_catalog_private_reply(access_token, comment_id, business)
+        dm_raw_result = safe_json(dm_result) if dm_result is not None else {}
+        if dm_result is not None and dm_result.ok:
+            save_inbox_message(
+                business=business,
+                platform="instagram",
+                sender_id=entry_id,
+                recipient_id=commenter_id or comment_id,
+                message_text=f"Katalog: {catalog_link}",
+                direction="outbound",
+                platform_message_id=normalize_id(dm_raw_result.get("message_id") or dm_raw_result.get("id")) if isinstance(dm_raw_result, dict) else "",
+                raw_payload=dm_raw_result if isinstance(dm_raw_result, dict) else {},
+                customer_name=commenter_username or f"IG User {str(commenter_id or comment_id)[-4:]}",
+                is_read=True,
+                channel="dm",
+            )
+            reply_text = "Katalog DM orqali yuborildi"
+        else:
+            log("Instagram catalog private reply failed", {"comment_id": comment_id, "result": dm_raw_result})
+            reply_text = "Katalogni DM orqali yuborish uchun bizga xabar yozing."
+    else:
+        reply_text = get_ai_reply(comment_text, business, "instagram", commenter_id or comment_id, "instagram_comment")
+        reply_text = remove_urls(reply_text)
 
     send_result = reply_to_comment(access_token, comment_id, reply_text, business)
     raw_result = safe_json(send_result) if send_result is not None else {}
