@@ -370,15 +370,30 @@ def fetch_instagram_media_info(access_token: str, post_id: str, business: dict =
 
 
 def encode_comment_scope(customer_id: str, post_id: str) -> str:
+    """
+    Canonical Instagram comment-thread scope.
+    New format is post-based to keep one thread per post:
+      post__<post_id>
+    If post_id is unavailable, fall back to customer scope for safety.
+    """
     customer_id = normalize_id(customer_id)
     post_id = normalize_id(post_id)
-    if not post_id:
-        return customer_id
-    return f"{customer_id}__post__{post_id}"
+    if post_id:
+        return f"post__{post_id}"
+    return customer_id
 
 
 def decode_comment_scope(scope: str) -> tuple[str, str]:
+    """
+    Return (customer_id, post_id).
+    Supports:
+    - New format: post__<post_id>
+    - Legacy format: <customer_id>__post__<post_id>
+    - Fallback: <customer_id>
+    """
     scope = normalize_id(scope)
+    if scope.startswith("post__"):
+        return "", normalize_id(scope[6:])
     if "__post__" not in scope:
         return scope, ""
     customer_id, post_id = scope.split("__post__", 1)
@@ -512,7 +527,7 @@ def can_access_business(access: dict, business_id: str) -> bool:
     return normalize_id(business_id) in set(access.get("business_ids") or [])
 
 
-def get_latest_instagram_comment_anchor(business_id: str, commenter_id: str, post_id: str = "") -> dict:
+def get_latest_instagram_comment_anchor(business_id: str, commenter_id: str = "", post_id: str = "") -> dict:
     """
     Find the most recent inbound customer comment for (business, commenter[, post]).
     We reply to that comment_id so manual replies stay in the same comment thread.
@@ -520,24 +535,21 @@ def get_latest_instagram_comment_anchor(business_id: str, commenter_id: str, pos
     business_id = normalize_id(business_id)
     commenter_id = normalize_id(commenter_id)
     post_id = normalize_id(post_id)
-    if not business_id or not commenter_id:
+    if not business_id:
         return {}
 
     try:
-        rows = (
+        query = (
             supabase.table("inbox_messages")
             .select("*")
             .eq("platform", "instagram")
             .eq("business_id", business_id)
             .eq("channel", "instagram_comment")
-            .eq("customer_id", commenter_id)
             .eq("direction", "inbound")
-            .order("created_at", desc=True)
-            .limit(60)
-            .execute()
-            .data
-            or []
         )
+        if commenter_id:
+            query = query.eq("customer_id", commenter_id)
+        rows = query.order("created_at", desc=True).limit(120).execute().data or []
     except Exception:
         return {}
 
@@ -550,7 +562,7 @@ def get_latest_instagram_comment_anchor(business_id: str, commenter_id: str, pos
     for row in rows:
         if extract_instagram_comment_post_id(row) == post_id:
             return row
-    return rows[0]
+    return {}
 
 
 def instagram_reply_window_closed(result: dict) -> bool:
@@ -865,10 +877,19 @@ def transform_conversation_to_react(key: str, rows: list, business: dict = None)
         platform == "instagram" and "comment" in normalize_id(channel).lower()
     ) else (customer_id, "")
     latest_chat_id = normalize_id(latest_row.get("chat_id"))
-    effective_scope = latest_chat_id if platform == "telegram" and channel in ("telegram_bot_group", "telegram_chat") else comment_customer_id
+    if platform == "telegram" and channel in ("telegram_bot_group", "telegram_chat"):
+        effective_scope = latest_chat_id
+    elif platform == "instagram" and "comment" in normalize_id(channel).lower():
+        effective_scope = comment_post_id or comment_customer_id
+    else:
+        effective_scope = comment_customer_id
 
-    customer_name = latest_row.get('customer_name') or f'Customer {effective_scope[-4:]}'
-    ai_enabled = is_chat_ai_enabled(platform, channel, effective_scope, business_id)
+    customer_name = latest_row.get('customer_name') or (
+        f"Post {effective_scope[-6:]}" if platform == "instagram" and "comment" in normalize_id(channel).lower()
+        else f'Customer {effective_scope[-4:]}'
+    )
+    ai_scope = encode_comment_scope("", comment_post_id) if (platform == "instagram" and "comment" in normalize_id(channel).lower() and comment_post_id) else effective_scope
+    ai_enabled = is_chat_ai_enabled(platform, channel, ai_scope, business_id)
 
     return {
         'id': key,
@@ -2305,7 +2326,12 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
         mark_processed(processed_comment_ids, comment_id)
         return
 
-    if not is_chat_ai_enabled("instagram", "instagram_comment", commenter_id or comment_id, business.get("id")):
+    comment_scope = encode_comment_scope("", post_id) if post_id else (commenter_id or comment_id)
+    ai_enabled = is_chat_ai_enabled("instagram", "instagram_comment", comment_scope, business.get("id"))
+    # Backward compatibility with old per-customer comment settings.
+    if ai_enabled and comment_scope != (commenter_id or comment_id):
+        ai_enabled = is_chat_ai_enabled("instagram", "instagram_comment", commenter_id or comment_id, business.get("id"))
+    if not ai_enabled:
         mark_processed(processed_comment_ids, comment_id)
         return
 
@@ -3150,18 +3176,6 @@ async def get_conversations_v2(
         result = query.execute()
         rows = result.data or []
 
-        latest_comment_post_by_customer = {}
-        for row in rows:
-            business_id = row.get("business_id")
-            platform_name = normalize_id(row.get("platform", "instagram")).lower() or "instagram"
-            channel = standard_channel(platform_name, row.get("channel", ""))
-            customer_id = str(row.get("customer_id") or "").strip()
-            if not business_id or platform_name != "instagram" or "comment" not in channel or not customer_id:
-                continue
-            post_id = extract_instagram_comment_post_id(row)
-            if post_id and customer_id not in latest_comment_post_by_customer:
-                latest_comment_post_by_customer[customer_id] = post_id
-
         conversations_map = {}
         for row in rows:
             business_id = row.get("business_id")
@@ -3171,7 +3185,7 @@ async def get_conversations_v2(
             chat_id = str(row.get("chat_id") or "").strip()
             scope = conversation_scope(platform_name, channel, customer_id, chat_id)
             if platform_name == "instagram" and "comment" in channel:
-                post_id = extract_instagram_comment_post_id(row) or latest_comment_post_by_customer.get(customer_id, "")
+                post_id = extract_instagram_comment_post_id(row)
                 scope = encode_comment_scope(customer_id, post_id)
 
             if not business_id or not scope:
@@ -3258,12 +3272,17 @@ async def get_conversation_messages_v2(
 
         if platform == "telegram" and channel in ("telegram_bot_group", "telegram_bot_private"):
             query = query.or_(f"chat_id.eq.{customer_id},customer_id.eq.{customer_id}")
+        elif platform == "instagram" and "comment" in channel:
+            if channel:
+                query = query.eq("channel", channel)
+            if post_id:
+                query = query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
+            elif customer_id:
+                query = query.eq("customer_id", str(customer_id))
         else:
             query = query.eq("customer_id", str(customer_id))
             if channel:
                 query = query.eq("channel", channel)
-            if platform == "instagram" and "comment" in channel and post_id:
-                query = query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
 
         result = query.order("created_at", desc=False).limit(limit).execute()
         rows = result.data or []
@@ -3280,12 +3299,17 @@ async def get_conversation_messages_v2(
             )
             if platform == "telegram" and channel in ("telegram_bot_group", "telegram_bot_private"):
                 mark_query = mark_query.or_(f"chat_id.eq.{customer_id},customer_id.eq.{customer_id}")
+            elif platform == "instagram" and "comment" in channel:
+                if channel:
+                    mark_query = mark_query.eq("channel", channel)
+                if post_id:
+                    mark_query = mark_query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
+                elif customer_id:
+                    mark_query = mark_query.eq("customer_id", str(customer_id))
             else:
                 mark_query = mark_query.eq("customer_id", str(customer_id))
                 if channel:
                     mark_query = mark_query.eq("channel", channel)
-                if platform == "instagram" and "comment" in channel and post_id:
-                    mark_query = mark_query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
             mark_query.execute()
         except Exception:
             pass
@@ -3367,6 +3391,8 @@ async def send_message_v2(
                     commenter_id=target_id,
                     post_id=post_id,
                 )
+                if not target_id:
+                    target_id = normalize_id(anchor.get("customer_id"))
                 comment_id = normalize_id(
                     anchor.get("external_message_id")
                     or (anchor.get("raw_payload") or {}).get("id")
@@ -3457,11 +3483,15 @@ async def toggle_ai_v2(
                 status_code=400
             )
 
-        platform, business_id, channel, customer_id = parts
+        platform, business_id, channel, customer_scope = parts
         if not can_access_business(access, business_id):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
         platform = normalize_id(platform).lower()
         channel = standard_channel(platform, channel)
+        customer_id = customer_scope
+        if platform == "instagram" and "comment" in channel:
+            legacy_customer_id, post_id = decode_comment_scope(customer_scope)
+            customer_id = encode_comment_scope("", post_id) if post_id else legacy_customer_id
 
         payload = await request.json()
         enabled = payload.get("enabled", True)
@@ -3507,11 +3537,15 @@ async def delete_conversation_v2(
                 status_code=400
             )
 
-        platform, business_id, channel, customer_id = parts
+        platform, business_id, channel, customer_scope = parts
         if not can_access_business(access, business_id):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
         platform = normalize_id(platform).lower()
         channel = standard_channel(platform, channel)
+        customer_id = customer_scope
+        post_id = ""
+        if platform == "instagram" and "comment" in channel:
+            customer_id, post_id = decode_comment_scope(customer_scope)
 
         query = (
             supabase.table("inbox_messages")
@@ -3522,6 +3556,13 @@ async def delete_conversation_v2(
 
         if platform == "telegram" and channel in ("telegram_bot_group", "telegram_bot_private"):
             query = query.or_(f"chat_id.eq.{customer_id},customer_id.eq.{customer_id}")
+        elif platform == "instagram" and "comment" in channel:
+            if channel:
+                query = query.eq("channel", channel)
+            if post_id:
+                query = query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
+            elif customer_id:
+                query = query.eq("customer_id", str(customer_id))
         else:
             query = query.eq("customer_id", str(customer_id))
             if channel:
@@ -3564,11 +3605,15 @@ async def get_conversation_details_v2(
                 status_code=400
             )
 
-        platform, business_id, channel, customer_id = parts
+        platform, business_id, channel, customer_scope = parts
         if not can_access_business(access, business_id):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
         platform = normalize_id(platform).lower()
         channel = standard_channel(platform, channel)
+        customer_id = customer_scope
+        post_id = ""
+        if platform == "instagram" and "comment" in channel:
+            customer_id, post_id = decode_comment_scope(customer_scope)
 
         business = get_business_by_id(business_id)
 
@@ -3577,11 +3622,19 @@ async def get_conversation_details_v2(
             .select("*")
             .eq("platform", platform)
             .eq("business_id", business_id)
-            .eq("customer_id", str(customer_id))
         )
 
-        if channel:
-            query = query.eq("channel", channel)
+        if platform == "instagram" and "comment" in channel:
+            if channel:
+                query = query.eq("channel", channel)
+            if post_id:
+                query = query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
+            elif customer_id:
+                query = query.eq("customer_id", str(customer_id))
+        else:
+            query = query.eq("customer_id", str(customer_id))
+            if channel:
+                query = query.eq("channel", channel)
 
         result = query.order("created_at", desc=False).execute()
         rows = result.data or []
