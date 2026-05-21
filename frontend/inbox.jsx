@@ -460,6 +460,21 @@ function isInstagramPostLink(url) {
   );
 }
 
+function isPlayableVideoUrl(url) {
+  const value = String(url || '').toLowerCase();
+  return /^https?:\/\//.test(value) && !isInstagramPostLink(value) && (
+    /\.(mp4|mov|m4v|webm)(\?|$)/i.test(value) ||
+    value.includes('cdninstagram.com') ||
+    value.includes('fbcdn.net') ||
+    value.includes('lookaside.fbsbx.com')
+  );
+}
+
+function isRenderableImageUrl(url) {
+  const value = String(url || '').toLowerCase();
+  return /^https?:\/\//.test(value) && !isInstagramPostLink(value) && /\.(png|jpe?g|webp|gif)(\?|$)/i.test(value);
+}
+
 function resolveForwardedPostLink(row = {}) {
   const payload = row.raw_payload || {};
   const msg = payload.message || {};
@@ -2147,11 +2162,11 @@ function Message({ m, conv, t, onReplyComment }) {
       )}
       {m.type === 'media' && (
         <div className="bubble media">
-          {m.mediaKind === 'video' && m.mediaUrl ? (
+          {m.mediaKind === 'video' && isPlayableVideoUrl(m.mediaUrl) ? (
             <video className="media-video" src={m.mediaUrl} controls />
-          ) : m.mediaUrl && (m.mediaKind === 'photo' || m.mediaUrl.match(/\.(png|jpe?g|webp|gif)(\?|$)/i)) ? (
+          ) : m.mediaUrl && (m.mediaKind === 'photo' || isRenderableImageUrl(m.mediaUrl)) && !isInstagramPostLink(m.mediaUrl) ? (
             <img className="media-img" src={m.mediaUrl} alt={m.label || 'attachment'} />
-          ) : m.mediaKind === 'file' && m.mediaUrl ? (
+          ) : m.mediaKind === 'file' && m.mediaUrl && !isInstagramPostLink(m.mediaUrl) ? (
             <a className="file-chip" href={m.mediaUrl} target="_blank" rel="noreferrer">
               <I.Paperclip />
               <span>{m.label || 'open file'}</span>
