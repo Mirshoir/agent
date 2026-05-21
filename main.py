@@ -1293,9 +1293,19 @@ def save_inbox_message(
         file_name: Optional[str] = None,
         mime_type: Optional[str] = None,
         whatsapp_media_id: Optional[str] = None,
+        post_permalink: Optional[str] = None,
+        post_image_url: Optional[str] = None,
+        post_media_type: Optional[str] = None,
 ):
     try:
         customer_id = sender_id if direction == "inbound" else recipient_id
+        payload = dict(raw_payload or {})
+        if post_permalink:
+            payload["post_permalink"] = post_permalink
+        if post_image_url:
+            payload["post_image_url"] = post_image_url
+        if post_media_type:
+            payload["post_media_type"] = post_media_type
 
         data = {
             "business_id": business.get("id") if business else None,
@@ -1308,22 +1318,31 @@ def save_inbox_message(
             "role": "user" if direction == "inbound" else "assistant",
             "content": message_text or "",
             "external_message_id": platform_message_id,
-            "raw_payload": raw_payload or {},
+            "raw_payload": payload,
             "is_read": is_read if direction == "inbound" else True,
             "media_type": media_type,
             "media_url": media_url,
             "file_name": file_name,
             "mime_type": mime_type,
             "whatsapp_media_id": whatsapp_media_id,
+            "post_permalink": post_permalink,
+            "post_image_url": post_image_url,
+            "post_media_type": post_media_type,
         }
 
         try:
             supabase.table("inbox_messages").insert(data).execute()
         except Exception:
-            for optional_key in ["customer_name", "is_read", "media_type", "media_url", "file_name", "mime_type",
-                                 "whatsapp_media_id"]:
-                data.pop(optional_key, None)
-            supabase.table("inbox_messages").insert(data).execute()
+            compatible_data = dict(data)
+            for optional_key in ["post_permalink", "post_image_url", "post_media_type"]:
+                compatible_data.pop(optional_key, None)
+            try:
+                supabase.table("inbox_messages").insert(compatible_data).execute()
+            except Exception:
+                for optional_key in ["customer_name", "is_read", "media_type", "media_url", "file_name", "mime_type",
+                                     "whatsapp_media_id"]:
+                    compatible_data.pop(optional_key, None)
+                supabase.table("inbox_messages").insert(compatible_data).execute()
 
     except Exception as e:
         log("Could not save inbox message", str(e))
@@ -2288,6 +2307,11 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 if isinstance(direct, str) and direct.startswith(("http://", "https://")) and direct not in url_candidates:
                     url_candidates.append(direct)
 
+            for key in ("reel_video_id", "media_id", "ig_media_id", "id"):
+                candidate_asset_id = normalize_id(payload.get(key))
+                if candidate_asset_id:
+                    share_asset_id = share_asset_id or candidate_asset_id
+
             collect_urls(payload)
             collect_urls(att)
 
@@ -2332,10 +2356,11 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             if inferred_type:
                 attachment_had_media = True
                 media_type = inferred_type
-                media_url = att_url or media_url
+                if att_url and not is_instagram_public_link(unwrapped_att_url):
+                    media_url = att_url
                 if not message_text:
                     if att_type in ("share", "ig_post", "ig_story", "story_mention", "ig_reel", "embed"):
-                        message_text = "🔁 Forwarded post"
+                        message_text = "🔁 Forwarded reel" if att_type in ("ig_reel", "reel") else "🔁 Forwarded post"
                     elif media_type == "photo":
                         message_text = "📸 Photo"
                     elif media_type == "video":
@@ -2344,7 +2369,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                         message_text = "🎤 Audio"
                     else:
                         message_text = "📎 File"
-                if media_url:
+                if media_url or post_permalink:
                     break
 
         if attachment_had_media and not message_text:
@@ -2372,7 +2397,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         if share_url:
             lower_share = share_url.lower()
             media_type = "video" if ("/reel/" in lower_share or re.search(r"\.(mp4|mov|m4v|webm)(\?|$)", lower_share)) else "file"
-            media_url = share_url
+            media_url = "" if is_instagram_public_link(unwrap_meta_redirect_url(share_url)) else share_url
             message_text = "🔁 Forwarded post"
 
     if attachments and not message_text and not media_type:
