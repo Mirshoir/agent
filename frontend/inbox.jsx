@@ -434,6 +434,71 @@ function withMediaToken(url) {
   }
 }
 
+function unwrapMetaRedirectUrl(url) {
+  const value = String(url || '').trim();
+  if (!value) return '';
+  try {
+    const parsed = new URL(value, window.location.origin);
+    const host = String(parsed.hostname || '').toLowerCase();
+    if (host.endsWith('instagram.com') || host.endsWith('facebook.com')) {
+      const target = parsed.searchParams.get('u');
+      if (target && /^https?:\/\//i.test(target)) return decodeURIComponent(target);
+    }
+  } catch (e) {
+    return value;
+  }
+  return value;
+}
+
+function isInstagramPostLink(url) {
+  const value = String(url || '').toLowerCase();
+  return /^https?:\/\//.test(value) && value.includes('instagram.com/') && (
+    value.includes('/p/') ||
+    value.includes('/reel/') ||
+    value.includes('/tv/') ||
+    value.includes('/share/')
+  );
+}
+
+function resolveForwardedPostLink(row = {}) {
+  const payload = row.raw_payload || {};
+  const msg = payload.message || {};
+  const shares = Array.isArray(msg.shares) ? msg.shares : [];
+  const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+
+  const candidates = [
+    row.post_permalink,
+    row.postPermalink,
+    payload.post_permalink,
+    payload.postPermalink,
+    msg.permalink,
+    msg.link,
+    row.media_url,
+    row.mediaUrl,
+  ];
+
+  shares.forEach((share) => {
+    if (!share || typeof share !== 'object') return;
+    candidates.push(share.link, share.url, share.permalink);
+  });
+
+  attachments.forEach((att) => {
+    if (!att || typeof att !== 'object') return;
+    const p = att.payload || {};
+    candidates.push(p.url, p.link, p.permalink, p.external_url);
+  });
+
+  let fallback = '';
+  for (const raw of candidates) {
+    const url = String(raw || '').trim();
+    if (!/^https?:\/\//i.test(url)) continue;
+    const unwrapped = unwrapMetaRedirectUrl(url);
+    if (!fallback) fallback = unwrapped || url;
+    if (isInstagramPostLink(unwrapped) || isInstagramPostLink(url)) return unwrapped || url;
+  }
+  return fallback;
+}
+
 function businessOwnerEmail(business = {}) {
   return normalizeOwnerEmail(
     business.owner_email ||
@@ -911,6 +976,7 @@ function normalizeMessage(row, index) {
     text,
     mediaKind: media || '',
     mediaUrl: withMediaToken(row.media_url || row.mediaUrl || telegramUserMediaUrl(row)),
+    forwardLink: resolveForwardedPostLink(row),
     mediaFileId: row.media_file_id || getWhatsAppMediaId(row),
     commentId: String(row.external_message_id || row.comment_id || row.raw_payload?.id || '').trim(),
     raw: row,
@@ -2104,6 +2170,11 @@ function Message({ m, conv, t, onReplyComment }) {
             <span className="ph" data-label={m.label || 'photo'} />
           )}
           {m.mediaCaption && <div className="cap">{m.mediaCaption}</div>}
+          {m.forwardLink && conv?.platform === 'instagram' && (
+            <a className="open-post-link" href={m.forwardLink} target="_blank" rel="noreferrer">
+              Open on Instagram
+            </a>
+          )}
           {!m.mediaUrl && m.mediaFileId && <div className="media-note">Media ID saved. Preview needs backend media download URL.</div>}
         </div>
       )}
