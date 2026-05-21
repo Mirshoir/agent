@@ -132,6 +132,7 @@ WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
 WHATSAPP_BUSINESS_ACCOUNT_ID = os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID", "")
 WHATSAPP_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
 WHATSAPP_CATALOG_LINK = os.getenv("CATALOG_LINK", "Catalog link will be shared soon.")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
 if not SUPABASE_URL:
     raise RuntimeError("Missing SUPABASE_URL")
@@ -332,12 +333,17 @@ def conversation_scope(platform: str, channel: str, customer_id: str, chat_id: s
 
 
 def extract_instagram_comment_post_id(row: dict) -> str:
+    row = row or {}
     raw = row.get("raw_payload") or {}
     media = raw.get("media") if isinstance(raw, dict) else {}
+    direct_media = row.get("media") if isinstance(row, dict) else {}
     return normalize_id(
         row.get("post_id")
         or row.get("media_id")
+        or (raw.get("post_id") if isinstance(raw, dict) else "")
+        or (raw.get("media_id") if isinstance(raw, dict) else "")
         or (media or {}).get("id")
+        or (direct_media or {}).get("id")
     )
 
 
@@ -837,8 +843,7 @@ def transform_message_to_react(row: dict) -> dict:
         message['text'] = content
 
     raw_payload = row.get("raw_payload") or {}
-    media = raw_payload.get("media") if isinstance(raw_payload, dict) else {}
-    message["post_id"] = normalize_id(row.get("post_id") or row.get("media_id") or (media or {}).get("id"))
+    message["post_id"] = extract_instagram_comment_post_id(row)
     message["post_permalink"] = row.get("post_permalink") or raw_payload.get("post_permalink") or ""
     message["post_image_url"] = row.get("post_image_url") or raw_payload.get("post_image_url") or ""
 
@@ -1211,11 +1216,13 @@ def save_inbox_message(
         log("Could not save inbox message", str(e))
 
 
-def get_message_count(platform=None):
+def get_message_count(platform=None, business_ids=None):
     try:
         q = supabase.table("inbox_messages").select("id", count="exact")
         if platform:
             q = q.eq("platform", platform)
+        if business_ids:
+            q = q.in_("business_id", business_ids)
         result = q.execute()
         return result.count or 0
     except Exception:
@@ -2248,7 +2255,7 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     from_user = value.get("from") or {}
     commenter_id = normalize_id(from_user.get("id"))
     commenter_username = normalize_id(from_user.get("username"))
-    post_id = normalize_id((value.get("media") or {}).get("id"))
+    post_id = extract_instagram_comment_post_id(value)
     comment_text = value.get("message") or value.get("text") or ""
 
     if not comment_id or not comment_text:
@@ -2266,17 +2273,8 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
         mark_processed(processed_comment_ids, comment_id)
         return
 
-    if not business.get("bot_enabled", True):
-        return
-
-    if business.get("auto_reply_comments") is False:
-        return
-
     access_token = get_business_access_token(business)
-    if not access_token:
-        return
-
-    media_info = fetch_instagram_media_info(access_token, post_id, business)
+    media_info = fetch_instagram_media_info(access_token, post_id, business) if access_token and post_id else {}
 
     inbound_payload = dict(value)
     inbound_payload["post_id"] = post_id
@@ -2299,7 +2297,23 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
         channel="instagram_comment",
     )
 
-    reply_text = get_ai_reply(comment_text, business, "instagram", "", "comment")
+    if not business.get("bot_enabled", True):
+        mark_processed(processed_comment_ids, comment_id)
+        return
+
+    if business.get("auto_reply_comments") is False:
+        mark_processed(processed_comment_ids, comment_id)
+        return
+
+    if not is_chat_ai_enabled("instagram", "instagram_comment", commenter_id or comment_id, business.get("id")):
+        mark_processed(processed_comment_ids, comment_id)
+        return
+
+    if not access_token:
+        mark_processed(processed_comment_ids, comment_id)
+        return
+
+    reply_text = get_ai_reply(comment_text, business, "instagram", commenter_id or comment_id, "instagram_comment")
     reply_text = remove_urls(reply_text)
 
     if wants_catalog(comment_text):
@@ -3249,7 +3263,7 @@ async def get_conversation_messages_v2(
             if channel:
                 query = query.eq("channel", channel)
             if platform == "instagram" and "comment" in channel and post_id:
-                query = query.eq("raw_payload->media->>id", post_id)
+                query = query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
 
         result = query.order("created_at", desc=False).limit(limit).execute()
         rows = result.data or []
@@ -3271,7 +3285,7 @@ async def get_conversation_messages_v2(
                 if channel:
                     mark_query = mark_query.eq("channel", channel)
                 if platform == "instagram" and "comment" in channel and post_id:
-                    mark_query = mark_query.eq("raw_payload->media->>id", post_id)
+                    mark_query = mark_query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
             mark_query.execute()
         except Exception:
             pass
@@ -3381,7 +3395,7 @@ async def send_message_v2(
                     result = {"error": "Send failed"}
 
         elif platform == "whatsapp":
-            res = send_whatsapp_text(customer_id, text, business)
+            res = send_whatsapp_text(target_id, text, business)
             if res:
                 ok = res.ok
                 try:
