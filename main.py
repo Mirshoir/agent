@@ -363,10 +363,11 @@ def fetch_instagram_media_info(access_token: str, post_id: str, business: dict =
             return {
                 "post_permalink": body.get("permalink") or f"https://www.instagram.com/p/{post_id}/",
                 "post_image_url": body.get("media_url") or body.get("thumbnail_url") or "",
+                "post_media_type": normalize_id(body.get("media_type")).lower(),
             }
         except Exception:
             continue
-    return {"post_permalink": f"https://www.instagram.com/p/{post_id}/", "post_image_url": ""}
+    return {"post_permalink": f"https://www.instagram.com/p/{post_id}/", "post_image_url": "", "post_media_type": ""}
 
 
 def encode_comment_scope(customer_id: str, post_id: str) -> str:
@@ -552,6 +553,43 @@ def get_latest_instagram_comment_anchor(business_id: str, commenter_id: str = ""
         rows = query.order("created_at", desc=True).limit(120).execute().data or []
     except Exception:
         return {}
+
+    if not rows:
+        return {}
+
+    if not post_id:
+        return rows[0]
+
+    for row in rows:
+        if extract_instagram_comment_post_id(row) == post_id:
+            return row
+    return {}
+
+
+def get_instagram_comment_anchor_by_comment_id(business_id: str, comment_id: str, post_id: str = "") -> dict:
+    business_id = normalize_id(business_id)
+    comment_id = normalize_id(comment_id)
+    post_id = normalize_id(post_id)
+    if not business_id or not comment_id:
+        return {}
+
+    try:
+        rows = (
+            supabase.table("inbox_messages")
+            .select("*")
+            .eq("platform", "instagram")
+            .eq("business_id", business_id)
+            .eq("channel", "instagram_comment")
+            .eq("direction", "inbound")
+            .eq("external_message_id", comment_id)
+            .order("created_at", desc=True)
+            .limit(5)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        rows = []
 
     if not rows:
         return {}
@@ -858,6 +896,7 @@ def transform_message_to_react(row: dict) -> dict:
     message["post_id"] = extract_instagram_comment_post_id(row)
     message["post_permalink"] = row.get("post_permalink") or raw_payload.get("post_permalink") or ""
     message["post_image_url"] = row.get("post_image_url") or raw_payload.get("post_image_url") or ""
+    message["post_media_type"] = normalize_id(row.get("post_media_type") or raw_payload.get("post_media_type")).lower()
 
     return message
 
@@ -900,6 +939,7 @@ def transform_conversation_to_react(key: str, rows: list, business: dict = None)
         'postId': comment_post_id or extract_instagram_comment_post_id(latest_row),
         'postPermalink': (latest_row.get("raw_payload") or {}).get("post_permalink", ""),
         'postImageUrl': (latest_row.get("raw_payload") or {}).get("post_image_url", ""),
+        'postMediaType': normalize_id((latest_row.get("raw_payload") or {}).get("post_media_type", "")).lower(),
         'avatar': generate_avatar(customer_name),
         'lang': business.get('language', 'uz') if business else 'uz',
         'online': False,
@@ -2303,6 +2343,8 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
         inbound_payload["post_permalink"] = media_info.get("post_permalink") or (f"https://www.instagram.com/p/{post_id}/" if post_id else "")
     if not inbound_payload.get("post_image_url"):
         inbound_payload["post_image_url"] = media_info.get("post_image_url") or ""
+    if not inbound_payload.get("post_media_type"):
+        inbound_payload["post_media_type"] = normalize_id(media_info.get("post_media_type")).lower()
 
     save_inbox_message(
         business=business,
@@ -2354,6 +2396,8 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
             outbound_payload["post_permalink"] = inbound_payload.get("post_permalink", "")
         if not outbound_payload.get("post_image_url"):
             outbound_payload["post_image_url"] = inbound_payload.get("post_image_url", "")
+        if not outbound_payload.get("post_media_type"):
+            outbound_payload["post_media_type"] = normalize_id(inbound_payload.get("post_media_type")).lower()
         save_inbox_message(
             business=business,
             platform="instagram",
@@ -3343,6 +3387,7 @@ async def send_message_v2(
         payload = await request.json()
         conversation_id = payload.get("conversation_id")
         text = payload.get("text", "").strip()
+        reply_to_comment_id = normalize_id(payload.get("reply_to_comment_id") or payload.get("comment_id"))
 
         if not conversation_id or not text:
             return JSONResponse(
@@ -3386,14 +3431,26 @@ async def send_message_v2(
                 )
 
             if "comment" in channel:
-                anchor = get_latest_instagram_comment_anchor(
-                    business_id=business_id,
-                    commenter_id=target_id,
-                    post_id=post_id,
-                )
+                if reply_to_comment_id:
+                    anchor = get_instagram_comment_anchor_by_comment_id(
+                        business_id=business_id,
+                        comment_id=reply_to_comment_id,
+                        post_id=post_id,
+                    )
+                    if not anchor:
+                        return JSONResponse(
+                            {"error": "Selected comment not found in this thread"},
+                            status_code=400,
+                        )
+                else:
+                    anchor = get_latest_instagram_comment_anchor(
+                        business_id=business_id,
+                        commenter_id=target_id,
+                        post_id=post_id,
+                    )
                 if not target_id:
                     target_id = normalize_id(anchor.get("customer_id"))
-                comment_id = normalize_id(
+                comment_id = reply_to_comment_id or normalize_id(
                     anchor.get("external_message_id")
                     or (anchor.get("raw_payload") or {}).get("id")
                 )
@@ -3449,7 +3506,7 @@ async def send_message_v2(
             message_text=text,
             direction="outbound",
             platform_message_id=normalize_id(result.get("message_id") or result.get("id") or result.get("messages", [{}])[0].get("id", "")),
-            raw_payload={**(result or {}), **({"post_id": post_id} if post_id else {})},
+            raw_payload={**(result or {}), **({"post_id": post_id} if post_id else {}), **({"reply_to_comment_id": reply_to_comment_id} if reply_to_comment_id else {})},
             channel=channel,
         )
 
