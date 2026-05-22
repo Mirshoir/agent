@@ -42,8 +42,9 @@
   --radius-3: 18px;
   --radius-4: 26px;
 
-  --font-serif: "Instrument Serif", "Newsreader", Georgia, serif;
-  --font-sans: "Instrument Sans", "Söhne", "Geist", -apple-system, sans-serif;
+  /* Stability-first typography to reduce layout shifts during font swap/load */
+  --font-serif: "Inter", "Segoe UI", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
+  --font-sans: "Inter", "Segoe UI", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Helvetica Neue", Arial, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
 }
 
@@ -91,10 +92,11 @@ body {
   font-size: 14px;
   line-height: 1.4;
   -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
+  text-rendering: geometricPrecision;
   letter-spacing: -0.005em;
   min-height: 100vh;
   overflow: hidden;
+  font-size-adjust: 0.52;
 }
 
 button, input, textarea, select { font: inherit; color: inherit; }
@@ -453,21 +455,26 @@ input, textarea { background: none; border: 0; outline: 0; }
 .row-line1 {
   display: flex; align-items: baseline; gap: 8px;
   margin-bottom: 2px;
+  min-height: 20px;
 }
 .row-name {
   font-weight: 600;
   font-size: 14px;
+  line-height: 20px;
   color: var(--ink);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   min-width: 0; flex: 1;
 }
 .row-handle {
   font-size: 12px;
+  line-height: 20px;
   color: var(--muted);
   white-space: nowrap;
 }
 .row-preview {
   font-size: 13px;
+  line-height: 20px;
+  min-height: 20px;
   color: var(--ink-2);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   display: flex; align-items: center; gap: 6px;
@@ -523,14 +530,17 @@ input, textarea { background: none; border: 0; outline: 0; }
 .thread-head-info { min-width: 0; display: flex; align-items: center; gap: 12px; flex: 1; }
 .thread-head-info .info-text { min-width: 0; flex: 1; }
 .thread-head-info .name {
-  font-family: var(--font-serif);
+  font-family: var(--font-sans);
   font-size: 22px;
   letter-spacing: -0.015em;
-  line-height: 1.1;
+  line-height: 28px;
+  min-height: 28px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .thread-head-info .sub {
   font-size: 12px;
+  line-height: 18px;
+  min-height: 18px;
   color: var(--muted);
   display: flex; align-items: center; gap: 6px;
   margin-top: 1px;
@@ -781,6 +791,8 @@ input, textarea { background: none; border: 0; outline: 0; }
 .msg-meta {
   display: flex; align-items: center; gap: 6px;
   font-size: 10.5px;
+  line-height: 14px;
+  min-height: 14px;
   color: var(--muted);
   margin-top: 4px;
   padding: 0 4px;
