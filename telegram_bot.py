@@ -19,7 +19,7 @@ telegram_router = APIRouter()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "").lower().replace("@", "")
-TELEGRAM_GROUP_REPLY_MODE = os.getenv("TELEGRAM_GROUP_REPLY_MODE", "all").strip().lower()
+TELEGRAM_GROUP_REPLY_MODE = os.getenv("TELEGRAM_GROUP_REPLY_MODE", "mention_or_reply").strip().lower()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "")
 
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID", "")
@@ -49,6 +49,7 @@ PROCESSED_BOT_MESSAGES = {}
 PROCESSED_USER_MESSAGES = {}
 TELEGRAM_USER_CLIENT = None
 TELEGRAM_BOT_ID = None
+TELEGRAM_CHAT_ADMINS_CACHE = {}
 
 OPTIONAL_INBOX_COLUMNS = [
     "customer_name",
@@ -103,6 +104,58 @@ def is_greeting_only(text: str) -> bool:
         "привет", "здравствуйте", "сәлем", "салем",
     }
     return s in greetings or (len(s.split()) <= 2 and s in {"salom", "hello", "hi", "hey", "привет", "сәлем"})
+
+
+def is_low_signal_message(text: str) -> bool:
+    s = normalize_text(text)
+    if not s:
+        return False
+
+    compact = re.sub(r"\s+", "", s)
+    emoji_only_re = re.compile(r"^[\u2600-\u27BF\U0001F300-\U0001FAFF\U0001F1E6-\U0001F1FF\u200d\ufe0f]+$")
+    if compact and emoji_only_re.fullmatch(compact):
+        return True
+
+    if compact.lower() in {"+", "++", "ok", "okk"}:
+        return True
+
+    return False
+
+
+def looks_like_sales_question(text: str) -> bool:
+    s = normalize_text(text).lower()
+    if not s:
+        return False
+    keywords = [
+        "price", "prices", "catalog", "delivery", "shipping", "order", "buy", "purchase",
+        "narx", "narxlari", "qancha", "katalog", "yetkazib", "buyurtma", "mahsulot",
+        "цена", "цены", "каталог", "доставка", "заказ", "купить", "товар",
+        "баға", "каталог", "жеткізу", "тапсырыс", "тауар",
+    ]
+    return any(k in s for k in keywords)
+
+
+def wants_deal_handoff(text: str) -> bool:
+    s = normalize_text(text).lower()
+    if not s:
+        return False
+    keywords = [
+        "deal", "make a deal", "let's deal", "order", "buy", "purchase", "ready to buy",
+        "заказ", "оформить", "оформим", "куплю", "покупка", "сделка",
+        "zakaz", "buyurtma", "buyurtma bermoqchiman", "olaman", "olmoqchiman", "kelishuv",
+        "тапсырыс", "сатып аламын", "келісім",
+    ]
+    return any(k in s for k in keywords)
+
+
+def deal_handoff_text(lang: str) -> str:
+    if lang == "en":
+        return "Great. To finalize the deal, please contact our admin on Telegram: @milana_admin25."
+    if lang == "ru":
+        return "Отлично. Чтобы оформить сделку, пожалуйста, свяжитесь с нашим админом в Telegram: @milana_admin25."
+    if lang == "kk":
+        return "Керемет. Мәмілені рәсімдеу үшін Telegram-дағы әкімшіге жазыңыз: @milana_admin25."
+    return "Zo'r. Kelishuvni yakunlash uchun Telegramdagi adminimizga yozing: @milana_admin25."
 
 
 def detect_customer_language(text: str) -> str:
@@ -189,9 +242,7 @@ def should_reply_in_group(message):
     - all: reply to all user messages in groups/supergroups
     - mention_or_reply: reply only when mentioned/replied to
     """
-    mode = TELEGRAM_GROUP_REPLY_MODE or "all"
-    if mode == "all":
-        return True
+    mode = TELEGRAM_GROUP_REPLY_MODE or "mention_or_reply"
 
     text = normalize_text(message.get("text")).lower()
     mention = f"@{TELEGRAM_BOT_USERNAME}" if TELEGRAM_BOT_USERNAME else ""
@@ -199,8 +250,24 @@ def should_reply_in_group(message):
 
     reply_from = (message.get("reply_to_message") or {}).get("from") or {}
     replied_to_bot = is_own_or_any_bot_user(reply_from)
+    is_reply_chain = bool(message.get("reply_to_message"))
 
-    return has_mention or replied_to_bot
+    # Never join user-to-user reply chains unless they explicitly address the bot.
+    if is_reply_chain and not replied_to_bot and not has_mention:
+        return False
+
+    if mode == "all":
+        return True
+
+    # Mention/reply mode: answer if directly addressed,
+    # OR if message is standalone and clearly a sales question.
+    if has_mention or replied_to_bot:
+        return True
+
+    if not is_reply_chain and looks_like_sales_question(text):
+        return True
+
+    return False
 
 
 def already_processed(cache, event_id, ttl=3600):
@@ -251,6 +318,44 @@ def get_telegram_bot_id():
         log("Could not resolve Telegram bot id", str(exc))
 
     return None
+
+
+def get_group_admin_ids(chat_id, ttl_seconds=300):
+    chat_id = str(chat_id or "")
+    if not chat_id or not TELEGRAM_BOT_TOKEN:
+        return set()
+
+    now = time.time()
+    cached = TELEGRAM_CHAT_ADMINS_CACHE.get(chat_id)
+    if cached and now - float(cached.get("ts", 0)) < ttl_seconds:
+        return set(cached.get("ids", []))
+
+    try:
+        response = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getChatAdministrators",
+            params={"chat_id": chat_id},
+            timeout=20,
+        )
+        data = safe_json(response)
+        ids = set()
+        if response.ok and data.get("ok"):
+            for item in data.get("result", []) or []:
+                user = item.get("user") or {}
+                uid = str(user.get("id") or "")
+                if uid:
+                    ids.add(uid)
+        TELEGRAM_CHAT_ADMINS_CACHE[chat_id] = {"ts": now, "ids": list(ids)}
+        return ids
+    except Exception as exc:
+        log("Could not fetch Telegram group admins", {"chat_id": chat_id, "error": str(exc)})
+        return set()
+
+
+def is_group_admin(chat_id, user_id):
+    uid = str(user_id or "")
+    if not uid:
+        return False
+    return uid in get_group_admin_ids(chat_id)
 
 
 def is_own_or_any_bot_user(user):
@@ -397,7 +502,8 @@ DEFAULT_AI_PROMPT_SETTINGS = {
         "- Sound like a natural Telegram sales manager.\n"
         "- In groups, answer only when mentioned or replied to.\n"
         "- Avoid long lists unless the customer asks for a list.\n"
-        "- Share Telegram catalog/group links only when relevant."
+        "- Share Telegram catalog/group links only when relevant.\n"
+        "- If customer is ready to make a deal/order, direct them to @milana_admin25."
     ),
     "opening_message": "Assalomu alaykum 😊 Qanday yordam kerak?",
     "lead_collection_rules": (
@@ -706,6 +812,9 @@ def call_ai_chat(messages, business, log_label):
 def clean_sales_reply(reply_text, user_text=""):
     user = normalize_text(user_text).lower()
     lang = detect_customer_language(user_text)
+
+    if wants_deal_handoff(user_text):
+        return deal_handoff_text(lang)
 
     if any(phrase in user for phrase in [
         "meni haqimda hamma ma'lumotni unut",
@@ -1297,8 +1406,25 @@ async def telegram_webhook(request: Request):
                 chat_id=chat_id,
             )
 
+            # Never auto-reply to group admins.
+            if is_group_chat and is_group_admin(chat_id, sender_id):
+                return JSONResponse({"status": "ignored_group_admin_message"})
+
+            # If this message is in an admin-handled reply context, skip bot reply.
+            if is_group_chat:
+                reply_to = message.get("reply_to_message") or {}
+                reply_from = reply_to.get("from") or {}
+                reply_from_id = reply_from.get("id")
+                if reply_to.get("sender_chat"):
+                    return JSONResponse({"status": "ignored_admin_thread"})
+                if reply_from_id and is_group_admin(chat_id, reply_from_id):
+                    return JSONResponse({"status": "ignored_admin_thread"})
+
             if not is_chat_ai_enabled("telegram", channel, customer_id, business.get("id")):
                 return JSONResponse({"status": "ai_disabled"})
+
+            if is_low_signal_message(combined_text):
+                return JSONResponse({"status": "ignored_low_signal"})
 
             reply = get_ai_reply(
                 user_text=combined_text,
@@ -1540,6 +1666,9 @@ async def process_telegram_user_event(event):
             )
 
             if not is_chat_ai_enabled("telegram", "telegram_user_private", sender_id, business.get("id")):
+                return
+
+            if is_low_signal_message(combined_text):
                 return
 
             reply = get_ai_reply(
