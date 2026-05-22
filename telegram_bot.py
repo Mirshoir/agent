@@ -72,6 +72,101 @@ def normalize_text(value):
     return str(value or "").strip()
 
 
+def wants_catalog(text: str) -> bool:
+    text = normalize_text(text).lower()
+    keywords = [
+        "catalog", "katalog", "каталог", "price", "prices", "narx", "narxlari",
+        "narhi", "qancha", "qanchadan", "necha pul", "nechpul", "nechi pul",
+        "цена", "цены", "стоимость", "сколько", "сколько стоит", "прайс",
+        "model", "models", "modellari", "модель", "модели",
+        "collection", "kolleksiya", "коллекция", "photo", "photos", "rasm", "rasmlar",
+        "фото", "mahsulot", "mahsulotlar", "товар", "товары",
+    ]
+    return any(k in text for k in keywords)
+
+
+def mentions_catalog(text: str) -> bool:
+    text = normalize_text(text).lower()
+    markers = ["catalog", "katalog", "каталог", "katalo", "катало", "products", "товар", "mahsulot"]
+    return any(m in text for m in markers)
+
+
+def detect_customer_language(text: str) -> str:
+    lower = normalize_text(text).lower()
+    if not lower:
+        return ""
+
+    english_words = {
+        "hi", "hello", "hey", "can", "could", "would", "make", "purchase", "buy", "order",
+        "price", "how", "much", "where", "shipping", "delivery", "catalog", "available",
+        "need", "want", "please", "thanks", "thank", "size", "color", "model",
+    }
+    uzbek_latin_markers = {
+        "salom", "assalomu", "alaykum", "narx", "qancha", "qayer", "kerak", "olmoq",
+        "sotib", "mahsulot", "katalog", "manzil", "rahmat", "bormi", "necha",
+    }
+    kazakh_markers = {
+        "сәлем", "салем", "қалай", "баға", "бағасы", "қанша", "қажет", "жеткізу",
+        "тапсырыс", "каталог", "тауар", "бар", "мен", "сіз", "үшін",
+    }
+    russian_words = {
+        "здравствуйте", "привет", "цена", "сколько", "купить", "заказ", "доставка",
+        "каталог", "размер", "цвет", "модель", "есть", "можно",
+    }
+
+    words = set(re.findall(r"[a-zA-Z']+|[А-Яа-яЁё]+", lower))
+    if any(m in lower for m in kazakh_markers):
+        return "kk"
+    if words & russian_words:
+        return "ru"
+    if words & english_words and not (words & uzbek_latin_markers):
+        return "en"
+    if re.search(r"[А-Яа-яЁё]", lower):
+        return "ru"
+    if words & uzbek_latin_markers:
+        return "uz"
+    return ""
+
+
+def language_instruction_for(text: str) -> str:
+    lang = detect_customer_language(text)
+    if lang == "en":
+        return "The latest customer message is in English. Reply only in English. Do not use Uzbek, Russian, or Kazakh words."
+    if lang == "ru":
+        return "Последнее сообщение клиента на русском. Отвечай только на русском языке."
+    if lang == "kk":
+        return "Клиенттің соңғы хабары қазақ тілінде. Тек қазақ тілінде жауап бер."
+    if lang == "uz":
+        return "Mijozning oxirgi xabari o'zbek tilida. Faqat o'zbek tilida javob ber."
+    return ""
+
+
+def get_catalog_link(business: dict) -> str:
+    link = (business or {}).get("catalog_link") or (business or {}).get("catalog") or (business or {}).get("website") or ""
+    link = normalize_text(link)
+    if link and not link.startswith(("http://", "https://")):
+        link = f"https://{link}"
+    return link
+
+
+def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
+    catalog_link = get_catalog_link(business)
+    if catalog_link and catalog_link in (reply_text or ""):
+        reply_text = (reply_text or "").replace(catalog_link, "")
+    return re.sub(r"\s+", " ", normalize_text(reply_text)).strip()
+
+
+def complete_sentence_reply(text: str, limit: int = 700) -> str:
+    text = normalize_text(text)
+    if not text:
+        return ""
+    if len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0].strip()
+    if not re.search(r"[.!?…]$", text):
+        text += "."
+    return text
+
+
 def should_reply_in_group(message):
     """
     Group reply modes:
@@ -594,6 +689,7 @@ def call_ai_chat(messages, business, log_label):
 
 def clean_sales_reply(reply_text, user_text=""):
     user = normalize_text(user_text).lower()
+    lang = detect_customer_language(user_text)
 
     if any(phrase in user for phrase in [
         "meni haqimda hamma ma'lumotni unut",
@@ -631,6 +727,12 @@ def clean_sales_reply(reply_text, user_text=""):
 
     text = normalize_text(reply_text)
     if not text:
+        if lang == "en":
+            return "Hello! How can I help you?"
+        if lang == "ru":
+            return "Здравствуйте! Чем могу помочь?"
+        if lang == "kk":
+            return "Сәлеметсіз бе! Қалай көмектесе аламын?"
         return "Assalomu alaykum 😊 Qanday yordam kerak?"
 
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -672,12 +774,35 @@ def clean_sales_reply(reply_text, user_text=""):
     price_ask = any(k in user for k in ["narx", "nechpul", "qancha", "цена", "сколько", "price"])
     has_number = bool(re.search(r"\d", text))
     if price_ask and not has_number:
-        text = "Narxni aniq aytishim uchun model yoki variantni yozing 😊"
+        if lang == "en":
+            text = "You can view our catalog through the link. Which products are you interested in?"
+        elif lang == "ru":
+            text = "Вы можете посмотреть наш каталог по ссылке. Какие товары вас интересуют?"
+        elif lang == "kk":
+            text = "Біздің каталогты төмендегі сілтеме арқылы көре аласыз. Қай тауарлар сізді қызықтырады?"
+        else:
+            text = "Katalogimizga quyidagi havoladan kirishingiz mumkin. Qaysi mahsulotlar sizni qiziqtirmoqda?"
 
-    if len(text) > 500:
-        text = text[:500].rsplit(" ", 1)[0].strip()
+    if lang == "en":
+        has_cyr = bool(re.search(r"[А-Яа-яЁё]", text))
+        uz_markers = ("salom", "assalomu", "alaykum", "qaysi", "mahsulot", "katalog")
+        low = text.lower()
+        if has_cyr or any(m in low for m in uz_markers):
+            if price_ask:
+                text = "You can view our catalog through the link. Which products are you interested in?"
+            else:
+                text = "Hello! Of course. Which products are you interested in?"
 
-    return text or "Tushunarli 👍"
+    text = complete_sentence_reply(text, limit=900)
+    if text:
+        return text
+    if lang == "en":
+        return "Understood."
+    if lang == "ru":
+        return "Понял."
+    if lang == "kk":
+        return "Түсіндім."
+    return "Tushunarli 👍"
 
 def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private"):
     history = get_recent_chat_history(
@@ -696,14 +821,33 @@ def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private
             messages.append({"role": role, "content": content})
 
     messages.append({"role": "user", "content": user_text})
+    language_instruction = language_instruction_for(user_text)
+    if language_instruction:
+        messages.insert(1, {"role": "system", "content": language_instruction})
 
     try:
         reply = call_ai_chat(messages, business, "Telegram AI response")
-        return clean_sales_reply(reply[:1500], user_text) if reply else "Assalomu alaykum 😊 Qanday yordam kerak?"
+        if reply:
+            return clean_sales_reply(reply[:1500], user_text)
+        lang = detect_customer_language(user_text)
+        if lang == "en":
+            return "Your message has been received."
+        if lang == "ru":
+            return "Ваше сообщение получено."
+        if lang == "kk":
+            return "Хабарыңыз қабылданды."
+        return "Xabaringiz qabul qilindi 😊"
 
     except Exception as exc:
         log("Telegram AI error", str(exc))
-        return "Xabaringiz qabul qilindi 😊 Qanday yordam kerak?"
+        lang = detect_customer_language(user_text)
+        if lang == "en":
+            return "Your message has been received."
+        if lang == "ru":
+            return "Ваше сообщение получено."
+        if lang == "kk":
+            return "Хабарыңыз қабылданды."
+        return "Xabaringiz qabul qilindi 😊"
 
 
 def save_telegram_message(
@@ -768,6 +912,40 @@ def send_telegram_bot_message(chat_id, text, reply_to_message_id=None):
     )
 
     log("Telegram bot send result", {"status": response.status_code, "body": response.text})
+    return response
+
+
+def send_telegram_catalog_button(chat_id, business, text="", reply_to_message_id=None):
+    if not TELEGRAM_BOT_TOKEN:
+        return None
+
+    catalog_link = get_catalog_link(business)
+    if not catalog_link:
+        return None
+
+    body_text = clean_ai_reply_for_catalog(text, business) or "Katalogimizga quyidagi havoladan kirishingiz mumkin. Qaysi mahsulotlar sizni qiziqtirmoqda?"
+    payload = {
+        "chat_id": chat_id,
+        "text": body_text[:4096],
+        "disable_web_page_preview": False,
+        "reply_markup": {
+            "inline_keyboard": [
+                [
+                    {"text": "Katalogni ko'rish", "url": catalog_link}
+                ]
+            ]
+        },
+    }
+
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
+
+    response = requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        json=payload,
+        timeout=30,
+    )
+    log("Telegram catalog button send result", {"status": response.status_code, "body": response.text})
     return response
 
 
@@ -1103,16 +1281,30 @@ async def telegram_webhook(request: Request):
                 channel=channel,
             )
 
-            send_result = send_telegram_bot_message(
-                chat_id=chat_id,
-                text=reply,
-                reply_to_message_id=message_id if chat_type in ["group", "supergroup"] else None,
+            should_send_catalog = bool(get_catalog_link(business)) and (
+                wants_catalog(combined_text) or wants_catalog(reply) or mentions_catalog(reply)
             )
+
+            if should_send_catalog:
+                send_result = send_telegram_catalog_button(
+                    chat_id=chat_id,
+                    business=business,
+                    text=reply,
+                    reply_to_message_id=message_id if chat_type in ["group", "supergroup"] else None,
+                )
+                saved_reply_text = clean_ai_reply_for_catalog(reply, business) + "\n[Catalog button sent]"
+            else:
+                send_result = send_telegram_bot_message(
+                    chat_id=chat_id,
+                    text=reply,
+                    reply_to_message_id=message_id if chat_type in ["group", "supergroup"] else None,
+                )
+                saved_reply_text = reply
 
             save_telegram_message(
                 business=business,
                 customer_id=customer_id,
-                text=reply,
+                text=saved_reply_text,
                 direction="outbound",
                 message_id=safe_json(send_result).get("result", {}).get("message_id", ""),
                 raw_payload=safe_json(send_result),
@@ -1333,12 +1525,23 @@ async def process_telegram_user_event(event):
                 channel="telegram_user_private",
             )
 
-            sent = await event.respond(reply)
+            should_send_catalog = bool(get_catalog_link(business)) and (
+                wants_catalog(combined_text) or wants_catalog(reply) or mentions_catalog(reply)
+            )
+            outbound_text = reply
+            if should_send_catalog:
+                outbound_text = (
+                    clean_ai_reply_for_catalog(reply, business)
+                    + f"\nKatalogni ko'rish: {get_catalog_link(business)}"
+                ).strip()
+                outbound_text += "\n[Catalog button sent]"
+
+            sent = await event.respond(outbound_text)
 
             save_telegram_message(
                 business=business,
                 customer_id=sender_id,
-                text=reply,
+                text=outbound_text,
                 direction="outbound",
                 message_id=getattr(sent, "id", ""),
                 raw_payload={
