@@ -1817,6 +1817,20 @@ def mentions_catalog(text: str) -> bool:
     return any(m in text for m in markers)
 
 
+def is_greeting_only(text: str) -> bool:
+    s = normalize_id(text).lower()
+    s = re.sub(r"[^\w\s'’`-]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    if not s:
+        return False
+    greetings = {
+        "hi", "hello", "hey",
+        "salom", "assalomu alaykum", "assalomu", "alaykum",
+        "привет", "здравствуйте", "сәлем", "салем",
+    }
+    return s in greetings or (len(s.split()) <= 2 and s in {"salom", "hello", "hi", "hey", "привет", "сәлем"})
+
+
 def detect_customer_language(text: str) -> str:
     text = normalize_id(text)
     lower = text.lower()
@@ -2251,6 +2265,17 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
                 text = "You can view our catalog through the link. Which products are you interested in?"
             else:
                 text = "Hello! Of course. Which products are you interested in?"
+
+    # Never push catalog on simple greetings.
+    if is_greeting_only(user_text) and mentions_catalog(text):
+        if lang == "en":
+            text = "Hello! How can I help you today?"
+        elif lang == "ru":
+            text = "Здравствуйте! Чем могу помочь?"
+        elif lang == "kk":
+            text = "Сәлеметсіз бе! Қалай көмектесе аламын?"
+        else:
+            text = "Assalomu alaykum 😊 Qanday yordam kerak?"
 
     text = complete_sentence_reply(text, limit=900)
 
@@ -2715,11 +2740,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
 
         reply_text = get_ai_reply(message_text or "Photo/Video received", business, "instagram", sender_id, "dm")
 
-        should_send_catalog = bool(get_catalog_link(business)) and (
-            wants_catalog(message_text)
-            or wants_catalog(reply_text)
-            or mentions_catalog(reply_text)
-        )
+        should_send_catalog = bool(get_catalog_link(business)) and wants_catalog(message_text) and not is_greeting_only(message_text)
         if should_send_catalog:
             send_result = send_catalog_button(access_token, sender_id, business, reply_text)
             saved_reply_text = clean_ai_reply_for_catalog(reply_text, business) + "\n[Catalog button sent]"
