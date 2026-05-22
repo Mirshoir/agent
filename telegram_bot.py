@@ -91,6 +91,20 @@ def mentions_catalog(text: str) -> bool:
     return any(m in text for m in markers)
 
 
+def is_greeting_only(text: str) -> bool:
+    s = normalize_text(text).lower()
+    s = re.sub(r"[^\w\s'’`-]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    if not s:
+        return False
+    greetings = {
+        "hi", "hello", "hey",
+        "salom", "assalomu alaykum", "assalomu", "alaykum",
+        "привет", "здравствуйте", "сәлем", "салем",
+    }
+    return s in greetings or (len(s.split()) <= 2 and s in {"salom", "hello", "hi", "hey", "привет", "сәлем"})
+
+
 def detect_customer_language(text: str) -> str:
     lower = normalize_text(text).lower()
     if not lower:
@@ -158,6 +172,8 @@ def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
 
 def complete_sentence_reply(text: str, limit: int = 700) -> str:
     text = normalize_text(text)
+    text = re.sub(r"(?:joylashuv xaritasini\s*)?(?:ko['‘’`]?rish|ochish)\s+uchun\s*[:：]?\s*$", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"(?:link|havola|ссылка)\s*[:：]\s*$", "", text, flags=re.IGNORECASE).strip()
     if not text:
         return ""
     if len(text) > limit:
@@ -793,6 +809,16 @@ def clean_sales_reply(reply_text, user_text=""):
             else:
                 text = "Hello! Of course. Which products are you interested in?"
 
+    if is_greeting_only(user_text) and mentions_catalog(text):
+        if lang == "en":
+            text = "Hello! How can I help you today?"
+        elif lang == "ru":
+            text = "Здравствуйте! Чем могу помочь?"
+        elif lang == "kk":
+            text = "Сәлеметсіз бе! Қалай көмектесе аламын?"
+        else:
+            text = "Assalomu alaykum 😊 Qanday yordam kerak?"
+
     text = complete_sentence_reply(text, limit=900)
     if text:
         return text
@@ -1281,7 +1307,7 @@ async def telegram_webhook(request: Request):
                 channel=channel,
             )
 
-            should_send_catalog = bool(get_catalog_link(business)) and wants_catalog(combined_text)
+            should_send_catalog = bool(get_catalog_link(business)) and wants_catalog(combined_text) and not is_greeting_only(combined_text)
 
             if should_send_catalog:
                 send_result = send_telegram_catalog_button(
@@ -1523,7 +1549,7 @@ async def process_telegram_user_event(event):
                 channel="telegram_user_private",
             )
 
-            should_send_catalog = bool(get_catalog_link(business)) and wants_catalog(combined_text)
+            should_send_catalog = bool(get_catalog_link(business)) and wants_catalog(combined_text) and not is_greeting_only(combined_text)
             outbound_text = reply
             if should_send_catalog:
                 outbound_text = (
