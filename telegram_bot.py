@@ -128,11 +128,19 @@ def looks_like_sales_question(text: str) -> bool:
         return False
     keywords = [
         "price", "prices", "catalog", "delivery", "shipping", "order", "buy", "purchase",
-        "narx", "narxlari", "qancha", "katalog", "yetkazib", "buyurtma", "mahsulot",
-        "цена", "цены", "каталог", "доставка", "заказ", "купить", "товар",
-        "баға", "каталог", "жеткізу", "тапсырыс", "тауар",
+        "narx", "narxlari", "qancha", "katalog", "yetkazib", "buyurtma", "zakaz", "buyurtma bermoqchiman",
+        "zakaz qilmoqchiman", "olmoqchiman", "olaman", "mahsulot", "model", "rang",
+        "цена", "цены", "каталог", "доставка", "заказ", "купить", "товар", "оформить",
+        "баға", "каталог", "жеткізу", "тапсырыс", "тауар", "сатып алу",
     ]
-    return any(k in s for k in keywords)
+    if any(k in s for k in keywords):
+        return True
+
+    # Quantity/wholesale intent patterns like "2 kilo", "5 dona", "10 kg".
+    if re.search(r"\b\d+\s*(kg|kilo|кг|dona|donaa|ta|pcs|piece|qop|мешок)\b", s):
+        return True
+
+    return False
 
 
 def wants_deal_handoff(text: str) -> bool:
@@ -142,7 +150,7 @@ def wants_deal_handoff(text: str) -> bool:
     keywords = [
         "deal", "make a deal", "let's deal", "order", "buy", "purchase", "ready to buy",
         "заказ", "оформить", "оформим", "куплю", "покупка", "сделка",
-        "zakaz", "buyurtma", "buyurtma bermoqchiman", "olaman", "olmoqchiman", "kelishuv",
+        "zakaz", "zakaz qilmoqchiman", "buyurtma", "buyurtma bermoqchiman", "olaman", "olmoqchiman", "kelishuv",
         "тапсырыс", "сатып аламын", "келісім",
     ]
     return any(k in s for k in keywords)
