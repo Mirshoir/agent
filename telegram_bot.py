@@ -1281,9 +1281,7 @@ async def telegram_webhook(request: Request):
                 channel=channel,
             )
 
-            should_send_catalog = bool(get_catalog_link(business)) and (
-                wants_catalog(combined_text) or wants_catalog(reply) or mentions_catalog(reply)
-            )
+            should_send_catalog = bool(get_catalog_link(business)) and wants_catalog(combined_text)
 
             if should_send_catalog:
                 send_result = send_telegram_catalog_button(
@@ -1525,9 +1523,7 @@ async def process_telegram_user_event(event):
                 channel="telegram_user_private",
             )
 
-            should_send_catalog = bool(get_catalog_link(business)) and (
-                wants_catalog(combined_text) or wants_catalog(reply) or mentions_catalog(reply)
-            )
+            should_send_catalog = bool(get_catalog_link(business)) and wants_catalog(combined_text)
             outbound_text = reply
             if should_send_catalog:
                 outbound_text = (
