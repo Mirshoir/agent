@@ -109,7 +109,7 @@ SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 META_APP_ID = os.getenv("META_APP_ID")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
 
-GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v21.0")
+GRAPH_VERSION = os.getenv("GRAPH_API_VERSION") or os.getenv("GRAPH_VERSION", "v21.0")
 GRAPH_FACEBOOK = f"https://graph.facebook.com/{GRAPH_VERSION}"
 GRAPH_INSTAGRAM = f"https://graph.instagram.com/{GRAPH_VERSION}"
 
@@ -126,6 +126,10 @@ FACEBOOK_REDIRECT_URI = os.getenv(
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://instaagent.streamlit.app")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://agent-1-xi6h.onrender.com")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
+WHATSAPP_EMBEDDED_REDIRECT_URI = os.getenv(
+    "WHATSAPP_EMBEDDED_REDIRECT_URI",
+    f"{PUBLIC_BASE_URL.rstrip('/')}/auth/whatsapp/embedded/callback",
+)
 
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
@@ -149,6 +153,7 @@ processing_comment_ids = set()
 DEDUP_TTL_SECONDS = 60 * 60
 WHATSAPP_CHAT_MEMORY = {}
 WHATSAPP_EMBEDDED_SESSIONS = {}
+LAST_WEBHOOK_EVENTS = []
 
 
 # ============================================================================
@@ -351,6 +356,14 @@ def safe_json(res):
         return res.json()
     except Exception:
         return {"text": res.text}
+
+
+def remember_webhook_event(event: dict):
+    LAST_WEBHOOK_EVENTS.append({
+        **event,
+        "received_at": datetime.utcnow().isoformat() + "Z",
+    })
+    del LAST_WEBHOOK_EVENTS[:-30]
 
 
 def standard_channel(platform: str, channel: str = "") -> str:
@@ -1175,6 +1188,9 @@ ALLOWED_BUSINESS_SETTINGS = {
     "telegram_single",
     "telegram_package",
     "telegram_bag",
+    "whatsapp_business_account_id",
+    "whatsapp_phone_number_id",
+    "whatsapp_access_token",
     "ai_model",
     "ai_temperature",
     "ai_max_tokens",
@@ -3546,6 +3562,93 @@ def subscribe_page_to_webhooks(page_id: str, page_access_token: str):
         return False, {"error": str(exc)}
 
 
+def subscribe_whatsapp_waba_to_webhooks(waba_id: str, access_token: str):
+    waba_id = normalize_id(waba_id)
+    access_token = normalize_id(access_token)
+    if not waba_id or not access_token:
+        return False, {"error": "Missing waba_id or access_token"}
+    try:
+        res = requests.post(
+            f"{GRAPH_FACEBOOK}/{waba_id}/subscribed_apps",
+            params={"access_token": access_token},
+            timeout=30,
+        )
+        body = safe_json(res)
+        log("WhatsApp WABA webhook subscribe", {"waba_id": waba_id, "status": res.status_code, "body": body})
+        return res.ok, body
+    except Exception as exc:
+        return False, {"error": str(exc)}
+
+
+def get_whatsapp_waba_phone_numbers(waba_id: str, access_token: str):
+    waba_id = normalize_id(waba_id)
+    access_token = normalize_id(access_token)
+    if not waba_id or not access_token:
+        return []
+    try:
+        res = requests.get(
+            f"{GRAPH_FACEBOOK}/{waba_id}/phone_numbers",
+            params={"fields": "id,display_phone_number,verified_name,quality_rating", "access_token": access_token},
+            timeout=30,
+        )
+        body = safe_json(res)
+        log("WhatsApp WABA phone numbers", {"waba_id": waba_id, "status": res.status_code, "body": body})
+        if not res.ok:
+            return []
+        return body.get("data", []) if isinstance(body, dict) else []
+    except Exception as exc:
+        log("WhatsApp phone number fetch failed", str(exc))
+        return []
+
+
+def persist_whatsapp_embedded_business(owner_email: str, waba_id: str, phone_number_id: str, access_token: str):
+    phone_number_id = normalize_id(phone_number_id)
+    if not phone_number_id:
+        return None
+
+    existing = get_business_by_whatsapp_phone_number_id(phone_number_id)
+    payload = {
+        "instagram_business_id": f"whatsapp_{phone_number_id}",
+        "business_name": "WhatsApp Business",
+        "business_type": "WhatsApp Business",
+        "oauth_provider": "whatsapp_embedded",
+        "whatsapp_business_account_id": normalize_id(waba_id) or None,
+        "whatsapp_phone_number_id": phone_number_id,
+        "whatsapp_access_token": normalize_id(access_token),
+        "token_preview": safe_token(access_token),
+        "bot_enabled": True,
+        "auto_reply_dms": True,
+        "auto_reply_comments": True,
+        "language": "uz",
+    }
+
+    optional = set(payload.keys())
+    for _ in range(len(optional) + 1):
+        try:
+            if existing:
+                result = supabase.table("businesses").update(payload).eq("id", existing["id"]).execute()
+                business_id = existing["id"]
+            else:
+                result = supabase.table("businesses").upsert(
+                    payload,
+                    on_conflict="instagram_business_id",
+                ).execute()
+                rows = result.data or []
+                business_id = rows[0].get("id") if rows else ""
+            if owner_email and business_id:
+                assign_business_owner(owner_email, business_id)
+            return result.data
+        except Exception as exc:
+            message = str(exc)
+            match = re.search(r"Could not find the '([^']+)' column", message)
+            missing_column = match.group(1) if match else ""
+            if missing_column and missing_column in payload:
+                payload.pop(missing_column, None)
+                continue
+            raise
+    return None
+
+
 def assign_business_owner(user_email: str, business_id: str, role: str = "owner"):
     clean_email = normalize_email(user_email)
     business_id = normalize_id(business_id)
@@ -4357,6 +4460,26 @@ async def receive_webhook(request: Request):
         log("WEBHOOK RECEIVED", data)
 
         object_type = data.get("object")
+        remember_webhook_event({
+            "object": object_type,
+            "entry_count": len(data.get("entry", []) or []),
+            "summary": [
+                {
+                    "id": normalize_id(entry.get("id")),
+                    "messaging": len(entry.get("messaging", []) or []),
+                    "changes": [
+                        {
+                            "field": change.get("field"),
+                            "message_count": len(((change.get("value") or {}).get("messages") or [])),
+                            "status_count": len(((change.get("value") or {}).get("statuses") or [])),
+                            "phone_number_id": normalize_id(((change.get("value") or {}).get("metadata") or {}).get("phone_number_id")),
+                        }
+                        for change in (entry.get("changes", []) or [])
+                    ],
+                }
+                for entry in (data.get("entry", []) or [])
+            ],
+        })
 
         if object_type == "whatsapp_business_account":
             for entry in data.get("entry", []):
@@ -4390,7 +4513,22 @@ async def receive_webhook(request: Request):
 
     except Exception as e:
         log("Webhook error", str(e))
+        remember_webhook_event({"object": "error", "error": str(e)})
         return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.get("/debug/webhook-last")
+async def debug_webhook_last(x_dashboard_secret: str = Header(default="")):
+    if DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    return {
+        "status": "ok",
+        "count": len(LAST_WEBHOOK_EVENTS),
+        "events": LAST_WEBHOOK_EVENTS,
+        "webhook_url": f"{PUBLIC_BASE_URL.rstrip('/')}/webhook",
+        "verify_token_configured": bool(VERIFY_TOKEN),
+        "graph_version": GRAPH_VERSION,
+    }
 
 
 @app.get("/api/whatsapp/media/{media_id}")
@@ -4540,7 +4678,7 @@ async def whatsapp_embedded_start(owner_email: str = "", redirect_uri: str = "")
     """
     Start WhatsApp Embedded Signup (Facebook Login for Business flow).
     """
-    target_redirect = normalize_id(redirect_uri) or FACEBOOK_REDIRECT_URI
+    target_redirect = normalize_id(redirect_uri) or WHATSAPP_EMBEDDED_REDIRECT_URI
     state = build_whatsapp_embedded_state(owner_email)
     params = {
         "client_id": META_APP_ID,
@@ -4573,7 +4711,7 @@ async def whatsapp_embedded_callback(
     if not code:
         return JSONResponse({"status": "error", "message": "Missing code"}, status_code=400)
 
-    target_redirect = normalize_id(redirect_uri) or FACEBOOK_REDIRECT_URI
+    target_redirect = normalize_id(redirect_uri) or WHATSAPP_EMBEDDED_REDIRECT_URI
     try:
         token_res = requests.get(
             f"{GRAPH_FACEBOOK}/oauth/access_token",
@@ -4593,19 +4731,30 @@ async def whatsapp_embedded_callback(
             )
 
         access_token = normalize_id(token_body.get("access_token"))
+        waba_id = normalize_id(request.query_params.get("waba_id") or os.getenv("WHATSAPP_WABA_ID", ""))
+        phone_number_id = normalize_id(request.query_params.get("phone_number_id") or os.getenv("WHATSAPP_PHONE_NUMBER_ID", ""))
+        if waba_id and not phone_number_id:
+            phone_numbers = get_whatsapp_waba_phone_numbers(waba_id, access_token)
+            if phone_numbers:
+                phone_number_id = normalize_id(phone_numbers[0].get("id"))
+
+        subscribe_ok, subscribe_body = subscribe_whatsapp_waba_to_webhooks(waba_id, access_token) if waba_id else (False, {"error": "Missing waba_id"})
         data = {
             "access_token": access_token,
             "token_type": token_body.get("token_type", ""),
             "expires_in": token_body.get("expires_in", 0),
             "state": state,
             "owner_email": normalize_email(parse_whatsapp_embedded_state(state).get("owner_email")),
-            # populated by frontend or env fallback
-            "waba_id": normalize_id(request.query_params.get("waba_id") or os.getenv("WHATSAPP_WABA_ID", "")),
-            "phone_number_id": normalize_id(request.query_params.get("phone_number_id") or os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")),
+            "waba_id": waba_id,
+            "phone_number_id": phone_number_id,
+            "webhook_subscribe_ok": subscribe_ok,
+            "webhook_subscribe_result": subscribe_body,
             "received_at": int(time.time()),
         }
         if state:
             WHATSAPP_EMBEDDED_SESSIONS[state] = data
+        if phone_number_id and access_token:
+            persist_whatsapp_embedded_business(data["owner_email"], waba_id, phone_number_id, access_token)
 
         return {
             "status": "ok",
@@ -4613,6 +4762,8 @@ async def whatsapp_embedded_callback(
             "owner_email": data["owner_email"],
             "waba_id": data["waba_id"],
             "phone_number_id": data["phone_number_id"],
+            "webhook_subscribe_ok": subscribe_ok,
+            "webhook_subscribe_result": subscribe_body,
             "has_access_token": bool(access_token),
             "expires_in": data["expires_in"],
         }
@@ -4634,6 +4785,35 @@ async def whatsapp_embedded_status(state: str = ""):
         "has_access_token": bool(session.get("access_token")),
         "received_at": session.get("received_at", 0),
     }
+
+
+@app.post("/auth/whatsapp/embedded/subscribe")
+async def whatsapp_embedded_subscribe(
+    waba_id: str = "",
+    access_token: str = "",
+    state: str = "",
+):
+    session = WHATSAPP_EMBEDDED_SESSIONS.get(normalize_id(state), {}) if state else {}
+    resolved_waba_id = normalize_id(waba_id) or normalize_id(session.get("waba_id")) or normalize_id(os.getenv("WHATSAPP_WABA_ID", ""))
+    resolved_token = normalize_id(access_token) or normalize_id(session.get("access_token")) or normalize_id(os.getenv("WHATSAPP_ACCESS_TOKEN", ""))
+    ok, body = subscribe_whatsapp_waba_to_webhooks(resolved_waba_id, resolved_token)
+    return JSONResponse(
+        {"status": "ok" if ok else "error", "waba_id": resolved_waba_id, "result": body},
+        status_code=200 if ok else 400,
+    )
+
+
+@app.get("/auth/whatsapp/embedded/phone-numbers")
+async def whatsapp_embedded_phone_numbers(
+    waba_id: str = "",
+    access_token: str = "",
+    state: str = "",
+):
+    session = WHATSAPP_EMBEDDED_SESSIONS.get(normalize_id(state), {}) if state else {}
+    resolved_waba_id = normalize_id(waba_id) or normalize_id(session.get("waba_id")) or normalize_id(os.getenv("WHATSAPP_WABA_ID", ""))
+    resolved_token = normalize_id(access_token) or normalize_id(session.get("access_token")) or normalize_id(os.getenv("WHATSAPP_ACCESS_TOKEN", ""))
+    rows = get_whatsapp_waba_phone_numbers(resolved_waba_id, resolved_token)
+    return {"status": "ok", "waba_id": resolved_waba_id, "count": len(rows), "data": rows}
 
 
 @app.post("/api/whatsapp/embedded/send-message")
