@@ -148,6 +148,7 @@ processing_message_ids = set()
 processing_comment_ids = set()
 DEDUP_TTL_SECONDS = 60 * 60
 WHATSAPP_CHAT_MEMORY = {}
+WHATSAPP_EMBEDDED_SESSIONS = {}
 
 
 # ============================================================================
@@ -247,6 +248,13 @@ class ManualWhatsAppReply(BaseModel):
     text: str
 
 
+class EmbeddedWhatsAppSendMessage(BaseModel):
+    to: str
+    text: str
+    phone_number_id: str = ""
+    access_token: str = ""
+
+
 class BusinessChannelPayload(BaseModel):
     platform: str
     account_label: str
@@ -303,6 +311,28 @@ def is_instagram_public_link(value: str) -> bool:
 
 def normalize_email(value) -> str:
     return str(value or "").strip().lower()
+
+
+def build_whatsapp_embedded_state(owner_email: str = "") -> str:
+    payload = {
+        "owner_email": normalize_email(owner_email),
+        "nonce": secrets.token_urlsafe(10),
+        "ts": int(time.time()),
+    }
+    raw = json.dumps(payload, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def parse_whatsapp_embedded_state(state: str) -> dict:
+    try:
+        if not state:
+            return {}
+        padded = state + ("=" * (-len(state) % 4))
+        raw = base64.urlsafe_b64decode(padded.encode()).decode()
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def safe_token(token: str) -> str:
@@ -1857,6 +1887,19 @@ def is_low_signal_message(text: str, raw_payload: dict = None) -> bool:
     return False
 
 
+def wants_deal_handoff(text: str) -> bool:
+    s = normalize_id(text).lower()
+    if not s:
+        return False
+    markers = [
+        "deal", "make a deal", "close deal", "contract", "partnership", "wholesale", "bulk order",
+        "заказ", "оформить", "договор", "оптом", "сделка", "куплю",
+        "zakaz", "buyurtma", "ulgurji", "kelishuv", "sotib olaman", "olaman",
+        "мәміле", "тапсырыс", "көтерме", "келісім",
+    ]
+    return any(m in s for m in markers)
+
+
 def detect_customer_language(text: str) -> str:
     text = normalize_id(text)
     lower = text.lower()
@@ -2175,6 +2218,15 @@ def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
 def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     user = normalize_id(user_text).lower()
     lang = detect_customer_language(user_text)
+
+    if wants_deal_handoff(user_text):
+        if lang == "en":
+            return "Great, for final deal and order processing please contact our admin: @milana_admin25."
+        if lang == "ru":
+            return "Отлично, для оформления сделки и заказа напишите нашему администратору: @milana_admin25."
+        if lang == "kk":
+            return "Керемет, мәміле мен тапсырысты рәсімдеу үшін админімізге жазыңыз: @milana_admin25."
+        return "Ajoyib, kelishuv va buyurtmani rasmiylashtirish uchun adminimizga yozing: @milana_admin25."
 
     if any(phrase in user for phrase in [
         "meni haqimda hamma ma'lumotni unut",
@@ -4481,6 +4533,145 @@ async def connect_facebook(owner_email: str = ""):
     }
     auth_url = f"https://www.facebook.com/{GRAPH_VERSION}/dialog/oauth?" + urlencode(params)
     return RedirectResponse(auth_url)
+
+
+@app.get("/auth/whatsapp/embedded/start")
+async def whatsapp_embedded_start(owner_email: str = "", redirect_uri: str = ""):
+    """
+    Start WhatsApp Embedded Signup (Facebook Login for Business flow).
+    """
+    target_redirect = normalize_id(redirect_uri) or FACEBOOK_REDIRECT_URI
+    state = build_whatsapp_embedded_state(owner_email)
+    params = {
+        "client_id": META_APP_ID,
+        "redirect_uri": target_redirect,
+        "response_type": "code",
+        "scope": ",".join([
+            "business_management",
+            "whatsapp_business_management",
+            "whatsapp_business_messaging",
+        ]),
+        "state": state,
+    }
+    auth_url = f"https://www.facebook.com/{GRAPH_VERSION}/dialog/oauth?" + urlencode(params)
+    return {"status": "ok", "auth_url": auth_url, "state": state, "redirect_uri": target_redirect}
+
+
+@app.get("/auth/whatsapp/embedded/callback")
+async def whatsapp_embedded_callback(
+    request: Request,
+    redirect_uri: str = "",
+):
+    """
+    Callback endpoint for embedded signup code exchange.
+    """
+    code = normalize_id(request.query_params.get("code"))
+    state = normalize_id(request.query_params.get("state"))
+    error = normalize_id(request.query_params.get("error") or request.query_params.get("error_description"))
+    if error:
+        return JSONResponse({"status": "error", "message": error}, status_code=400)
+    if not code:
+        return JSONResponse({"status": "error", "message": "Missing code"}, status_code=400)
+
+    target_redirect = normalize_id(redirect_uri) or FACEBOOK_REDIRECT_URI
+    try:
+        token_res = requests.get(
+            f"{GRAPH_FACEBOOK}/oauth/access_token",
+            params={
+                "client_id": META_APP_ID,
+                "client_secret": META_APP_SECRET,
+                "redirect_uri": target_redirect,
+                "code": code,
+            },
+            timeout=30,
+        )
+        token_body = safe_json(token_res)
+        if not token_res.ok:
+            return JSONResponse(
+                {"status": "error", "message": "Code exchange failed", "details": token_body},
+                status_code=400,
+            )
+
+        access_token = normalize_id(token_body.get("access_token"))
+        data = {
+            "access_token": access_token,
+            "token_type": token_body.get("token_type", ""),
+            "expires_in": token_body.get("expires_in", 0),
+            "state": state,
+            "owner_email": normalize_email(parse_whatsapp_embedded_state(state).get("owner_email")),
+            # populated by frontend or env fallback
+            "waba_id": normalize_id(request.query_params.get("waba_id") or os.getenv("WHATSAPP_WABA_ID", "")),
+            "phone_number_id": normalize_id(request.query_params.get("phone_number_id") or os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")),
+            "received_at": int(time.time()),
+        }
+        if state:
+            WHATSAPP_EMBEDDED_SESSIONS[state] = data
+
+        return {
+            "status": "ok",
+            "state": state,
+            "owner_email": data["owner_email"],
+            "waba_id": data["waba_id"],
+            "phone_number_id": data["phone_number_id"],
+            "has_access_token": bool(access_token),
+            "expires_in": data["expires_in"],
+        }
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.get("/auth/whatsapp/embedded/status")
+async def whatsapp_embedded_status(state: str = ""):
+    session = WHATSAPP_EMBEDDED_SESSIONS.get(normalize_id(state), {}) if state else {}
+    if not session:
+        return {"status": "empty", "state": normalize_id(state)}
+    return {
+        "status": "ok",
+        "state": normalize_id(state),
+        "owner_email": session.get("owner_email", ""),
+        "waba_id": session.get("waba_id", ""),
+        "phone_number_id": session.get("phone_number_id", ""),
+        "has_access_token": bool(session.get("access_token")),
+        "received_at": session.get("received_at", 0),
+    }
+
+
+@app.post("/api/whatsapp/embedded/send-message")
+async def whatsapp_embedded_send_message(payload: EmbeddedWhatsAppSendMessage):
+    to = normalize_id(payload.to).replace("+", "").replace(" ", "")
+    text = normalize_id(payload.text)
+    phone_number_id = normalize_id(payload.phone_number_id) or normalize_id(os.getenv("WHATSAPP_PHONE_NUMBER_ID", ""))
+    access_token = normalize_id(payload.access_token) or normalize_id(os.getenv("WHATSAPP_ACCESS_TOKEN", ""))
+
+    if not to or not text:
+        return JSONResponse({"status": "error", "message": "Missing to or text"}, status_code=400)
+    if not phone_number_id:
+        return JSONResponse({"status": "error", "message": "Missing phone_number_id"}, status_code=400)
+    if not access_token:
+        return JSONResponse({"status": "error", "message": "Missing access_token"}, status_code=400)
+
+    try:
+        res = requests.post(
+            f"{GRAPH_FACEBOOK}/{phone_number_id}/messages",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "messaging_product": "whatsapp",
+                "to": to,
+                "type": "text",
+                "text": {"preview_url": True, "body": text[:4096]},
+            },
+            timeout=30,
+        )
+        body = safe_json(res)
+        return JSONResponse(
+            {"status": "ok" if res.ok else "error", "http_status": res.status_code, "result": body},
+            status_code=200 if res.ok else 400,
+        )
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
 @app.get("/auth/facebook/callback")
