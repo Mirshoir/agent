@@ -1,5 +1,6 @@
 import os
 import time
+import re
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
@@ -61,6 +62,121 @@ def add_memory(phone: str, role: str, content: str, limit: int = 12):
     chat = get_chat(phone)
     chat["messages"].append({"role": role, "content": content})
     chat["messages"] = chat["messages"][-limit:]
+
+
+def detect_customer_language(text: str) -> str:
+    lower = str(text or "").strip().lower()
+    if not lower:
+        return ""
+    english_words = {
+        "hi", "hello", "hey", "can", "could", "would", "make", "purchase", "buy", "order",
+        "price", "how", "much", "where", "shipping", "delivery", "catalog", "available",
+    }
+    uzbek_latin_markers = {
+        "salom", "assalomu", "alaykum", "narx", "qancha", "qayer", "kerak", "olmoq",
+        "mahsulot", "katalog", "manzil", "rahmat",
+    }
+    kazakh_markers = {"сәлем", "салем", "қалай", "баға", "қанша", "тапсырыс", "тауар"}
+    russian_words = {"здравствуйте", "привет", "цена", "сколько", "купить", "заказ", "доставка", "каталог"}
+
+    words = set(re.findall(r"[a-zA-Z']+|[А-Яа-яЁё]+", lower))
+    if any(m in lower for m in kazakh_markers):
+        return "kk"
+    if words & russian_words:
+        return "ru"
+    if words & english_words and not (words & uzbek_latin_markers):
+        return "en"
+    if re.search(r"[А-Яа-яЁё]", lower):
+        return "ru"
+    if words & uzbek_latin_markers:
+        return "uz"
+    return ""
+
+
+def wants_catalog(text: str) -> bool:
+    s = str(text or "").lower()
+    keys = [
+        "catalog", "katalog", "каталог", "price", "prices", "narx", "narxlari",
+        "цена", "цены", "сколько", "model", "models", "mahsulot", "товар", "доставка",
+    ]
+    return any(k in s for k in keys)
+
+
+def wants_deal_handoff(text: str) -> bool:
+    s = str(text or "").lower()
+    keys = [
+        "deal", "order", "buy", "purchase", "ready to buy",
+        "заказ", "оформить", "куплю", "сделка",
+        "zakaz", "zakaz qilmoqchiman", "buyurtma", "buyurtma bermoqchiman", "olmoqchiman", "olaman",
+        "тапсырыс", "сатып аламын",
+    ]
+    return any(k in s for k in keys)
+
+
+def is_low_signal_message(text: str) -> bool:
+    s = str(text or "").strip()
+    if not s:
+        return False
+    compact = re.sub(r"\s+", "", s)
+    emoji_only_re = re.compile(r"^[\u2600-\u27BF\U0001F300-\U0001FAFF\U0001F1E6-\U0001F1FF\u200d\ufe0f]+$")
+    if compact and emoji_only_re.fullmatch(compact):
+        return True
+    if compact.lower() in {"+", "++", "ok", "okk"}:
+        return True
+    return False
+
+
+def complete_sentence_reply(text: str, limit: int = 900) -> str:
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"(?:link|havola|ссылка)\s*[:：]\s*$", "", text, flags=re.IGNORECASE).strip()
+    text = re.sub(r"(?:ko['‘’`]?rish|очень)\s+uchun\s*[:：]\s*$", "", text, flags=re.IGNORECASE).strip()
+    if len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0].strip()
+    if not re.search(r"[.!?…]$", text):
+        text += "."
+    return text
+
+
+def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
+    lang = detect_customer_language(user_text)
+    user = str(user_text or "").lower()
+    text = str(reply_text or "").strip()
+
+    if wants_deal_handoff(user_text):
+        if lang == "en":
+            return "Great. To finalize the order, please contact our admin on Telegram: @milana_admin25."
+        if lang == "ru":
+            return "Отлично. Чтобы оформить заказ, напишите нашему админу в Telegram: @milana_admin25."
+        if lang == "kk":
+            return "Керемет. Тапсырысты рәсімдеу үшін Telegram-дағы әкімшіге жазыңыз: @milana_admin25."
+        return "Zo'r. Buyurtmani rasmiylashtirish uchun Telegramdagi adminimizga yozing: @milana_admin25."
+
+    if wants_catalog(user_text):
+        if lang == "en":
+            return complete_sentence_reply(f"You can view our catalog here: {CATALOG_LINK} Which products are you interested in?")
+        if lang == "ru":
+            return complete_sentence_reply(f"Вы можете посмотреть наш каталог здесь: {CATALOG_LINK} Какие товары вас интересуют?")
+        if lang == "kk":
+            return complete_sentence_reply(f"Біздің каталогты осы жерден көре аласыз: {CATALOG_LINK} Қай тауарлар сізді қызықтырады?")
+        return complete_sentence_reply(f"Katalogimizni shu yerda ko'rishingiz mumkin: {CATALOG_LINK} Qaysi mahsulotlar sizni qiziqtirmoqda?")
+
+    if not text:
+        if lang == "en":
+            return "Your message has been received. How can I help you?"
+        if lang == "ru":
+            return "Ваше сообщение получено. Чем могу помочь?"
+        if lang == "kk":
+            return "Хабарыңыз қабылданды. Қалай көмектесе аламын?"
+        return "Xabaringiz qabul qilindi 😊 Qanday yordam bera olaman?"
+
+    if lang == "en":
+        low = text.lower()
+        if re.search(r"[А-Яа-яЁё]", text) or any(x in low for x in ["assalomu", "salom", "qanday", "mahsulot", "katalog"]):
+            return "Hello! Of course. Which products are you interested in?"
+
+    return complete_sentence_reply(text)
 
 
 @app.get("/")
@@ -249,11 +365,11 @@ def get_ai_reply(phone: str, user_text: str) -> str:
             return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada aniqlashtirib beradi."
 
         reply = result["choices"][0]["message"]["content"].strip()
-        return reply[:1500] if reply else "Qanday yordam bera olaman?"
+        return clean_sales_reply(reply[:1500], user_text) if reply else clean_sales_reply("", user_text)
 
     except Exception as e:
         log("MISTRAL ERROR", str(e))
-        return "Xabaringiz qabul qilindi 😊 Menejerimiz tez orada aniqlashtirib beradi."
+        return clean_sales_reply("", user_text)
 
 
 def extract_message_text(message: dict) -> str:
@@ -318,6 +434,10 @@ async def receive_webhook(request: Request):
                 log("CUSTOMER MESSAGE", {"from": from_phone, "text": user_text})
 
                 add_memory(from_phone, "user", user_text)
+
+                if is_low_signal_message(user_text):
+                    log("IGNORED LOW SIGNAL MESSAGE", {"from": from_phone, "text": user_text})
+                    continue
 
                 reply = get_ai_reply(from_phone, user_text)
 
