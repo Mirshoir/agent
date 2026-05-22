@@ -1808,6 +1808,66 @@ def wants_catalog(text: str) -> bool:
     return any(k in text for k in keywords)
 
 
+def mentions_catalog(text: str) -> bool:
+    text = (text or "").lower()
+    markers = [
+        "catalog", "katalog", "каталог", "katalo", "катало",
+        "mahsulot", "товар", "products", "product",
+    ]
+    return any(m in text for m in markers)
+
+
+def detect_customer_language(text: str) -> str:
+    text = normalize_id(text)
+    lower = text.lower()
+    if not lower:
+        return ""
+
+    english_words = {
+        "hi", "hello", "hey", "can", "could", "would", "make", "purchase", "buy", "order",
+        "price", "how", "much", "where", "shipping", "delivery", "catalog", "available",
+        "need", "want", "please", "thanks", "thank", "size", "color", "model",
+    }
+    uzbek_latin_markers = {
+        "salom", "assalomu", "alaykum", "narx", "qancha", "qayer", "kerak", "olmoq",
+        "sotib", "mahsulot", "katalog", "manzil", "rahmat", "bormi", "necha",
+    }
+    kazakh_markers = {
+        "сәлем", "салем", "қалай", "баға", "бағасы", "қанша", "қажет", "жеткізу",
+        "тапсырыс", "каталог", "тауар", "бар", "мен", "сіз", "үшін",
+    }
+    russian_words = {
+        "здравствуйте", "привет", "цена", "сколько", "купить", "заказ", "доставка",
+        "каталог", "размер", "цвет", "модель", "есть", "можно",
+    }
+
+    words = set(re.findall(r"[a-zA-Z']+|[А-Яа-яЁё]+", lower))
+    if any(m in lower for m in kazakh_markers):
+        return "kk"
+    if words & russian_words:
+        return "ru"
+    if words & english_words and not (words & uzbek_latin_markers):
+        return "en"
+    if re.search(r"[А-Яа-яЁё]", lower):
+        return "ru"
+    if words & uzbek_latin_markers:
+        return "uz"
+    return ""
+
+
+def language_instruction_for(text: str) -> str:
+    lang = detect_customer_language(text)
+    if lang == "en":
+        return "The latest customer message is in English. Reply only in English. Do not use Uzbek, Russian, or Kazakh words."
+    if lang == "ru":
+        return "Последнее сообщение клиента на русском. Отвечай только на русском языке."
+    if lang == "kk":
+        return "Клиенттің соңғы хабары қазақ тілінде. Тек қазақ тілінде жауап бер."
+    if lang == "uz":
+        return "Mijozning oxirgi xabari o'zbek tilida. Faqat o'zbek tilida javob ber."
+    return ""
+
+
 def get_catalog_link(business: dict) -> str:
     link = business.get("catalog_link") or business.get("catalog") or business.get("website") or ""
     link = str(link).strip()
@@ -2074,6 +2134,7 @@ def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
 
 def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     user = normalize_id(user_text).lower()
+    lang = detect_customer_language(user_text)
 
     if any(phrase in user for phrase in [
         "meni haqimda hamma ma'lumotni unut",
@@ -2085,6 +2146,10 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
         "forget everything about me",
         "delete my data",
     ]):
+        if lang == "en":
+            return "Of course."
+        if lang == "ru":
+            return "Конечно."
         return "Albatta 👍"
 
     if any(phrase in user for phrase in [
@@ -2096,6 +2161,10 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
         "kerakmas",
         "kerak emas",
     ]):
+        if lang == "en":
+            return "Understood. I will keep replies simpler and shorter."
+        if lang == "ru":
+            return "Понял. Буду отвечать проще и короче."
         return "Tushundim 👍 Oddiyroq va qisqa javob beraman."
 
     if any(phrase in user for phrase in [
@@ -2107,10 +2176,18 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
         "keyinroq",
         "pul yo'q",
     ]):
+        if lang == "en":
+            return "No problem. Write whenever it is convenient for you."
+        if lang == "ru":
+            return "Понимаю. Напишите, когда вам будет удобно."
         return "Tushunarli 😊 Muammo emas, qachon qulay bo'lsa yozing."
 
     text = normalize_id(reply_text)
     if not text:
+        if lang == "en":
+            return "Your message has been received."
+        if lang == "ru":
+            return "Ваше сообщение получено."
         return "Xabaringiz qabul qilindi 😊"
 
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -2155,11 +2232,37 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     price_ask = any(k in user for k in ["narx", "nechpul", "qancha", "цена", "сколько", "price"])
     has_number = bool(re.search(r"\d", text))
     if price_ask and not has_number:
-        text = "Narxni aniq aytishim uchun model yoki variantni yozing 😊"
+        if lang == "en":
+            text = "You can view our catalog through the link. Which products are you interested in?"
+        elif lang == "kk":
+            text = "Біздің каталогты төмендегі сілтеме арқылы көре аласыз. Қай тауарлар сізді қызықтырады?"
+        elif lang == "ru":
+            text = "Вы можете посмотреть наш каталог по ссылке. Какие товары вас интересуют?"
+        else:
+            text = "Katalogimizga quyidagi havoladan kirishingiz mumkin. Qaysi mahsulotlar sizni qiziqtirmoqda?"
+
+    # Strong language guard: if customer wrote in English but reply is not English, return safe English fallback.
+    if lang == "en":
+        has_cyr = bool(re.search(r"[А-Яа-яЁё]", text))
+        uz_markers = ("salom", "assalomu", "alaykum", "qaysi", "mahsulot", "katalog")
+        low = text.lower()
+        if has_cyr or any(m in low for m in uz_markers):
+            if price_ask:
+                text = "You can view our catalog through the link. Which products are you interested in?"
+            else:
+                text = "Hello! Of course. Which products are you interested in?"
 
     text = complete_sentence_reply(text, limit=900)
 
-    return text or "Tushunarli 👍"
+    if text:
+        return text
+    if lang == "en":
+        return "Understood."
+    if lang == "kk":
+        return "Түсіндім."
+    if lang == "ru":
+        return "Понял."
+    return "Tushunarli 👍"
 
 
 def get_recent_platform_chat_history(platform: str, business: dict, customer_id: str = "", channel: str = "", limit: int = 10) -> list:
@@ -2195,6 +2298,9 @@ def get_ai_reply(user_text: str, business: dict, platform: str = "instagram", cu
     try:
         messages = [{"role": "system", "content": build_sales_system_prompt(business, platform)}]
         messages.extend(get_recent_platform_chat_history(platform, business, customer_id, channel, limit=8))
+        language_instruction = language_instruction_for(user_text)
+        if language_instruction:
+            messages.append({"role": "system", "content": language_instruction})
         messages.append({"role": "user", "content": user_text})
 
         reply = call_ai_chat(
@@ -2202,10 +2308,26 @@ def get_ai_reply(user_text: str, business: dict, platform: str = "instagram", cu
             business,
             "AI response",
         )
-        return clean_sales_reply(reply.strip(), user_text) if reply else "Xabaringiz qabul qilindi 😊"
+        if reply:
+            return clean_sales_reply(reply.strip(), user_text)
+        lang = detect_customer_language(user_text)
+        if lang == "en":
+            return "Your message has been received."
+        if lang == "kk":
+            return "Хабарыңыз қабылданды."
+        if lang == "ru":
+            return "Ваше сообщение получено."
+        return "Xabaringiz qabul qilindi 😊"
 
     except Exception as e:
         log("AI error", str(e))
+        lang = detect_customer_language(user_text)
+        if lang == "en":
+            return "Your message has been received."
+        if lang == "kk":
+            return "Хабарыңыз қабылданды."
+        if lang == "ru":
+            return "Ваше сообщение получено."
         return "Xabaringiz qabul qilindi 😊"
 
 
@@ -2593,7 +2715,11 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
 
         reply_text = get_ai_reply(message_text or "Photo/Video received", business, "instagram", sender_id, "dm")
 
-        should_send_catalog = wants_catalog(message_text) and bool(get_catalog_link(business))
+        should_send_catalog = bool(get_catalog_link(business)) and (
+            wants_catalog(message_text)
+            or wants_catalog(reply_text)
+            or mentions_catalog(reply_text)
+        )
         if should_send_catalog:
             send_result = send_catalog_button(access_token, sender_id, business, reply_text)
             saved_reply_text = clean_ai_reply_for_catalog(reply_text, business) + "\n[Catalog button sent]"
