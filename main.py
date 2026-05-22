@@ -1831,6 +1831,32 @@ def is_greeting_only(text: str) -> bool:
     return s in greetings or (len(s.split()) <= 2 and s in {"salom", "hello", "hi", "hey", "привет", "сәлем"})
 
 
+def is_low_signal_message(text: str, raw_payload: dict = None) -> bool:
+    s = normalize_id(text)
+    if not s:
+        return False
+
+    compact = re.sub(r"\s+", "", s)
+    emoji_only_re = re.compile(r"^[\u2600-\u27BF\U0001F300-\U0001FAFF\U0001F1E6-\U0001F1FF\u200d\ufe0f]+$")
+    if compact and emoji_only_re.fullmatch(compact):
+        return True
+
+    # Common lightweight reactions we should not auto-reply to.
+    if compact in {"+", "++", "ok", "okk", "👍", "❤️", "🔥", "👏", "😂"}:
+        return True
+
+    payload = raw_payload or {}
+    message = payload.get("message") if isinstance(payload, dict) else {}
+    if isinstance(message, dict):
+        # Story reaction/quick reaction style payloads often carry explicit markers.
+        if message.get("is_story_reply") or message.get("story"):
+            return True
+        if message.get("reaction") and not (message.get("text") or "").strip():
+            return True
+
+    return False
+
+
 def detect_customer_language(text: str) -> str:
     text = normalize_id(text)
     lower = text.lower()
@@ -2732,6 +2758,10 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             return
 
         if not is_chat_ai_enabled("instagram", "dm", sender_id, business.get("id")):
+            mark_processed(processed_message_ids, message_id)
+            return
+
+        if is_low_signal_message(message_text, messaging):
             mark_processed(processed_message_ids, message_id)
             return
 
