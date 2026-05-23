@@ -175,6 +175,7 @@ const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
 const LEAD_PRICES_STORAGE_KEY = 'instaagent_lead_prices';
 const OPERATOR_DEALS_STORAGE_KEY = 'instaagent_operator_deals';
 const OPERATOR_ADMIN_NOTES_STORAGE_KEY = 'instaagent_operator_admin_notes';
+const USER_PROFILE_STORAGE_KEY = 'instaagent_user_profiles';
 const DASHBOARD_HASH = '#dashboard';
 const UI_LANG_STORAGE_KEY = 'instaagent_ui_lang';
 
@@ -347,6 +348,41 @@ function readStoredObject(key) {
 
 function writeStoredObject(key, value) {
   window.localStorage.setItem(key, JSON.stringify(value || {}));
+}
+
+function userIdentity(currentUser = {}) {
+  return normalizeOwnerEmail(
+    currentUser?.ownerEmail ||
+    currentUser?.email ||
+    ''
+  );
+}
+
+function readUserProfile(currentUser = {}) {
+  const key = userIdentity(currentUser);
+  const all = readStoredObject(USER_PROFILE_STORAGE_KEY);
+  const row = key ? (all[key] || {}) : {};
+  const fallbackName = key ? key.split('@')[0] : 'User';
+  return {
+    name: String(row.name || fallbackName),
+    photo: String(row.photo || ''),
+  };
+}
+
+function saveUserProfile(currentUser = {}, patch = {}) {
+  const key = userIdentity(currentUser);
+  if (!key) return readUserProfile(currentUser);
+  const all = readStoredObject(USER_PROFILE_STORAGE_KEY);
+  const prev = all[key] || {};
+  const next = {
+    ...prev,
+    ...patch,
+    name: String((patch.name ?? prev.name ?? key.split('@')[0]) || key.split('@')[0]).trim(),
+    photo: String((patch.photo ?? prev.photo ?? '') || ''),
+  };
+  all[key] = next;
+  writeStoredObject(USER_PROFILE_STORAGE_KEY, all);
+  return next;
 }
 
 const AI_PROVIDERS = [
@@ -930,6 +966,14 @@ function hashHue(value) {
   return Math.abs(hash) % 360;
 }
 
+function initialsFromName(name = '') {
+  const clean = String(name || '').trim();
+  if (!clean) return 'U';
+  const parts = clean.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return parts[0].slice(0, 1).toUpperCase();
+  return `${parts[0][0] || ''}${parts[1][0] || ''}`.toUpperCase();
+}
+
 function initials(name) {
   const parts = String(name || 'Client').trim().split(/\s+/).filter(Boolean);
   return (parts[0]?.[0] || 'C') + (parts[1]?.[0] || parts[0]?.[1] || '');
@@ -1318,9 +1362,11 @@ const WORKSPACE_TEXT = {
     leadOpen: 'Open chat', leadPrice: 'Price', leadPricePlaceholder: 'Add price', leadPriceClear: 'Clear price',
     clientsTitle: 'Clients table', clientsSubtitle: 'All customers with status, channel, price, and last message.', clientsEmpty: 'No clients yet.',
     client: 'Client', lastMessage: 'Last message', status: 'Status', channel: 'Channel',
-    operatorsTitle: 'Operators panel', operatorsSubtitle: 'Operator workspace for admin notes, client messages, and leads.',
-    textToAdmin: 'Text to admin', textToAdminPlaceholder: 'Write a note for the admin...', saveAdminNote: 'Save note',
-    adminNotes: 'Admin notes', noAdminNotes: 'No notes yet.', messagesFromClients: 'Messages from clients',
+    operatorsTitle: 'Operators panel', operatorsSubtitle: 'Operator workspace for tasks, client messages, and leads.',
+    textToOperators: 'Text to operators', textToOperatorsPlaceholder: 'Write task for operators...', saveAdminNote: 'Send task',
+    adminNotes: 'Tasks history', noAdminNotes: 'No tasks yet.', messagesFromClients: 'Messages from clients',
+    tasksFromAdmin: 'Tasks from admin', noTasksForYou: 'No tasks assigned to you.',
+    assignOne: 'Assign one', assignGroup: 'Assign group', assignAll: 'All operators',
     operatorRanking: 'Operators ranking', successfulDeals: 'Successful deals', operatorPanel: 'Operator panel', adminPanel: 'Admin panel',
     operatorAccounts: 'Operator accounts', operatorAccountsHint: 'Create operator logins for this business.', operatorId: 'Operator ID', operatorPassword: 'Password',
     addOperator: 'Add operator', noOperators: 'No operators yet.',
@@ -1357,9 +1403,11 @@ const WORKSPACE_TEXT = {
     leadOpen: 'Chatni ochish', leadPrice: 'Narx', leadPricePlaceholder: 'Narx kiriting', leadPriceClear: 'Narxni o‘chirish',
     clientsTitle: 'Mijozlar jadvali', clientsSubtitle: 'Barcha mijozlar: status, kanal, narx va oxirgi xabar.', clientsEmpty: 'Hali mijoz yo‘q.',
     client: 'Mijoz', lastMessage: 'Oxirgi xabar', status: 'Status', channel: 'Kanal',
-    operatorsTitle: 'Operator paneli', operatorsSubtitle: 'Adminga yozish, mijoz xabarlari va lidlar uchun operator ish maydoni.',
-    textToAdmin: 'Adminga xabar', textToAdminPlaceholder: 'Admin uchun izoh yozing...', saveAdminNote: 'Izohni saqlash',
-    adminNotes: 'Admin izohlari', noAdminNotes: 'Hali izoh yo‘q.', messagesFromClients: 'Mijozlardan xabarlar',
+    operatorsTitle: 'Operator paneli', operatorsSubtitle: 'Vazifalar, mijoz xabarlari va lidlar uchun operator ish maydoni.',
+    textToOperators: 'Operatorlarga topshiriq', textToOperatorsPlaceholder: 'Operatorlar uchun vazifa yozing...', saveAdminNote: 'Vazifani yuborish',
+    adminNotes: 'Vazifalar tarixi', noAdminNotes: 'Hali vazifa yo‘q.', messagesFromClients: 'Mijozlardan xabarlar',
+    tasksFromAdmin: 'Admindan vazifalar', noTasksForYou: 'Sizga tayinlangan vazifa yo‘q.',
+    assignOne: 'Bitta operator', assignGroup: 'Guruhga', assignAll: 'Barcha operatorlar',
     operatorRanking: 'Operatorlar reytingi', successfulDeals: 'Muvaffaqiyatli bitimlar', operatorPanel: 'Operator panel', adminPanel: 'Admin panel',
     operatorAccounts: 'Operator akkauntlari', operatorAccountsHint: 'Bu biznes uchun operator loginlarini yarating.', operatorId: 'Operator ID', operatorPassword: 'Parol',
     addOperator: 'Operator qo‘shish', noOperators: 'Hali operator yo‘q.',
@@ -1396,9 +1444,11 @@ const WORKSPACE_TEXT = {
     leadOpen: 'Открыть чат', leadPrice: 'Цена', leadPricePlaceholder: 'Добавить цену', leadPriceClear: 'Удалить цену',
     clientsTitle: 'Таблица клиентов', clientsSubtitle: 'Все клиенты со статусом, каналом, ценой и последним сообщением.', clientsEmpty: 'Клиентов пока нет.',
     client: 'Клиент', lastMessage: 'Последнее сообщение', status: 'Статус', channel: 'Канал',
-    operatorsTitle: 'Панель оператора', operatorsSubtitle: 'Рабочая зона оператора: сообщение админу, клиенты и лиды.',
-    textToAdmin: 'Написать админу', textToAdminPlaceholder: 'Напишите заметку для админа...', saveAdminNote: 'Сохранить',
-    adminNotes: 'Заметки админу', noAdminNotes: 'Заметок пока нет.', messagesFromClients: 'Сообщения клиентов',
+    operatorsTitle: 'Панель оператора', operatorsSubtitle: 'Рабочая зона оператора: задачи, клиенты и лиды.',
+    textToOperators: 'Задача операторам', textToOperatorsPlaceholder: 'Напишите задачу для операторов...', saveAdminNote: 'Отправить задачу',
+    adminNotes: 'История задач', noAdminNotes: 'Задач пока нет.', messagesFromClients: 'Сообщения клиентов',
+    tasksFromAdmin: 'Задачи от админа', noTasksForYou: 'Вам пока не назначены задачи.',
+    assignOne: 'Одному', assignGroup: 'Группе', assignAll: 'Всем операторам',
     operatorRanking: 'Рейтинг операторов', successfulDeals: 'Успешные сделки', operatorPanel: 'Панель оператора', adminPanel: 'Панель админа',
     operatorAccounts: 'Аккаунты операторов', operatorAccountsHint: 'Создайте логины операторов для этого бизнеса.', operatorId: 'ID оператора', operatorPassword: 'Пароль',
     addOperator: 'Добавить оператора', noOperators: 'Операторов пока нет.',
@@ -2115,12 +2165,36 @@ function BusinessChannelsManager({ selectedBusiness, onToast }) {
   );
 }
 
-function OperatorNotesCard({ adminNotes, onAdminNote, w }) {
+function AdminTaskDispatchCard({ adminNotes, onAdminNote, operatorAccounts = [], w }) {
   const [draft, setDraft] = useState('');
-  const saveNote = () => {
+  const [assignMode, setAssignMode] = useState('one');
+  const operatorIds = useMemo(
+    () => (operatorAccounts || [])
+      .filter(item => String(item?.role || '').toLowerCase() === 'operator')
+      .map(item => String(item?.login_id || '').trim())
+      .filter(Boolean),
+    [operatorAccounts],
+  );
+  const [singleOperator, setSingleOperator] = useState('');
+  const [groupOperators, setGroupOperators] = useState([]);
+
+  useEffect(() => {
+    if (!singleOperator && operatorIds.length) setSingleOperator(operatorIds[0]);
+  }, [operatorIds, singleOperator]);
+
+  const toggleGroupOperator = (operatorId) => {
+    setGroupOperators(prev => prev.includes(operatorId) ? prev.filter(item => item !== operatorId) : [...prev, operatorId]);
+  };
+
+  const saveTask = () => {
     const clean = draft.trim();
     if (!clean) return;
-    onAdminNote(clean);
+    let recipients = [];
+    if (assignMode === 'all') recipients = ['*'];
+    else if (assignMode === 'group') recipients = groupOperators;
+    else recipients = singleOperator ? [singleOperator] : [];
+    if (!recipients.length) return;
+    onAdminNote(clean, recipients, assignMode);
     setDraft('');
   };
 
@@ -2128,19 +2202,77 @@ function OperatorNotesCard({ adminNotes, onAdminNote, w }) {
     <section className="operator-note-card">
       <div className="section-card-head">
         <div>
-          <h3>{w.textToAdmin}</h3>
+          <h3>{w.textToOperators}</h3>
           <p>{w.operatorsSubtitle}</p>
         </div>
       </div>
-      <textarea value={draft} placeholder={w.textToAdminPlaceholder} onChange={(e) => setDraft(e.target.value)} rows={5} />
+      <div className="operators-mode-switch" style={{ marginBottom: 10 }}>
+        <button type="button" className={assignMode === 'one' ? 'active' : ''} onClick={() => setAssignMode('one')}>{w.assignOne}</button>
+        <button type="button" className={assignMode === 'group' ? 'active' : ''} onClick={() => setAssignMode('group')}>{w.assignGroup}</button>
+        <button type="button" className={assignMode === 'all' ? 'active' : ''} onClick={() => setAssignMode('all')}>{w.assignAll}</button>
+      </div>
+      {assignMode === 'one' && (
+        <label className="field-row">
+          <span>{w.assignOne}</span>
+          <select value={singleOperator} onChange={(e) => setSingleOperator(e.target.value)}>
+            {operatorIds.map(item => <option key={item} value={item}>{item}</option>)}
+          </select>
+        </label>
+      )}
+      {assignMode === 'group' && (
+        <div className="operator-account-list" style={{ marginBottom: 10 }}>
+          {operatorIds.map(item => (
+            <label key={item} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input type="checkbox" checked={groupOperators.includes(item)} onChange={() => toggleGroupOperator(item)} />
+              <strong>{item}</strong>
+            </label>
+          ))}
+        </div>
+      )}
+      <textarea value={draft} placeholder={w.textToOperatorsPlaceholder} onChange={(e) => setDraft(e.target.value)} rows={5} />
       <div className="panel-actions">
-        <button disabled={!draft.trim()} onClick={saveNote}>{w.saveAdminNote}</button>
+        <button disabled={!draft.trim()} onClick={saveTask}>{w.saveAdminNote}</button>
       </div>
       <div className="admin-note-list">
         <strong>{w.adminNotes}</strong>
         {!adminNotes.length && <span>{w.noAdminNotes}</span>}
-        {adminNotes.slice(0, 4).map(note => (
-          <p key={note.id}>{note.text}</p>
+        {adminNotes.slice(0, 6).map(note => (
+          <p key={note.id}>
+            {note.text}
+            {Array.isArray(note.recipients) && note.recipients.length
+              ? ` (${note.recipients[0] === '*' ? w.assignAll : note.recipients.join(', ')})`
+              : ''}
+          </p>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function OperatorTaskInboxCard({ adminNotes = [], currentUser, w }) {
+  const currentLogin = String(currentUser?.ownerEmail || currentUser?.email || '').trim().toLowerCase();
+  const tasks = useMemo(
+    () => (adminNotes || []).filter(note => {
+      const recipients = Array.isArray(note?.recipients) ? note.recipients.map(item => String(item || '').trim().toLowerCase()) : ['*'];
+      if (!recipients.length) return true;
+      if (recipients.includes('*')) return true;
+      return recipients.includes(currentLogin);
+    }),
+    [adminNotes, currentLogin],
+  );
+
+  return (
+    <section className="operator-note-card">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.tasksFromAdmin}</h3>
+          <p>{w.operatorsSubtitle}</p>
+        </div>
+      </div>
+      <div className="admin-note-list">
+        {!tasks.length && <span>{w.noTasksForYou}</span>}
+        {tasks.slice(0, 8).map(task => (
+          <p key={task.id}>{task.text}</p>
         ))}
       </div>
     </section>
@@ -2181,7 +2313,7 @@ function AdminPanel(props) {
   const { conversations, leadStages, leadPrices, operatorDeals, adminNotes, onAdminNote, setOperatorDealCount, setLeadStage, setLeadPrice, onOpenConversation, selectedBusinessId, operatorAccounts, onReloadOperatorAccounts, w } = props;
   return (
     <div className="operator-panel">
-      <OperatorNotesCard adminNotes={adminNotes} onAdminNote={onAdminNote} w={w} />
+      <AdminTaskDispatchCard adminNotes={adminNotes} onAdminNote={onAdminNote} operatorAccounts={operatorAccounts} w={w} />
       <OperatorMessagesCard conversations={conversations} onOpenConversation={onOpenConversation} w={w} />
       <OperatorAccountsPanel selectedBusinessId="" onToast={() => {}} w={w} readOnly operatorsData={operatorAccounts} onReload={onReloadOperatorAccounts} />
       <OperatorsRanking
@@ -2205,10 +2337,10 @@ function AdminPanel(props) {
 }
 
 function OperatorPanel(props) {
-  const { conversations, leadStages, leadPrices, adminNotes, onAdminNote, setLeadStage, setLeadPrice, onOpenConversation, w } = props;
+  const { conversations, leadStages, leadPrices, adminNotes, setLeadStage, setLeadPrice, onOpenConversation, w, currentUser } = props;
   return (
     <div className="operator-panel">
-      <OperatorNotesCard adminNotes={adminNotes} onAdminNote={onAdminNote} w={w} />
+      <OperatorTaskInboxCard adminNotes={adminNotes} currentUser={currentUser} w={w} />
       <OperatorMessagesCard conversations={conversations} onOpenConversation={onOpenConversation} w={w} />
       <section className="operator-leads-card">
         <div className="section-card-head">
@@ -2271,10 +2403,12 @@ function WorkspacePanel({
   onOwnerEmailSave,
   onSignOut,
   currentUser,
+  userProfile,
+  onUpdateUserProfile,
 }) {
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
   const isOperator = currentUser?.role === 'operator' && currentUser?.isAdmin !== true;
-  if (isOperator && !['leads', 'inbox', 'settings'].includes(view)) return null;
+  if (isOperator && !['leads', 'inbox', 'settings', 'profile'].includes(view)) return null;
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId) || businesses[0] || {};
   const activeProviderId = aiProviderForBusiness(selectedBusiness);
   const activeProvider = AI_PROVIDERS.find(provider => provider.id === activeProviderId) || AI_PROVIDERS[0];
@@ -2632,6 +2766,31 @@ function WorkspacePanel({
 
       {view === 'profile' && (
         <div className="settings-view">
+          <label className="field-row">
+            <span>Display name</span>
+            <input
+              value={userProfile?.name || ''}
+              placeholder="Your name"
+              onChange={(e) => onUpdateUserProfile({ name: e.target.value })}
+            />
+          </label>
+          <label className="field-row">
+            <span>Photo URL</span>
+            <input
+              value={userProfile?.photo || ''}
+              placeholder="https://..."
+              onChange={(e) => onUpdateUserProfile({ photo: e.target.value })}
+            />
+          </label>
+          <div className="metric-card">
+            <span>Profile preview</span>
+            <b style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="av" style={{ width: 28, height: 28, fontSize: 12 }}>
+                {userProfile?.photo ? <img src={userProfile.photo} alt={userProfile?.name || 'Profile'} /> : initialsFromName(userProfile?.name || '')}
+              </span>
+              {userProfile?.name || 'User'}
+            </b>
+          </div>
           <div className="metric-card"><span>API base</span><b>{API_BASE}</b></div>
           <label className="field-row">
             <span>Business owner email</span>
@@ -2653,7 +2812,7 @@ function WorkspacePanel({
 }
 
 // ---------- Rail ----------
-function Rail({ t, activeView, onView, currentUser }) {
+function Rail({ t, activeView, onView, currentUser, userProfile }) {
   const isOperator = currentUser?.role === 'operator' && currentUser?.isAdmin !== true;
   const items = [
     { id: 'leads', icon: <I.Star />, label: t.leads || 'Leads' },
@@ -2678,12 +2837,12 @@ function Rail({ t, activeView, onView, currentUser }) {
         <I.Sett />
         <span className="rail-label">{t.settings}</span>
       </button>
-      {!isOperator && (
-        <button className={`rail-btn ${activeView === 'profile' ? 'active' : ''}`} title={t.you || 'You'} onClick={() => onView('profile')}>
-          <span className="rail-avatar-mini">A</span>
-          <span className="rail-label">{t.you || 'You'}</span>
-        </button>
-      )}
+      <button className={`rail-btn ${activeView === 'profile' ? 'active' : ''}`} title={t.you || 'You'} onClick={() => onView('profile')}>
+        <span className="rail-avatar-mini">
+          {userProfile?.photo ? <img src={userProfile.photo} alt={userProfile?.name || 'You'} /> : initialsFromName(userProfile?.name || 'You')}
+        </span>
+        <span className="rail-label">{t.you || 'You'}</span>
+      </button>
       {!isOperator && (
         <button className={`rail-btn ${activeView === 'insights' ? 'active' : ''}`} title={t.insights} onClick={() => onView('insights')}>
           <I.Chart />
@@ -3481,11 +3640,37 @@ function DetailColumn({ conv, t, stats, onDelete, messages = [] }) {
 }
 
 // ---------- Top bar ----------
-function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onToggleAi, onRefresh, onToast, onPin, onArchive, onDelete, onMore, moreOpen }) {
+function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onToggleAi, onRefresh, onToast, onPin, onArchive, onDelete, onMore, moreOpen, onOpenProfile, onSignOut, userProfile, onUpdateUserProfile }) {
   const [accountOpen, setAccountOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const fileInputRef = useRef(null);
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
   const workspaceNames = { inbox: t.inbox, insights: t.insights, knowledge: t.knowledge, prompts: w.promptsTitle, accounts: t.accounts, settings: t.settings, profile: w.profile };
+  const displayName = String(userProfile?.name || 'User');
+  const initials = initialsFromName(displayName);
+
+  const uploadAvatar = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      onToast('Please choose an image file.');
+      return;
+    }
+    if (file.size > 3 * 1024 * 1024) {
+      onToast('Image is too large. Max 3 MB.');
+      return;
+    }
+    try {
+      const photo = await fileToDataUrl(file);
+      onUpdateUserProfile({ photo });
+      onToast('Profile photo updated');
+      setProfileOpen(false);
+    } catch (e) {
+      onToast('Could not read this image');
+    }
+  };
+
   return (
     <header className="topbar">
       <div className="brand">
@@ -3539,16 +3724,19 @@ function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onT
         </button>
         <div className="menu-wrap">
           <button className="profile" onClick={() => setProfileOpen(v => !v)}>
-            <span className="av">A</span>
-            <span>Aziz</span>
+            <span className="av">{userProfile?.photo ? <img src={userProfile.photo} alt={displayName} /> : initials}</span>
+            <span>{displayName}</span>
             <I.Caret />
           </button>
           {profileOpen && (
             <div className="pop-menu profile-menu">
-              <button onClick={() => onToast('Profile settings are local for now')}>Profile settings</button>
+              <button onClick={() => { onOpenProfile?.(); setProfileOpen(false); }}>Profile settings</button>
+              <button onClick={() => fileInputRef.current?.click()}>Change photo</button>
               <button onClick={() => { window.localStorage.removeItem('instaagent_dashboard_secret'); onToast('Dashboard secret cleared'); }}>Clear secret</button>
+              <button onClick={onSignOut}>Sign out</button>
             </div>
           )}
+          <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={uploadAvatar} />
         </div>
       </div>
     </header>
@@ -3594,6 +3782,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   });
   const [aiOverrides, setAiOverrides] = useState(() => readStoredObject(AI_OVERRIDE_STORAGE_KEY));
   const [deletedConversations, setDeletedConversations] = useState(() => readStoredObject(DELETED_CONVERSATIONS_STORAGE_KEY));
+  const [userProfile, setUserProfile] = useState(() => readUserProfile(currentUser));
   const selectedIdRef = useRef(selectedId);
   const liveModeRef = useRef(liveMode);
   const aiOverridesRef = useRef(aiOverrides);
@@ -3629,10 +3818,19 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     deletedConversationsRef.current = deletedConversations;
   }, [deletedConversations]);
 
+  useEffect(() => {
+    setUserProfile(readUserProfile(currentUser));
+  }, [currentUser?.ownerEmail, currentUser?.email]);
+
   const showToast = (message) => {
     setToast(message);
     window.clearTimeout(showToast.timer);
     showToast.timer = window.setTimeout(() => setToast(''), 2200);
+  };
+
+  const updateUserProfile = (patch = {}) => {
+    const next = saveUserProfile(currentUser, patch);
+    setUserProfile(next);
   };
 
   const loadStats = async () => {
@@ -4320,9 +4518,9 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   };
 
   const changeView = (view) => {
-    if (isOperator && !['leads', 'inbox', 'settings'].includes(view)) {
+    if (isOperator && !['leads', 'inbox', 'settings', 'profile'].includes(view)) {
       setActiveView('leads');
-      showToast('Operator access is limited to Leads, Inbox, and Settings');
+      showToast('Operator access is limited to Leads, Inbox, Settings, and Profile');
       return;
     }
     if ((view === 'operators' || view === 'settings') && liveModeRef.current) {
@@ -4376,14 +4574,20 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     });
   };
 
-  const addOperatorAdminNote = (text) => {
+  const addOperatorAdminNote = (text, recipients = ['*'], mode = 'all') => {
     setOperatorAdminNotes(prev => {
-      const next = [{ id: `${Date.now()}`, text, createdAt: new Date().toISOString() }, ...prev].slice(0, 20);
+      const next = [{
+        id: `${Date.now()}`,
+        text,
+        recipients,
+        mode,
+        createdAt: new Date().toISOString(),
+      }, ...prev].slice(0, 50);
       writeStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY, { items: next });
       queueWorkspaceStateSave({ operator_admin_notes: { items: next } });
       return next;
     });
-    showToast('Note sent to admin');
+    showToast('Task sent to operators');
   };
 
   const selectConversation = (conversationId) => {
@@ -4427,8 +4631,12 @@ function App({ lang, setLang, onSignOut, currentUser }) {
           onDelete={deleteConversation}
           onMore={() => setMoreOpen(v => !v)}
           moreOpen={moreOpen}
+          onOpenProfile={() => setActiveView('profile')}
+          onSignOut={onSignOut}
+          userProfile={userProfile}
+          onUpdateUserProfile={updateUserProfile}
         />
-        <Rail t={t} activeView={activeView} onView={changeView} currentUser={currentUser} />
+        <Rail t={t} activeView={activeView} onView={changeView} currentUser={currentUser} userProfile={userProfile} />
         <ListColumn
           conversations={conversations}
           selectedId={selectedId}
@@ -4487,6 +4695,8 @@ function App({ lang, setLang, onSignOut, currentUser }) {
             onOwnerEmailSave={saveOwnerEmailScope}
             onSignOut={onSignOut}
             currentUser={currentUser}
+            userProfile={userProfile}
+            onUpdateUserProfile={updateUserProfile}
           />
         )}
         {activeView === 'inbox' && <DetailColumn conv={conv} t={t} stats={stats} onDelete={deleteConversation} messages={messages} />}
