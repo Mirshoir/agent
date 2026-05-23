@@ -8,6 +8,7 @@ import './data.jsx';
 import './icons.jsx';
 
 const I = window.I;
+const IS_LOCALHOST = ['localhost', '127.0.0.1'].includes(window.location.hostname);
 
 const ENV_API_BASE = import.meta.env.VITE_API_URL || 'https://agent-1-xi6h.onrender.com';
 const ENV_DASHBOARD_SECRET = import.meta.env.VITE_DASHBOARD_SECRET || '';
@@ -15,9 +16,12 @@ const ENV_DASHBOARD_SECRET = import.meta.env.VITE_DASHBOARD_SECRET || '';
 const urlParams = new URLSearchParams(window.location.search);
 if (urlParams.get('clear_auth')) {
   window.localStorage.removeItem('instaagent_dashboard_secret');
+  window.localStorage.removeItem('instaagent_dashboard_auth');
+  window.localStorage.removeItem('instaagent_owner_email');
 }
 const API_BASE = (
   urlParams.get('api') ||
+  (IS_LOCALHOST ? 'http://localhost:8000' : '') ||
   ENV_API_BASE ||
   window.INSTAAGENT_API_BASE ||
   window.localStorage.getItem('instaagent_api_base')
@@ -25,6 +29,7 @@ const API_BASE = (
 
 const DASHBOARD_SECRET =
   urlParams.get('secret') ||
+  (IS_LOCALHOST ? 'localdev' : '') ||
   ENV_DASHBOARD_SECRET ||
   window.localStorage.getItem('instaagent_dashboard_secret') ||
   window.INSTAAGENT_DASHBOARD_SECRET ||
@@ -72,10 +77,11 @@ function readAuthSession() {
     const parsed = JSON.parse(window.localStorage.getItem(DASHBOARD_AUTH_STORAGE_KEY) || '{}');
     if (!parsed || typeof parsed !== 'object') return null;
     const ownerEmail = normalizeOwnerEmail(parsed.ownerEmail);
-    if (!ownerEmail) return null;
+    const token = normalizeId(parsed.token || '');
+    if (!ownerEmail || !token) return null;
     return {
       ownerEmail,
-      token: parsed.token || '',
+      token,
       isAdmin: parsed.isAdmin === true,
       role: parsed.role || '',
       at: parsed.at || '',
@@ -112,8 +118,17 @@ function scopedPath(path) {
 }
 
 const API = {
+  async fetchWithTimeout(url, options = {}, timeoutMs = 35000) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+      window.clearTimeout(timer);
+    }
+  },
   async get(path) {
-    const res = await fetch(`${API_BASE}${scopedPath(path)}`, { headers: apiHeaders() });
+    const res = await API.fetchWithTimeout(`${API_BASE}${scopedPath(path)}`, { headers: apiHeaders() });
     const data = await res.json();
     if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
     return data;
@@ -121,7 +136,7 @@ const API = {
   async post(path, params = {}) {
     const qs = new URLSearchParams(params);
     const endpoint = `${scopedPath(path)}${qs.toString() ? `${scopedPath(path).includes('?') ? '&' : '?'}${qs.toString()}` : ''}`;
-    const res = await fetch(`${API_BASE}${endpoint}`, {
+    const res = await API.fetchWithTimeout(`${API_BASE}${endpoint}`, {
       method: 'POST',
       headers: apiHeaders(),
     });
@@ -130,7 +145,7 @@ const API = {
     return data;
   },
   async postJson(path, body = {}) {
-    const res = await fetch(`${API_BASE}${scopedPath(path)}`, {
+    const res = await API.fetchWithTimeout(`${API_BASE}${scopedPath(path)}`, {
       method: 'POST',
       headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...body, owner_email: body?.owner_email || resolvedOwnerEmail() || undefined }),
@@ -140,7 +155,7 @@ const API = {
     return data;
   },
   async delete(path) {
-    const res = await fetch(`${API_BASE}${scopedPath(path)}`, {
+    const res = await API.fetchWithTimeout(`${API_BASE}${scopedPath(path)}`, {
       method: 'DELETE',
       headers: apiHeaders(),
     });
@@ -407,7 +422,7 @@ function apiHeaders() {
   const savedSecret = dashboardSecret();
   if (savedSecret && savedSecret !== 'YOUR_DASHBOARD_SECRET') headers['x-dashboard-secret'] = savedSecret;
   const auth = readAuthSession();
-  if (auth?.token) headers.Authorization = `Bearer ${auth.token}`;
+  if (!savedSecret && auth?.token) headers.Authorization = `Bearer ${auth.token}`;
   const ownerEmail = resolvedOwnerEmail();
   if (ownerEmail) headers['x-owner-email'] = ownerEmail;
   return headers;
@@ -755,12 +770,15 @@ function LandingPage({ onOpenDashboard, lang, setLang }) {
 
 function SignInPage({ lang, onSignedIn, onBack }) {
   const l = LANDING_TEXT[lang] || LANDING_TEXT.en;
+  const [mode, setMode] = useState('signin');
   const [email, setEmail] = useState(resolvedOwnerEmail());
   const [secret, setSecret] = useState(dashboardSecret());
+  const [signUpRole, setSignUpRole] = useState('operator');
+  const [businessId, setBusinessId] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const submit = async (e) => {
+  const submitSignIn = async (e) => {
     e.preventDefault();
     const ownerEmail = normalizeOwnerEmail(email);
     const cleanSecret = String(secret || '').trim();
@@ -812,23 +830,91 @@ function SignInPage({ lang, onSignedIn, onBack }) {
     }
   };
 
+  const submitSignUp = async (e) => {
+    e.preventDefault();
+    const cleanEmail = normalizeOwnerEmail(email);
+    const cleanSecret = String(secret || '').trim();
+    const cleanBusiness = String(businessId || '').trim();
+    if (!cleanEmail) {
+      setError('ID/Email is required.');
+      return;
+    }
+    if (!cleanSecret || cleanSecret.length < 6) {
+      setError('Password must be at least 6 characters.');
+      return;
+    }
+    if (signUpRole === 'operator' && !cleanBusiness) {
+      setError('Business ID is required for operator sign-up.');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+    try {
+      const signup = await API.postJson('/api/v2/auth/signup', {
+        email: cleanEmail,
+        password: cleanSecret,
+        role: signUpRole,
+        business_id: signUpRole === 'operator' ? cleanBusiness : '',
+      });
+      const payload = signup.data || {};
+      window.localStorage.removeItem('instaagent_dashboard_secret');
+      window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, cleanEmail);
+      saveAuthSession(cleanEmail, {
+        token: payload.token || '',
+        isAdmin: payload.user?.is_admin === true,
+        role: payload.user?.role || signUpRole,
+      });
+      onSignedIn({
+        ownerEmail: cleanEmail,
+        token: payload.token || '',
+        isAdmin: payload.user?.is_admin === true,
+        role: payload.user?.role || signUpRole,
+      });
+    } catch (err) {
+      setError(err.message || 'Sign up failed.');
+      clearAuthSession();
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <main className="signin-shell">
       <section className="signin-card">
-        <h1>{l.appName} Sign In</h1>
-        <p>Log in to see only your assigned Instagram, Telegram, and WhatsApp accounts.</p>
-        <form onSubmit={submit}>
+        <h1>{l.appName} Access</h1>
+        <p>{mode === 'signin' ? 'Sign in with your assigned account.' : 'Create a separate admin or operator account.'}</p>
+        <div className="operators-mode-switch" style={{ marginBottom: 12 }}>
+          <button type="button" className={mode === 'signin' ? 'active' : ''} onClick={() => { setMode('signin'); setError(''); }}>Sign In</button>
+          <button type="button" className={mode === 'signup' ? 'active' : ''} onClick={() => { setMode('signup'); setError(''); }}>Sign Up</button>
+        </div>
+        <form onSubmit={mode === 'signin' ? submitSignIn : submitSignUp}>
           <label>
             <span>ID / Email</span>
             <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="operator@company.com" autoComplete="username" />
           </label>
           <label>
-            <span>Access key</span>
-            <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="Dashboard secret" autoComplete="current-password" />
+            <span>Password</span>
+            <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="Minimum 6 characters" autoComplete="current-password" />
           </label>
+          {mode === 'signup' && (
+            <label>
+              <span>Account type</span>
+              <select value={signUpRole} onChange={(e) => setSignUpRole(e.target.value)}>
+                <option value="operator">Operator</option>
+                <option value="admin">Admin</option>
+              </select>
+            </label>
+          )}
+          {mode === 'signup' && signUpRole === 'operator' && (
+            <label>
+              <span>Business ID</span>
+              <input value={businessId} onChange={(e) => setBusinessId(e.target.value)} placeholder="87963381-aa63-47f1-a55e-858dc821b52f" />
+            </label>
+          )}
           {error && <div className="signin-error">{error}</div>}
           <div className="signin-actions">
-            <button type="submit" disabled={loading}>{loading ? 'Signing in...' : 'Sign In'}</button>
+            <button type="submit" disabled={loading}>{loading ? (mode === 'signin' ? 'Signing in...' : 'Signing up...') : (mode === 'signin' ? 'Sign In' : 'Sign Up')}</button>
             <button type="button" className="ghost" onClick={onBack}>Back</button>
           </div>
         </form>
@@ -1727,12 +1813,28 @@ function ClientsTable({ conversations, leadStages, leadPrices, onOpenConversatio
   );
 }
 
-function OperatorsRanking({ leadStages, operatorDeals = {}, setOperatorDealCount, w }) {
+function OperatorsRanking({ leadStages, operatorDeals = {}, operatorAccounts = [], setOperatorDealCount, w }) {
   const wonDeals = Object.values(leadStages || {}).filter(stage => stage === 'won').length;
-  const rows = [
-    { id: 'aziz', name: 'Aziz', deals: Number(operatorDeals.aziz ?? wonDeals ?? 0) },
-    { id: 'admin', name: 'Admin', deals: Number(operatorDeals.admin ?? 0) },
-  ].sort((a, b) => b.deals - a.deals);
+  const accountRows = Array.isArray(operatorAccounts)
+    ? operatorAccounts
+      .filter(item => String(item?.role || '').toLowerCase() === 'operator')
+      .map(item => {
+        const loginId = String(item?.login_id || '').trim();
+        if (!loginId) return null;
+        const dealValue = Number(operatorDeals[loginId] ?? operatorDeals[loginId.toLowerCase()] ?? 0);
+        const displayName = loginId.charAt(0).toUpperCase() + loginId.slice(1);
+        return {
+          id: loginId,
+          name: displayName,
+          deals: Number.isFinite(dealValue) ? dealValue : 0,
+        };
+      })
+      .filter(Boolean)
+    : [];
+
+  const rows = accountRows.length
+    ? accountRows.sort((a, b) => b.deals - a.deals)
+    : [{ id: 'unassigned', name: 'Unassigned', deals: Number(operatorDeals.unassigned ?? wonDeals ?? 0) }];
 
   return (
     <section className="operator-ranking">
@@ -1760,28 +1862,33 @@ function OperatorsRanking({ leadStages, operatorDeals = {}, setOperatorDealCount
   );
 }
 
-function OperatorAccountsPanel({ selectedBusinessId, onToast, w }) {
+function OperatorAccountsPanel({ selectedBusinessId, onToast, w, readOnly = false, compactTitle = false, operatorsData = null, onReload = null }) {
   const [operators, setOperators] = useState([]);
   const [loginId, setLoginId] = useState('');
   const [password, setPassword] = useState('');
   const [saving, setSaving] = useState(false);
 
   const loadOperators = async () => {
-    if (!selectedBusinessId) return;
+    if (operatorsData) return;
     try {
-      const response = await API.get(`/api/v2/operators?business_id=${encodeURIComponent(selectedBusinessId)}`);
-      setOperators(response.data || []);
+      const fallback = await API.get('/api/v2/operators');
+      setOperators(fallback.data || []);
     } catch (e) {
-      setOperators([]);
+      // Keep previous list when a transient request fails.
     }
   };
 
   useEffect(() => {
-    loadOperators();
-  }, [selectedBusinessId]);
+    if (!operatorsData) loadOperators();
+  }, [selectedBusinessId, operatorsData]);
+
+  useEffect(() => {
+    if (onReload) onReload();
+  }, [onReload, selectedBusinessId]);
 
   const createOperator = async (e) => {
     e.preventDefault();
+    if (readOnly) return;
     if (!selectedBusinessId || !loginId.trim() || !password.trim()) return;
     setSaving(true);
     try {
@@ -1793,7 +1900,8 @@ function OperatorAccountsPanel({ selectedBusinessId, onToast, w }) {
       setLoginId('');
       setPassword('');
       onToast('Operator account created');
-      loadOperators();
+      if (onReload) onReload();
+      else loadOperators();
     } catch (err) {
       onToast(err.message || 'Could not create operator');
     } finally {
@@ -1805,25 +1913,27 @@ function OperatorAccountsPanel({ selectedBusinessId, onToast, w }) {
     <section className="operator-accounts-card">
       <div className="section-card-head">
         <div>
-          <h3>{w.operatorAccounts}</h3>
-          <p>{w.operatorAccountsHint}</p>
+          <h3>{compactTitle ? (w.operatorsTitle || 'Operators') : w.operatorAccounts}</h3>
+          <p>{compactTitle ? w.messagesFromClients : w.operatorAccountsHint}</p>
         </div>
-        <span>{operators.length}</span>
+        <span>{(operatorsData || operators).length}</span>
       </div>
-      <form className="operator-account-form" onSubmit={createOperator}>
-        <label className="field-row">
-          <span>{w.operatorId}</span>
-          <input value={loginId} onChange={(e) => setLoginId(e.target.value)} placeholder="operator@business.com" />
-        </label>
-        <label className="field-row">
-          <span>{w.operatorPassword}</span>
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Minimum 6 characters" />
-        </label>
-        <button disabled={saving || !loginId.trim() || password.length < 6}>{saving ? w.saving : w.addOperator}</button>
-      </form>
+      {!readOnly && (
+        <form className="operator-account-form" onSubmit={createOperator}>
+          <label className="field-row">
+            <span>{w.operatorId}</span>
+            <input value={loginId} onChange={(e) => setLoginId(e.target.value)} placeholder="operator@business.com" />
+          </label>
+          <label className="field-row">
+            <span>{w.operatorPassword}</span>
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Minimum 6 characters" />
+          </label>
+          <button disabled={saving || !loginId.trim() || password.length < 6}>{saving ? w.saving : w.addOperator}</button>
+        </form>
+      )}
       <div className="operator-account-list">
-        {!operators.length && <span>{w.noOperators}</span>}
-        {operators.map(operator => (
+        {!(operatorsData || operators).length && <span>{w.noOperators}</span>}
+        {(operatorsData || operators).map(operator => (
           <div key={operator.login_id}>
             <strong>{operator.login_id}</strong>
             <em>{operator.role || 'operator'}</em>
@@ -1831,6 +1941,176 @@ function OperatorAccountsPanel({ selectedBusinessId, onToast, w }) {
         ))}
       </div>
     </section>
+  );
+}
+
+function BusinessChannelsManager({ selectedBusiness, onToast }) {
+  const businessId = String(selectedBusiness?.id || '').trim();
+  const [channels, setChannels] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({
+    platform: 'instagram',
+    accountLabel: '',
+    externalAccountId: '',
+    accessToken: '',
+    pageAccessToken: '',
+    phoneNumberId: '',
+    wabaId: '',
+    botToken: '',
+  });
+
+  const loadChannels = async () => {
+    if (!businessId) {
+      setChannels([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const data = await API.get(`/api/businesses/${encodeURIComponent(businessId)}/channels`);
+      setChannels(data.data || []);
+    } catch (e) {
+      setChannels([]);
+      onToast(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadChannels();
+  }, [businessId]);
+
+  const onChange = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
+
+  const addChannel = async (e) => {
+    e.preventDefault();
+    if (!businessId) return;
+    const platform = String(form.platform || '').trim().toLowerCase();
+    const accountLabel = String(form.accountLabel || '').trim();
+    const externalAccountId = String(form.externalAccountId || '').trim();
+    if (!platform || !accountLabel || !externalAccountId) {
+      onToast('Platform, account name, and external account ID are required.');
+      return;
+    }
+
+    const config = {};
+    if (form.accessToken.trim()) config.access_token = form.accessToken.trim();
+    if (form.pageAccessToken.trim()) config.page_access_token = form.pageAccessToken.trim();
+    if (form.phoneNumberId.trim()) config.phone_number_id = form.phoneNumberId.trim();
+    if (form.wabaId.trim()) config.waba_id = form.wabaId.trim();
+    if (form.botToken.trim()) config.bot_token = form.botToken.trim();
+
+    setSaving(true);
+    try {
+      await API.postJson(`/api/businesses/${encodeURIComponent(businessId)}/channels`, {
+        platform,
+        account_label: accountLabel,
+        account_external_id: externalAccountId,
+        is_active: true,
+        config,
+      });
+      onToast('Channel saved');
+      setForm(prev => ({
+        ...prev,
+        accountLabel: '',
+        externalAccountId: '',
+        accessToken: '',
+        pageAccessToken: '',
+        phoneNumberId: '',
+        wabaId: '',
+        botToken: '',
+      }));
+      await loadChannels();
+    } catch (e2) {
+      onToast(e2.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeChannel = async (channelId) => {
+    if (!channelId) return;
+    try {
+      await API.delete(`/api/business-channels/${encodeURIComponent(channelId)}`);
+      onToast('Channel removed');
+      await loadChannels();
+    } catch (e) {
+      onToast(e.message);
+    }
+  };
+
+  return (
+    <div className="channel-manager">
+      <div className="settings-section">
+        <h3>Connected channels</h3>
+        <p className="section-hint">Add multiple Instagram/WhatsApp/Telegram accounts for this business.</p>
+        {loading ? <div className="empty">Loading... please wait</div> : (
+          <div className="channel-list">
+            {(channels || []).map(row => (
+              <div className="channel-row" key={row.id}>
+                <span>
+                  <strong>{row.account_label || row.platform}</strong>
+                  <em>{row.platform} · {row.account_external_id}</em>
+                </span>
+                <button className="ghost" onClick={() => removeChannel(row.id)}>Remove</button>
+              </div>
+            ))}
+            {!channels.length && <div className="empty">No channels connected yet.</div>}
+          </div>
+        )}
+      </div>
+
+      <form className="settings-section" onSubmit={addChannel}>
+        <h3>Add channel</h3>
+        <div className="model-grid">
+          <label className="field-row">
+            <span>Platform</span>
+            <select value={form.platform} onChange={(e) => onChange('platform', e.target.value)}>
+              <option value="instagram">Instagram</option>
+              <option value="whatsapp">WhatsApp</option>
+              <option value="telegram">Telegram</option>
+              <option value="telegram_bot">Telegram Bot</option>
+            </select>
+          </label>
+          <label className="field-row">
+            <span>Account name</span>
+            <input value={form.accountLabel} onChange={(e) => onChange('accountLabel', e.target.value)} placeholder="Milana Premium IG 2" />
+          </label>
+        </div>
+        <label className="field-row">
+          <span>External account ID</span>
+          <input value={form.externalAccountId} onChange={(e) => onChange('externalAccountId', e.target.value)} placeholder="IG business ID / WhatsApp phone_number_id / Bot username" />
+        </label>
+        <div className="model-grid">
+          <label className="field-row">
+            <span>Access token</span>
+            <input value={form.accessToken} onChange={(e) => onChange('accessToken', e.target.value)} placeholder="Optional token" />
+          </label>
+          <label className="field-row">
+            <span>Page access token</span>
+            <input value={form.pageAccessToken} onChange={(e) => onChange('pageAccessToken', e.target.value)} placeholder="Instagram/Facebook page token" />
+          </label>
+        </div>
+        <div className="model-grid">
+          <label className="field-row">
+            <span>WhatsApp phone_number_id</span>
+            <input value={form.phoneNumberId} onChange={(e) => onChange('phoneNumberId', e.target.value)} placeholder="Optional" />
+          </label>
+          <label className="field-row">
+            <span>WhatsApp WABA ID</span>
+            <input value={form.wabaId} onChange={(e) => onChange('wabaId', e.target.value)} placeholder="Optional" />
+          </label>
+        </div>
+        <label className="field-row">
+          <span>Telegram bot token</span>
+          <input value={form.botToken} onChange={(e) => onChange('botToken', e.target.value)} placeholder="Optional" />
+        </label>
+        <div className="panel-actions">
+          <button type="submit" disabled={saving || !businessId}>{saving ? 'Saving...' : 'Save channel'}</button>
+        </div>
+      </form>
+    </div>
   );
 }
 
@@ -1897,12 +2177,19 @@ function OperatorMessagesCard({ conversations, onOpenConversation, w }) {
 }
 
 function AdminPanel(props) {
-  const { conversations, leadStages, leadPrices, operatorDeals, adminNotes, onAdminNote, setOperatorDealCount, setLeadStage, setLeadPrice, onOpenConversation, w } = props;
+  const { conversations, leadStages, leadPrices, operatorDeals, adminNotes, onAdminNote, setOperatorDealCount, setLeadStage, setLeadPrice, onOpenConversation, selectedBusinessId, operatorAccounts, onReloadOperatorAccounts, w } = props;
   return (
     <div className="operator-panel">
       <OperatorNotesCard adminNotes={adminNotes} onAdminNote={onAdminNote} w={w} />
       <OperatorMessagesCard conversations={conversations} onOpenConversation={onOpenConversation} w={w} />
-      <OperatorsRanking leadStages={leadStages} operatorDeals={operatorDeals} setOperatorDealCount={setOperatorDealCount} w={w} />
+      <OperatorAccountsPanel selectedBusinessId="" onToast={() => {}} w={w} readOnly operatorsData={operatorAccounts} onReload={onReloadOperatorAccounts} />
+      <OperatorsRanking
+        leadStages={leadStages}
+        operatorDeals={operatorDeals}
+        operatorAccounts={operatorAccounts}
+        setOperatorDealCount={setOperatorDealCount}
+        w={w}
+      />
       <section className="operator-leads-card">
         <div className="section-card-head">
           <div>
@@ -1972,6 +2259,8 @@ function WorkspacePanel({
   leadPrices,
   operatorDeals,
   adminNotes,
+  operatorAccounts,
+  onReloadOperatorAccounts,
   onLeadStageChange,
   onLeadPriceChange,
   onOperatorDealChange,
@@ -2045,8 +2334,11 @@ function WorkspacePanel({
           conversations={conversations}
           leadStages={leadStages}
           leadPrices={leadPrices}
+          selectedBusinessId={selectedBusinessId}
           operatorDeals={operatorDeals}
           adminNotes={adminNotes}
+          operatorAccounts={operatorAccounts}
+          onReloadOperatorAccounts={onReloadOperatorAccounts}
           onAdminNote={onAdminNote}
           setOperatorDealCount={onOperatorDealChange}
           setLeadStage={onLeadStageChange}
@@ -2068,10 +2360,7 @@ function WorkspacePanel({
             </button>
           ))}
           {!businesses.length && <div className="empty">{w.noBusinesses}</div>}
-          <div className="panel-actions">
-            <button onClick={() => window.open(`${API_BASE}/connect-instagram`, '_blank')}>{w.connectInstagram}</button>
-            <button onClick={() => window.open(`${API_BASE}/connect-facebook`, '_blank')}>{w.connectFacebook}</button>
-          </div>
+          <BusinessChannelsManager selectedBusiness={selectedBusiness} onToast={onToast} />
         </div>
       )}
 
@@ -2332,9 +2621,11 @@ function WorkspacePanel({
 
       {view === 'settings' && !isOperator && (
         <OperatorAccountsPanel
-          selectedBusinessId={selectedBusiness.id}
+          selectedBusinessId={selectedBusinessId}
           onToast={onToast}
           w={w}
+          operatorsData={operatorAccounts}
+          onReload={onReloadOperatorAccounts}
         />
       )}
 
@@ -2437,6 +2728,7 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
   const [instagramChannels, setInstagramChannels] = useState({ dm: true, comments: true });
   const [search, setSearch] = useState('');
   const [secretDraft, setSecretDraft] = useState(window.localStorage.getItem('instaagent_dashboard_secret') || '');
+  const showLoadingState = loading && conversations.length === 0;
 
   const counts = useMemo(() => ({
     all: conversations.length,
@@ -2471,7 +2763,7 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
     <section className="list-col">
       <div className="list-head">
         <div className={`api-strip ${liveMode ? 'live' : 'mock'}`}>
-          <span>{liveMode ? t.liveBackend : t.mockFallback}</span>
+          <span>{liveMode || conversations.length > 0 ? t.liveBackend : (showLoadingState ? 'Loading... please wait' : 'Waiting for live data')}</span>
           <button onClick={onRefresh} title={t.refresh}>{loading ? t.syncing : t.refresh}</button>
         </div>
         {apiError && <div className="api-error">{apiError}</div>}
@@ -2545,7 +2837,14 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
           </>
         )}
         {filtered.length === 0 && (
-          <div className="empty">{t.noConversations}</div>
+          showLoadingState ? (
+            <div className="loading-state" role="status" aria-live="polite">
+              <span className="spinner" aria-hidden="true" />
+              <p>Loading... please wait</p>
+            </div>
+          ) : (
+            <div className="empty">{t.noConversations}</div>
+          )
         )}
       </div>
     </section>
@@ -3263,10 +3562,11 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 function App({ lang, setLang, onSignOut, currentUser }) {
   const t = window.STRINGS[lang];
   const isOperator = currentUser?.role === 'operator' && currentUser?.isAdmin !== true;
+  const [booting, setBooting] = useState(true);
 
-  const [conversations, setConversations] = useState(window.CONVERSATIONS);
-  const [selectedId, setSelectedId] = useState('c1');
-  const [threads, setThreads] = useState(() => ({ ...window.THREADS }));
+  const [conversations, setConversations] = useState([]);
+  const [selectedId, setSelectedId] = useState('');
+  const [threads, setThreads] = useState({});
   const [loading, setLoading] = useState(false);
   const [threadLoading, setThreadLoading] = useState(false);
   const [sending, setSending] = useState(false);
@@ -3283,6 +3583,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   const [promptLoading, setPromptLoading] = useState(false);
   const [promptSaving, setPromptSaving] = useState(false);
   const [promptGeneratorState, setPromptGeneratorState] = useState({});
+  const [operatorAccounts, setOperatorAccounts] = useState([]);
   const [leadStages, setLeadStages] = useState(() => readStoredObject(LEAD_STAGES_STORAGE_KEY));
   const [leadPrices, setLeadPrices] = useState(() => readStoredObject(LEAD_PRICES_STORAGE_KEY));
   const [operatorDeals, setOperatorDeals] = useState(() => readStoredObject(OPERATOR_DEALS_STORAGE_KEY));
@@ -3423,6 +3724,22 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     }
   };
 
+  const loadOperatorAccounts = async (businessId = selectedBusinessId) => {
+    try {
+      const business = String(businessId || '').trim();
+      const endpoint = business
+        ? `/api/v2/operators?business_id=${encodeURIComponent(business)}`
+        : '/api/v2/operators';
+      const fallback = await API.get(endpoint);
+      const rows = fallback.data || [];
+      setOperatorAccounts(rows);
+      return rows;
+    } catch {
+      setOperatorAccounts([]);
+      return [];
+    }
+  };
+
   const updatePromptSetting = (key, value) => {
     setPromptSettings(settings => ({ ...settings, [key]: value }));
   };
@@ -3506,7 +3823,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   };
 
   const refreshWorkspace = async () => {
-    await Promise.all([loadConversations({ sideLoad: false }), loadStats(), loadBusinesses(), loadPromptSettings(selectedBusinessId, { silent: true })]);
+    await Promise.all([loadConversations({ sideLoad: false }), loadStats(), loadBusinesses(), loadPromptSettings(selectedBusinessId, { silent: true }), loadOperatorAccounts(selectedBusinessId)]);
     showToast('Workspace refreshed');
   };
 
@@ -3572,15 +3889,16 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       }
       return true;
     } catch (e) {
+      const isAbort = /aborted|aborterror|signal is aborted/i.test(String(e?.message || ''));
       if (silent) {
-        setApiError(`Live sync delayed: ${e.message}`);
+        if (!isAbort) setApiError(`Live sync delayed: ${e.message}`);
         return false;
       }
       setLiveMode(false);
-      setApiError(`${e.message} Using local demo data.`);
-      setConversations(window.CONVERSATIONS);
-      setThreads({ ...window.THREADS });
-      setSelectedId(current => window.CONVERSATIONS.some(c => c.id === current) ? current : window.CONVERSATIONS[0]?.id);
+      setApiError(isAbort ? 'Loading... please wait' : `Loading... please wait (${e.message})`);
+      setConversations([]);
+      setThreads({});
+      setSelectedId('');
       return false;
     } finally {
       if (!silent) setLoading(false);
@@ -3770,7 +4088,17 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   };
 
   useEffect(() => {
-    loadConversations();
+    let cancelled = false;
+    (async () => {
+      try {
+        await loadConversations();
+      } finally {
+        if (!cancelled) setBooting(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -3780,6 +4108,10 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   useEffect(() => {
     if (selectedBusinessId) loadPromptSettings(selectedBusinessId, { silent: true });
   }, [selectedBusinessId]);
+
+  useEffect(() => {
+    if (liveMode) loadOperatorAccounts(selectedBusinessId);
+  }, [selectedBusinessId, liveMode]);
 
   useEffect(() => {
     if (!selectedBusinessId || !liveMode) return;
@@ -3992,6 +4324,9 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       showToast('Operator access is limited to Leads, Inbox, and Settings');
       return;
     }
+    if ((view === 'operators' || view === 'settings') && liveModeRef.current) {
+      loadOperatorAccounts(selectedBusinessId);
+    }
     setActiveView(view);
     const names = {
       inbox: t.inbox,
@@ -4062,6 +4397,15 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     setConversations(cs => cs.map(c => c.id === selectedId ? clearConversationUnread(c) : c));
   }, [selectedId, liveMode]);
 
+  if (booting) {
+    return (
+      <main className="app-loading-screen" role="status" aria-live="polite">
+        <span className="spinner" aria-hidden="true" />
+        <p>Loading... please wait</p>
+      </main>
+    );
+  }
+
   return (
     <>
       <div className={`app ${activeView === 'inbox' ? '' : 'workspace-mode'}`}>
@@ -4131,6 +4475,8 @@ function App({ lang, setLang, onSignOut, currentUser }) {
             leadPrices={leadPrices}
             operatorDeals={operatorDeals}
             adminNotes={operatorAdminNotes}
+            operatorAccounts={operatorAccounts}
+            onReloadOperatorAccounts={() => loadOperatorAccounts(selectedBusinessId)}
             onLeadStageChange={setLeadStage}
             onLeadPriceChange={setLeadPrice}
             onOperatorDealChange={setOperatorDealCount}
