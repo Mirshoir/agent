@@ -144,6 +144,9 @@ const STATS_POLL_MS = 20000;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
 const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
+const LEAD_PRICES_STORAGE_KEY = 'instaagent_lead_prices';
+const OPERATOR_DEALS_STORAGE_KEY = 'instaagent_operator_deals';
+const OPERATOR_ADMIN_NOTES_STORAGE_KEY = 'instaagent_operator_admin_notes';
 const DASHBOARD_HASH = '#dashboard';
 const UI_LANG_STORAGE_KEY = 'instaagent_ui_lang';
 
@@ -432,86 +435,6 @@ function withMediaToken(url) {
   } catch (e) {
     return url;
   }
-}
-
-function unwrapMetaRedirectUrl(url) {
-  const value = String(url || '').trim();
-  if (!value) return '';
-  try {
-    const parsed = new URL(value, window.location.origin);
-    const host = String(parsed.hostname || '').toLowerCase();
-    if (host.endsWith('instagram.com') || host.endsWith('facebook.com')) {
-      const target = parsed.searchParams.get('u');
-      if (target && /^https?:\/\//i.test(target)) return decodeURIComponent(target);
-    }
-  } catch (e) {
-    return value;
-  }
-  return value;
-}
-
-function isInstagramPostLink(url) {
-  const value = String(url || '').toLowerCase();
-  return /^https?:\/\//.test(value) && value.includes('instagram.com/') && (
-    value.includes('/p/') ||
-    value.includes('/reel/') ||
-    value.includes('/tv/') ||
-    value.includes('/share/')
-  );
-}
-
-function isPlayableVideoUrl(url) {
-  const value = String(url || '').toLowerCase();
-  return /^https?:\/\//.test(value) && !isInstagramPostLink(value) && (
-    /\.(mp4|mov|m4v|webm)(\?|$)/i.test(value) ||
-    value.includes('cdninstagram.com') ||
-    value.includes('fbcdn.net') ||
-    value.includes('lookaside.fbsbx.com')
-  );
-}
-
-function isRenderableImageUrl(url) {
-  const value = String(url || '').toLowerCase();
-  return /^https?:\/\//.test(value) && !isInstagramPostLink(value) && /\.(png|jpe?g|webp|gif)(\?|$)/i.test(value);
-}
-
-function resolveForwardedPostLink(row = {}) {
-  const payload = row.raw_payload || {};
-  const msg = payload.message || {};
-  const shares = Array.isArray(msg.shares) ? msg.shares : [];
-  const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
-
-  const candidates = [
-    row.post_permalink,
-    row.postPermalink,
-    payload.post_permalink,
-    payload.postPermalink,
-    msg.permalink,
-    msg.link,
-    row.media_url,
-    row.mediaUrl,
-  ];
-
-  shares.forEach((share) => {
-    if (!share || typeof share !== 'object') return;
-    candidates.push(share.link, share.url, share.permalink);
-  });
-
-  attachments.forEach((att) => {
-    if (!att || typeof att !== 'object') return;
-    const p = att.payload || {};
-    candidates.push(p.url, p.link, p.permalink, p.external_url);
-  });
-
-  let fallback = '';
-  for (const raw of candidates) {
-    const url = String(raw || '').trim();
-    if (!/^https?:\/\//i.test(url)) continue;
-    const unwrapped = unwrapMetaRedirectUrl(url);
-    if (!fallback) fallback = unwrapped || url;
-    if (isInstagramPostLink(unwrapped) || isInstagramPostLink(url)) return unwrapped || url;
-  }
-  return fallback;
 }
 
 function businessOwnerEmail(business = {}) {
@@ -937,7 +860,6 @@ function normalizeConversation(row) {
     postId: row.postId || row.post_id || '',
     postPermalink: row.postPermalink || row.post_permalink || '',
     postImageUrl: row.postImageUrl || row.post_image_url || '',
-    postMediaType: (row.postMediaType || row.post_media_type || '').toLowerCase(),
     name,
     handle: row.handle || platformHandle({ ...row, customer_id: customerId, chat_id: chatId }),
     platform: platform || parsedPlatform,
@@ -991,9 +913,7 @@ function normalizeMessage(row, index) {
     text,
     mediaKind: media || '',
     mediaUrl: withMediaToken(row.media_url || row.mediaUrl || telegramUserMediaUrl(row)),
-    forwardLink: resolveForwardedPostLink(row),
     mediaFileId: row.media_file_id || getWhatsAppMediaId(row),
-    commentId: String(row.external_message_id || row.comment_id || row.raw_payload?.id || '').trim(),
     raw: row,
   };
 
@@ -1012,39 +932,6 @@ function normalizeMessage(row, index) {
   }
 
   return message;
-}
-
-function resolveCommentPostPreview(conv, messages = []) {
-  const base = {
-    postId: conv?.postId || '',
-    postPermalink: conv?.postPermalink || '',
-    postImageUrl: conv?.postImageUrl || '',
-    postMediaType: (conv?.postMediaType || '').toLowerCase(),
-  };
-
-  if (base.postImageUrl && (base.postPermalink || base.postId)) return base;
-
-  for (const m of messages || []) {
-    const raw = m?.raw || {};
-    const payload = raw.raw_payload || {};
-    const media = payload.media || {};
-    const postImageUrl = raw.post_image_url || raw.postImageUrl || payload.post_image_url || '';
-    const postPermalink = raw.post_permalink || raw.postPermalink || payload.post_permalink || '';
-    const postMediaType = String(raw.post_media_type || raw.postMediaType || payload.post_media_type || '').toLowerCase();
-    const postId = raw.post_id || raw.postId || payload.post_id || payload.media_id || media.id || '';
-    if (postImageUrl || postPermalink || postId || postMediaType) {
-      return { postId, postPermalink, postImageUrl, postMediaType };
-    }
-  }
-
-  return base;
-}
-
-function isVideoPostPreview(post = {}) {
-  const type = String(post?.postMediaType || '').toLowerCase();
-  if (type.includes('video') || type.includes('reel')) return true;
-  const url = String(post?.postImageUrl || '').toLowerCase();
-  return /\.(mp4|mov|m4v|webm)(\?|$)/i.test(url);
 }
 
 // ---------- Small helpers ----------
@@ -1189,7 +1076,13 @@ const WORKSPACE_TEXT = {
     backendUnavailableLocal: 'Generated locally because the backend endpoint is not available yet.',
     leadNew: 'New', leadQualified: 'Qualified', leadNegotiation: 'Negotiation', leadWon: 'Won', leadLost: 'Lost',
     leadAmount: 'Potential value', leadSource: 'Source', leadUpdated: 'Updated', leadEmpty: 'No leads in this stage yet.',
-    leadOpen: 'Open chat',
+    leadOpen: 'Open chat', leadPrice: 'Price', leadPricePlaceholder: 'Add price', leadPriceClear: 'Clear price',
+    clientsTitle: 'Clients table', clientsSubtitle: 'All customers with status, channel, price, and last message.', clientsEmpty: 'No clients yet.',
+    client: 'Client', lastMessage: 'Last message', status: 'Status',
+    operatorsTitle: 'Operators panel', operatorsSubtitle: 'Operator workspace for admin notes, client messages, and leads.',
+    textToAdmin: 'Text to admin', textToAdminPlaceholder: 'Write a note for the admin...', saveAdminNote: 'Save note',
+    adminNotes: 'Admin notes', noAdminNotes: 'No notes yet.', messagesFromClients: 'Messages from clients',
+    operatorRanking: 'Operators ranking', successfulDeals: 'Successful deals', operatorName: 'Operator', operatorPanel: 'Operator panel',
   },
   uz: {
     workspace: 'Ish maydoni', leadsTitle: 'Lidlar pipeline', promptsTitle: 'AI Prompt sozlamalari', profile: 'Profil', refresh: 'Yangilash', liveWorkspace: 'Live backend ish maydoni',
@@ -1220,7 +1113,13 @@ const WORKSPACE_TEXT = {
     backendUnavailableLocal: 'Backend endpoint hali ishlamagani uchun lokal yaratildi.',
     leadNew: 'Yangi', leadQualified: 'Saralangan', leadNegotiation: 'Muzokara', leadWon: 'Yutilgan', leadLost: 'Yo‘qotilgan',
     leadAmount: 'Potensial qiymat', leadSource: 'Manba', leadUpdated: 'Yangilangan', leadEmpty: 'Bu bosqichda lid yo‘q.',
-    leadOpen: 'Chatni ochish',
+    leadOpen: 'Chatni ochish', leadPrice: 'Narx', leadPricePlaceholder: 'Narx kiriting', leadPriceClear: 'Narxni o‘chirish',
+    clientsTitle: 'Mijozlar jadvali', clientsSubtitle: 'Barcha mijozlar: status, kanal, narx va oxirgi xabar.', clientsEmpty: 'Hali mijoz yo‘q.',
+    client: 'Mijoz', lastMessage: 'Oxirgi xabar', status: 'Status',
+    operatorsTitle: 'Operator paneli', operatorsSubtitle: 'Adminga yozish, mijoz xabarlari va lidlar uchun operator ish maydoni.',
+    textToAdmin: 'Adminga xabar', textToAdminPlaceholder: 'Admin uchun izoh yozing...', saveAdminNote: 'Izohni saqlash',
+    adminNotes: 'Admin izohlari', noAdminNotes: 'Hali izoh yo‘q.', messagesFromClients: 'Mijozlardan xabarlar',
+    operatorRanking: 'Operatorlar reytingi', successfulDeals: 'Muvaffaqiyatli bitimlar', operatorName: 'Operator', operatorPanel: 'Operator panel',
   },
   ru: {
     workspace: 'Рабочая область', leadsTitle: 'Воронка лидов', promptsTitle: 'Настройки AI Prompt', profile: 'Профиль', refresh: 'Обновить', liveWorkspace: 'Рабочая область backend',
@@ -1251,7 +1150,13 @@ const WORKSPACE_TEXT = {
     backendUnavailableLocal: 'Создано локально, потому что backend endpoint пока недоступен.',
     leadNew: 'Новые', leadQualified: 'Квалиф.', leadNegotiation: 'Переговоры', leadWon: 'Сделка', leadLost: 'Потеряно',
     leadAmount: 'Потенциал', leadSource: 'Источник', leadUpdated: 'Обновлено', leadEmpty: 'В этой стадии пока нет лидов.',
-    leadOpen: 'Открыть чат',
+    leadOpen: 'Открыть чат', leadPrice: 'Цена', leadPricePlaceholder: 'Добавить цену', leadPriceClear: 'Удалить цену',
+    clientsTitle: 'Таблица клиентов', clientsSubtitle: 'Все клиенты со статусом, каналом, ценой и последним сообщением.', clientsEmpty: 'Клиентов пока нет.',
+    client: 'Клиент', lastMessage: 'Последнее сообщение', status: 'Статус',
+    operatorsTitle: 'Панель оператора', operatorsSubtitle: 'Рабочая зона оператора: сообщение админу, клиенты и лиды.',
+    textToAdmin: 'Написать админу', textToAdminPlaceholder: 'Напишите заметку для админа...', saveAdminNote: 'Сохранить',
+    adminNotes: 'Заметки админу', noAdminNotes: 'Заметок пока нет.', messagesFromClients: 'Сообщения клиентов',
+    operatorRanking: 'Рейтинг операторов', successfulDeals: 'Успешные сделки', operatorName: 'Оператор', operatorPanel: 'Панель оператора',
   },
 };
 
@@ -1266,7 +1171,7 @@ function guessLeadStage(conv) {
   return 'qualified';
 }
 
-function buildLeads(conversations, leadStages) {
+function buildLeads(conversations, leadStages, leadPrices = {}) {
   const leads = (conversations || []).map(conv => {
     const stage = leadStages[conv.id] || guessLeadStage(conv);
     const inferredValue = Number(conv.kpis?.orders || 0) > 0
@@ -1282,6 +1187,7 @@ function buildLeads(conversations, leadStages) {
       unread: conv.unread,
       needsHuman: conv.needsHuman,
       amount: inferredValue,
+      price: leadPrices[conv.id] || '',
       updatedAt: conv.lastTime,
       source: conv.channelName || conv.channel || conv.platform,
       conversationId: conv.id,
@@ -1533,8 +1439,8 @@ function PromptGeneratorField({
   );
 }
 
-function LeadsBoard({ conversations, leadStages, setLeadStage, onOpenConversation, w }) {
-  const leads = useMemo(() => buildLeads(conversations, leadStages), [conversations, leadStages]);
+function LeadsBoard({ conversations, leadStages, leadPrices, setLeadStage, setLeadPrice, onOpenConversation, w }) {
+  const leads = useMemo(() => buildLeads(conversations, leadStages, leadPrices), [conversations, leadStages, leadPrices]);
   const stageNames = {
     new: w.leadNew,
     qualified: w.leadQualified,
@@ -1565,6 +1471,17 @@ function LeadsBoard({ conversations, leadStages, setLeadStage, onOpenConversatio
                     <span>{w.leadSource}: <b>{lead.source}</b></span>
                     <span>{w.leadUpdated}: <b>{lead.updatedAt}</b></span>
                   </div>
+                  <label className="lead-price-row">
+                    <span>{w.leadPrice}</span>
+                    <input
+                      value={lead.price}
+                      placeholder={w.leadPricePlaceholder}
+                      onChange={(e) => setLeadPrice(lead.id, e.target.value)}
+                    />
+                    {lead.price && (
+                      <button type="button" title={w.leadPriceClear} onClick={() => setLeadPrice(lead.id, '')}>x</button>
+                    )}
+                  </label>
                   <div className="lead-actions">
                     <select value={lead.stage} onChange={(e) => setLeadStage(lead.id, e.target.value)}>
                       {LEAD_STAGE_ORDER.map(option => (
@@ -1579,6 +1496,208 @@ function LeadsBoard({ conversations, leadStages, setLeadStage, onOpenConversatio
           </section>
         );
       })}
+    </div>
+  );
+}
+
+function ClientsTable({ conversations, leadStages, leadPrices, onOpenConversation, w }) {
+  const rows = useMemo(() => (conversations || []).map(conv => ({
+    ...conv,
+    stage: leadStages[conv.id] || guessLeadStage(conv),
+    price: leadPrices[conv.id] || '',
+  })), [conversations, leadStages, leadPrices]);
+
+  const stageNames = {
+    new: w.leadNew,
+    qualified: w.leadQualified,
+    negotiation: w.leadNegotiation,
+    won: w.leadWon,
+    lost: w.leadLost,
+  };
+
+  return (
+    <div className="clients-section">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.clientsTitle}</h3>
+          <p>{w.clientsSubtitle}</p>
+        </div>
+        <span>{rows.length}</span>
+      </div>
+      <div className="clients-table-wrap">
+        <table className="clients-table">
+          <thead>
+            <tr>
+              <th>{w.client}</th>
+              <th>{w.channel || 'Channel'}</th>
+              <th>{w.status}</th>
+              <th>{w.leadPrice}</th>
+              <th>{w.lastMessage}</th>
+              <th>{w.unreadMessages}</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {!rows.length && (
+              <tr>
+                <td colSpan="7" className="clients-empty">{w.clientsEmpty}</td>
+              </tr>
+            )}
+            {rows.map(row => (
+              <tr key={row.id}>
+                <td>
+                  <div className="client-cell">
+                    <Avatar data={row.avatar} size={32} platform={row.platform} />
+                    <span>
+                      <strong>{row.name}</strong>
+                      <em>{row.handle}</em>
+                    </span>
+                  </div>
+                </td>
+                <td>{row.channelName || row.platform}</td>
+                <td><span className={`stage-pill stage-${row.stage}`}>{stageNames[row.stage]}</span></td>
+                <td>{row.price || '—'}</td>
+                <td className="client-preview">{row.preview}</td>
+                <td>{row.unread || 0}</td>
+                <td><button className="table-action" onClick={() => onOpenConversation(row.id)}>{w.leadOpen}</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function OperatorsRanking({ conversations, leadStages, operatorDeals = {}, setOperatorDealCount, w }) {
+  const wonDeals = Object.values(leadStages || {}).filter(stage => stage === 'won').length;
+  const autoSignals = (conversations || []).filter(conv => /buyurtma|order|заказ|oldim|olaman|deal|purchase/i.test(`${conv.preview} ${conv.summary}`)).length;
+  const rows = [
+    { id: 'aziz', name: 'Aziz', deals: Number(operatorDeals.aziz ?? wonDeals ?? 0) },
+    { id: 'admin', name: 'Admin', deals: Number(operatorDeals.admin ?? 0) },
+    { id: 'ai', name: 'AI assistant', deals: Number(operatorDeals.ai ?? autoSignals ?? 0) },
+  ].sort((a, b) => b.deals - a.deals);
+
+  return (
+    <section className="operator-ranking">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.operatorRanking}</h3>
+          <p>{w.successfulDeals}</p>
+        </div>
+      </div>
+      <div className="operator-rank-list">
+        {rows.map((row, index) => (
+          <label className="operator-rank-row" key={row.id}>
+            <span className="rank-number">{index + 1}</span>
+            <strong>{row.name}</strong>
+            <input
+              type="number"
+              min="0"
+              value={row.deals}
+              onChange={(e) => setOperatorDealCount(row.id, e.target.value)}
+            />
+          </label>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function OperatorPanel({
+  conversations,
+  leadStages,
+  leadPrices,
+  operatorDeals,
+  adminNotes,
+  onAdminNote,
+  setOperatorDealCount,
+  setLeadStage,
+  setLeadPrice,
+  onOpenConversation,
+  w,
+}) {
+  const [draft, setDraft] = useState('');
+  const priorityRows = useMemo(() => [...(conversations || [])]
+    .sort((a, b) => Number(b.unread || 0) - Number(a.unread || 0))
+    .slice(0, 8), [conversations]);
+
+  const saveNote = () => {
+    const clean = draft.trim();
+    if (!clean) return;
+    onAdminNote(clean);
+    setDraft('');
+  };
+
+  return (
+    <div className="operator-panel">
+      <section className="operator-note-card">
+        <div className="section-card-head">
+          <div>
+            <h3>{w.textToAdmin}</h3>
+            <p>{w.operatorsSubtitle}</p>
+          </div>
+        </div>
+        <textarea value={draft} placeholder={w.textToAdminPlaceholder} onChange={(e) => setDraft(e.target.value)} rows={5} />
+        <div className="panel-actions">
+          <button disabled={!draft.trim()} onClick={saveNote}>{w.saveAdminNote}</button>
+        </div>
+        <div className="admin-note-list">
+          <strong>{w.adminNotes}</strong>
+          {!adminNotes.length && <span>{w.noAdminNotes}</span>}
+          {adminNotes.slice(0, 4).map(note => (
+            <p key={note.id}>{note.text}</p>
+          ))}
+        </div>
+      </section>
+
+      <section className="operator-messages-card">
+        <div className="section-card-head">
+          <div>
+            <h3>{w.messagesFromClients}</h3>
+            <p>{w.clientsSubtitle}</p>
+          </div>
+          <span>{priorityRows.length}</span>
+        </div>
+        <div className="operator-message-list">
+          {priorityRows.map(row => (
+            <button key={row.id} onClick={() => onOpenConversation(row.id)}>
+              <Avatar data={row.avatar} size={32} platform={row.platform} />
+              <span>
+                <strong>{row.name}</strong>
+                <em>{row.preview}</em>
+              </span>
+              <b>{row.unread || 0}</b>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <OperatorsRanking
+        conversations={conversations}
+        leadStages={leadStages}
+        operatorDeals={operatorDeals}
+        setOperatorDealCount={setOperatorDealCount}
+        w={w}
+      />
+
+      <section className="operator-leads-card">
+        <div className="section-card-head">
+          <div>
+            <h3>{w.leadsTitle}</h3>
+            <p>{w.clientsSubtitle}</p>
+          </div>
+        </div>
+        <LeadsBoard
+          conversations={conversations}
+          leadStages={leadStages}
+          leadPrices={leadPrices}
+          setLeadStage={setLeadStage}
+          setLeadPrice={setLeadPrice}
+          onOpenConversation={onOpenConversation}
+          w={w}
+        />
+      </section>
     </div>
   );
 }
@@ -1603,7 +1722,13 @@ function WorkspacePanel({
   onGeneratePrompt,
   generatorState,
   leadStages,
+  leadPrices,
+  operatorDeals,
+  adminNotes,
   onLeadStageChange,
+  onLeadPriceChange,
+  onOperatorDealChange,
+  onAdminNote,
   onOpenConversation,
   ownerEmail,
   onOwnerEmailSave,
@@ -1618,6 +1743,8 @@ function WorkspacePanel({
   const title = {
     insights: t.insights,
     leads: t.leads,
+    clients: t.clients || w.clientsTitle,
+    operators: t.operators || w.operatorsTitle,
     knowledge: t.knowledge,
     prompts: w.promptsTitle,
     accounts: t.accounts,
@@ -1645,7 +1772,35 @@ function WorkspacePanel({
         <LeadsBoard
           conversations={conversations}
           leadStages={leadStages}
+          leadPrices={leadPrices}
           setLeadStage={onLeadStageChange}
+          setLeadPrice={onLeadPriceChange}
+          onOpenConversation={onOpenConversation}
+          w={w}
+        />
+      )}
+
+      {view === 'clients' && (
+        <ClientsTable
+          conversations={conversations}
+          leadStages={leadStages}
+          leadPrices={leadPrices}
+          onOpenConversation={onOpenConversation}
+          w={w}
+        />
+      )}
+
+      {view === 'operators' && (
+        <OperatorPanel
+          conversations={conversations}
+          leadStages={leadStages}
+          leadPrices={leadPrices}
+          operatorDeals={operatorDeals}
+          adminNotes={adminNotes}
+          onAdminNote={onAdminNote}
+          setOperatorDealCount={onOperatorDealChange}
+          setLeadStage={onLeadStageChange}
+          setLeadPrice={onLeadPriceChange}
           onOpenConversation={onOpenConversation}
           w={w}
         />
@@ -1950,9 +2105,10 @@ function WorkspacePanel({
 // ---------- Rail ----------
 function Rail({ t, activeView, onView }) {
   const items = [
-    { id: 'inbox', icon: <I.Inbox />, label: t.inbox, dot: true },
-    { id: 'insights', icon: <I.Chart />, label: t.insights },
     { id: 'leads', icon: <I.Star />, label: t.leads || 'Leads' },
+    { id: 'inbox', icon: <I.Inbox />, label: t.inbox, dot: true },
+    { id: 'clients', icon: <I.Comment />, label: t.clients || 'Clients' },
+    { id: 'operators', icon: <I.Phone />, label: t.operators || 'Operators' },
     { id: 'knowledge', icon: <I.Book />, label: t.knowledge },
     { id: 'prompts', icon: <I.Sparkle />, label: t.prompts || 'AI Prompts' },
     { id: 'accounts', icon: <I.Layers />, label: t.accounts },
@@ -1962,12 +2118,23 @@ function Rail({ t, activeView, onView }) {
       {items.map(it => (
         <button key={it.id} className={`rail-btn ${activeView === it.id ? 'active' : ''}`} title={it.label} onClick={() => onView(it.id)}>
           {it.icon}
+          <span className="rail-label">{it.label}</span>
           {it.dot && <span className="dot" />}
         </button>
       ))}
       <div className="rail-spacer" />
-      <button className={`rail-btn ${activeView === 'settings' ? 'active' : ''}`} title={t.settings} onClick={() => onView('settings')}><I.Sett /></button>
-      <button className="rail-avatar" title="You" style={{ marginTop: 8 }} onClick={() => onView('profile')}>A</button>
+      <button className={`rail-btn ${activeView === 'settings' ? 'active' : ''}`} title={t.settings} onClick={() => onView('settings')}>
+        <I.Sett />
+        <span className="rail-label">{t.settings}</span>
+      </button>
+      <button className={`rail-btn ${activeView === 'profile' ? 'active' : ''}`} title={t.you || 'You'} onClick={() => onView('profile')}>
+        <span className="rail-avatar-mini">A</span>
+        <span className="rail-label">{t.you || 'You'}</span>
+      </button>
+      <button className={`rail-btn ${activeView === 'insights' ? 'active' : ''}`} title={t.insights} onClick={() => onView('insights')}>
+        <I.Chart />
+        <span className="rail-label">{t.insights}</span>
+      </button>
     </aside>
   );
 }
@@ -2136,7 +2303,7 @@ function VoiceWave({ count = 28 }) {
 }
 
 // ---------- Message bubble ----------
-function Message({ m, conv, t, onReplyComment }) {
+function Message({ m, conv, t }) {
   if (m.side === 'system' && m.type === 'handoff') {
     return (
       <div className="handoff-banner">
@@ -2149,12 +2316,6 @@ function Message({ m, conv, t, onReplyComment }) {
     );
   }
   const fromAi = m.from === 'ai';
-  const canReplyToComment = Boolean(
-    conv?.isCommentThread &&
-    m.side === 'inbound' &&
-    m.commentId &&
-    typeof onReplyComment === 'function'
-  );
   return (
     <div className={`msg-group ${m.side} ${fromAi ? 'from-ai' : ''}`}>
       {m.type === 'text' && (
@@ -2162,34 +2323,19 @@ function Message({ m, conv, t, onReplyComment }) {
       )}
       {m.type === 'media' && (
         <div className="bubble media">
-          {m.mediaKind === 'video' && isPlayableVideoUrl(m.mediaUrl) ? (
+          {m.mediaKind === 'video' && m.mediaUrl ? (
             <video className="media-video" src={m.mediaUrl} controls />
-          ) : m.mediaUrl && (m.mediaKind === 'photo' || isRenderableImageUrl(m.mediaUrl)) && !isInstagramPostLink(m.mediaUrl) ? (
+          ) : m.mediaUrl && (m.mediaKind === 'photo' || m.mediaUrl.match(/\.(png|jpe?g|webp|gif)(\?|$)/i)) ? (
             <img className="media-img" src={m.mediaUrl} alt={m.label || 'attachment'} />
-          ) : m.mediaKind === 'file' && m.mediaUrl && !isInstagramPostLink(m.mediaUrl) ? (
-            <a className="file-chip" href={m.mediaUrl} target="_blank" rel="noreferrer">
-              <I.Paperclip />
-              <span>{m.label || 'open file'}</span>
-            </a>
           ) : m.mediaKind === 'file' ? (
             <div className="file-chip">
               <I.Paperclip />
               <span>{m.label || 'document'}</span>
             </div>
-          ) : m.mediaUrl ? (
-            <a className="file-chip" href={m.mediaUrl} target="_blank" rel="noreferrer">
-              <I.Paperclip />
-              <span>{m.label || 'open media'}</span>
-            </a>
           ) : (
             <span className="ph" data-label={m.label || 'photo'} />
           )}
           {m.mediaCaption && <div className="cap">{m.mediaCaption}</div>}
-          {m.forwardLink && conv?.platform === 'instagram' && (
-            <a className="open-post-link" href={m.forwardLink} target="_blank" rel="noreferrer">
-              Open on Instagram
-            </a>
-          )}
           {!m.mediaUrl && m.mediaFileId && <div className="media-note">Media ID saved. Preview needs backend media download URL.</div>}
         </div>
       )}
@@ -2211,15 +2357,6 @@ function Message({ m, conv, t, onReplyComment }) {
         <span>{m.time}</span>
         {m.side === 'outbound' && <span className="check"><I.DoubleCheck /></span>}
       </div>
-      {canReplyToComment && (
-        <button
-          type="button"
-          className="msg-reply-btn"
-          onClick={() => onReplyComment(m)}
-        >
-          Reply
-        </button>
-      )}
     </div>
   );
 }
@@ -2272,9 +2409,6 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
   const scrollRef = useRef(null);
   const imageInputRef = useRef(null);
   const attachInputRef = useRef(null);
-  const composerRef = useRef(null);
-  const emojiPanelRef = useRef(null);
-  const emojiToggleRef = useRef(null);
   const recorderRef = useRef(null);
   const recordingChunksRef = useRef([]);
   const recordingStreamRef = useRef(null);
@@ -2285,25 +2419,13 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
   const [recording, setRecording] = useState(false);
   const [recordingStartedAt, setRecordingStartedAt] = useState(0);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
-  const [replyTarget, setReplyTarget] = useState(null);
   const voiceRecordingSupported = ['telegram', 'whatsapp'].includes(conv.platform);
 
   const sendDraft = async () => {
     const text = draft.trim();
     if (!text || sending) return;
     setDraft('');
-    const sent = await onSend(text, { replyToCommentId: replyTarget?.commentId || '' });
-    if (sent !== false) setReplyTarget(null);
-  };
-
-  const selectReplyTarget = (message) => {
-    if (!message?.commentId) return;
-    const preview = String(message.text || message.mediaCaption || '').trim();
-    setReplyTarget({
-      commentId: message.commentId,
-      preview: preview || '[comment]',
-    });
-    requestAnimationFrame(() => composerRef.current?.focus());
+    await onSend(text);
   };
 
   const uploadImage = async (event) => {
@@ -2316,7 +2438,6 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
 
   const insertEmoji = (emoji) => {
     setDraft(current => `${current}${current && !current.endsWith(' ') ? ' ' : ''}${emoji}`);
-    setEmojiOpen(false);
   };
 
   const stopRecordingTracks = () => {
@@ -2406,7 +2527,6 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
     const t2 = setTimeout(scroll, 400);
     const t3 = setTimeout(() => { el.style.scrollBehavior = 'smooth'; }, 500);
     setDraft('');
-    setReplyTarget(null);
     return () => {
       cancelAnimationFrame(r1); cancelAnimationFrame(r2);
       clearTimeout(t1); clearTimeout(t2); clearTimeout(t3);
@@ -2426,29 +2546,6 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
     if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
     stopRecordingTracks();
   }, []);
-
-  useEffect(() => {
-    if (!emojiOpen) return undefined;
-
-    const closeOnOutsideTouch = (event) => {
-      const target = event.target;
-      if (!target) return;
-      if (emojiPanelRef.current?.contains(target)) return;
-      if (emojiToggleRef.current?.contains(target)) return;
-      setEmojiOpen(false);
-    };
-
-    const closeOnEscape = (event) => {
-      if (event.key === 'Escape') setEmojiOpen(false);
-    };
-
-    document.addEventListener('pointerdown', closeOnOutsideTouch, true);
-    document.addEventListener('keydown', closeOnEscape);
-    return () => {
-      document.removeEventListener('pointerdown', closeOnOutsideTouch, true);
-      document.removeEventListener('keydown', closeOnEscape);
-    };
-  }, [emojiOpen]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -2473,7 +2570,6 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
     }
     return out;
   }, [messages]);
-  const commentPost = useMemo(() => resolveCommentPostPreview(conv, messages), [conv, messages]);
 
   let lastDay = null;
 
@@ -2481,38 +2577,13 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
     <section className="thread-col">
       <div className="messages" ref={scrollRef}>
         {threadLoading && <div className="empty">Loading conversation…</div>}
-        {conv.isCommentThread && (commentPost.postImageUrl || commentPost.postPermalink || commentPost.postId) && (
-          <div className="post-preview-card">
-            {commentPost.postImageUrl && isVideoPostPreview(commentPost) ? (
-              <video
-                className="post-preview-video"
-                src={commentPost.postImageUrl}
-                controls
-                playsInline
-                preload="metadata"
-              />
-            ) : commentPost.postImageUrl ? (
-              <img className="post-preview-image" src={commentPost.postImageUrl} alt="Instagram post" />
-            ) : (
-              <div className="post-preview-fallback">Instagram post</div>
-            )}
-            <div className="post-preview-meta">
-              <strong>Commented post</strong>
-              {commentPost.postPermalink ? (
-                <a href={commentPost.postPermalink} target="_blank" rel="noreferrer">Open on Instagram</a>
-              ) : (
-                <span>ID: {commentPost.postId || 'unknown'}</span>
-              )}
-            </div>
-          </div>
-        )}
         {groups.map(m => {
           const dayChanged = m.day && m.day !== lastDay;
           if (m.day) lastDay = m.day;
           return (
             <React.Fragment key={m.id}>
               {dayChanged && <div className="day-sep">{m.day}</div>}
-              <Message m={m} conv={conv} t={t} onReplyComment={selectReplyTarget} />
+              <Message m={m} conv={conv} t={t} />
             </React.Fragment>
           );
         })}
@@ -2536,12 +2607,6 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
 
       <div className="composer">
         <div className="composer-card">
-          {replyTarget?.commentId && (
-            <div className="reply-target-bar">
-              <span>Replying to: {replyTarget.preview.slice(0, 90)}</span>
-              <button type="button" onClick={() => setReplyTarget(null)}>Cancel</button>
-            </div>
-          )}
           <input
             ref={imageInputRef}
             type="file"
@@ -2557,7 +2622,6 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
             onChange={uploadImage}
           />
           <textarea
-            ref={composerRef}
             className="composer-input"
             placeholder={`${t.typing} ${conv.name.split(' ')[0]}…`}
             value={draft}
@@ -2581,14 +2645,7 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
             >
               <I.Mic />
             </button>
-            <button
-              ref={emojiToggleRef}
-              className={`tool-btn ${emojiOpen ? 'active' : ''}`}
-              title="Emoji"
-              onClick={() => setEmojiOpen(open => !open)}
-            >
-              <I.Smile />
-            </button>
+            <button className={`tool-btn ${emojiOpen ? 'active' : ''}`} title="Emoji" onClick={() => setEmojiOpen(open => !open)}><I.Smile /></button>
             <div className="grow" />
             <span style={{ fontSize: 11, color: 'var(--muted)', marginRight: 6 }}>{t.kbdHint}</span>
             <button className={`send ${draft.trim() && !sending ? '' : 'disabled'}`} onClick={sendDraft}>
@@ -2604,7 +2661,7 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
             </div>
           )}
           {emojiOpen && (
-            <div ref={emojiPanelRef} className="emoji-panel">
+            <div className="emoji-panel">
               {EMOJI_SETS.map(group => (
                 <div className="emoji-group" key={group.label}>
                   <div className="emoji-label">{group.label}</div>
@@ -2631,9 +2688,8 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
 }
 
 // ---------- Detail column ----------
-function DetailColumn({ conv, t, stats, onDelete, messages = [] }) {
+function DetailColumn({ conv, t, stats, onDelete }) {
   if (!conv) return <aside className="detail-col" />;
-  const commentPost = resolveCommentPostPreview(conv, messages);
   return (
     <aside className="detail-col">
       <div className="cust-card">
@@ -2660,31 +2716,6 @@ function DetailColumn({ conv, t, stats, onDelete, messages = [] }) {
 
       <div className="detail-section">
         <h3>{t.channel}</h3>
-        {conv.isCommentThread && (commentPost.postImageUrl || commentPost.postPermalink || commentPost.postId) && (
-          <div className="detail-post-card">
-            {commentPost.postImageUrl && isVideoPostPreview(commentPost) ? (
-              <video
-                className="detail-post-video"
-                src={commentPost.postImageUrl}
-                controls
-                playsInline
-                preload="metadata"
-              />
-            ) : commentPost.postImageUrl ? (
-              <img className="detail-post-image" src={commentPost.postImageUrl} alt="Instagram post" />
-            ) : (
-              <div className="detail-post-fallback">Instagram post</div>
-            )}
-            <div className="detail-post-meta">
-              <span>Source post</span>
-              {commentPost.postPermalink ? (
-                <a href={commentPost.postPermalink} target="_blank" rel="noreferrer">Open on Instagram</a>
-              ) : (
-                <small>ID: {commentPost.postId || 'unknown'}</small>
-              )}
-            </div>
-          </div>
-        )}
         <div className="channel-facts">
           <span>{t.platform} <b>{conv.platform}</b></span>
           <span>{t.channel} <b>{conv.channelName || conv.channel || t.inbox}</b></span>
@@ -2755,7 +2786,18 @@ function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onT
   const [accountOpen, setAccountOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
-  const workspaceNames = { inbox: t.inbox, insights: t.insights, knowledge: t.knowledge, prompts: w.promptsTitle, accounts: t.accounts, settings: t.settings, profile: w.profile };
+  const workspaceNames = {
+    inbox: t.inbox,
+    insights: t.insights,
+    leads: t.leads || w.leadsTitle,
+    clients: t.clients || w.clientsTitle,
+    operators: t.operators || w.operatorsTitle,
+    knowledge: t.knowledge,
+    prompts: w.promptsTitle,
+    accounts: t.accounts,
+    settings: t.settings,
+    profile: w.profile,
+  };
   return (
     <header className="topbar">
       <div className="brand">
@@ -2853,6 +2895,9 @@ function App({ lang, setLang, onSignOut }) {
   const [promptSaving, setPromptSaving] = useState(false);
   const [promptGeneratorState, setPromptGeneratorState] = useState({});
   const [leadStages, setLeadStages] = useState(() => readStoredObject(LEAD_STAGES_STORAGE_KEY));
+  const [leadPrices, setLeadPrices] = useState(() => readStoredObject(LEAD_PRICES_STORAGE_KEY));
+  const [operatorDeals, setOperatorDeals] = useState(() => readStoredObject(OPERATOR_DEALS_STORAGE_KEY));
+  const [operatorAdminNotes, setOperatorAdminNotes] = useState(() => readStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY));
   const [aiOverrides, setAiOverrides] = useState(() => readStoredObject(AI_OVERRIDE_STORAGE_KEY));
   const [deletedConversations, setDeletedConversations] = useState(() => readStoredObject(DELETED_CONVERSATIONS_STORAGE_KEY));
   const selectedIdRef = useRef(selectedId);
@@ -3142,14 +3187,11 @@ function App({ lang, setLang, onSignOut }) {
     }
   };
 
-  const sendLiveMessage = async (conversation, text, options = {}) => {
-    const payload = {
+  const sendLiveMessage = async (conversation, text) => {
+    const result = await API.postJson('/api/v2/send-message', {
       conversation_id: conversation.apiId || conversation.id,
       text,
-    };
-    if (options.replyToCommentId) payload.reply_to_comment_id = options.replyToCommentId;
-
-    const result = await API.postJson('/api/v2/send-message', payload);
+    });
     const meta = result.meta || result.data || {};
     if (result.status !== 'ok') {
       throw new Error(apiErrorMessage(result, 200));
@@ -3249,8 +3291,8 @@ function App({ lang, setLang, onSignOut }) {
     }
   };
 
-  const sendMessage = async (text, options = {}) => {
-    if (!conv) return false;
+  const sendMessage = async (text) => {
+    if (!conv) return;
 
     if (!liveMode) {
       const localMessage = {
@@ -3261,20 +3303,18 @@ function App({ lang, setLang, onSignOut }) {
         text,
       };
       setThreads(prev => ({ ...prev, [conv.id]: [...(prev[conv.id] || []), localMessage] }));
-      return true;
+      return;
     }
 
     setSending(true);
     try {
-      await sendLiveMessage(conv, text, options);
+      await sendLiveMessage(conv, text);
       await loadThread(conv.id);
       await loadConversations();
       showToast('Message sent');
-      return true;
     } catch (e) {
       setApiError(e.message);
       showToast(e.message);
-      return false;
     } finally {
       setSending(false);
     }
@@ -3493,7 +3533,18 @@ function App({ lang, setLang, onSignOut }) {
 
   const changeView = (view) => {
     setActiveView(view);
-    const names = { inbox: t.inbox, insights: t.insights, leads: t.leads || 'Leads', knowledge: t.knowledge, prompts: 'AI Prompt Settings', accounts: t.accounts, settings: t.settings, profile: 'Profile' };
+    const names = {
+      inbox: t.inbox,
+      insights: t.insights,
+      leads: t.leads || 'Leads',
+      clients: t.clients || 'Clients',
+      operators: t.operators || 'Operators',
+      knowledge: t.knowledge,
+      prompts: 'AI Prompt Settings',
+      accounts: t.accounts,
+      settings: t.settings,
+      profile: 'Profile',
+    };
     showToast(`${names[view] || view} selected`);
   };
 
@@ -3505,6 +3556,39 @@ function App({ lang, setLang, onSignOut }) {
       return next;
     });
     showToast(`Lead stage updated to ${stage}`);
+  };
+
+  const setLeadPrice = (conversationId, price) => {
+    setLeadPrices(prev => {
+      const next = { ...prev };
+      const clean = String(price || '').trim();
+      if (clean) next[conversationId] = clean;
+      else delete next[conversationId];
+      writeStoredObject(LEAD_PRICES_STORAGE_KEY, next);
+      return next;
+    });
+  };
+
+  const setOperatorDealCount = (operatorId, value) => {
+    setOperatorDeals(prev => {
+      const next = { ...prev, [operatorId]: Math.max(0, Number(value || 0)) };
+      writeStoredObject(OPERATOR_DEALS_STORAGE_KEY, next);
+      return next;
+    });
+  };
+
+  const addOperatorAdminNote = (text) => {
+    setOperatorAdminNotes(prev => {
+      const next = {
+        items: [
+          { id: `note-${Date.now()}`, text, createdAt: new Date().toISOString() },
+          ...((prev.items || []).slice(0, 11)),
+        ],
+      };
+      writeStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY, next);
+      return next;
+    });
+    showToast('Admin note saved');
   };
 
   const selectConversation = (conversationId) => {
@@ -3585,14 +3669,20 @@ function App({ lang, setLang, onSignOut }) {
             onGeneratePrompt={generatePromptSuggestion}
             generatorState={promptGeneratorState}
             leadStages={leadStages}
+            leadPrices={leadPrices}
+            operatorDeals={operatorDeals}
+            adminNotes={operatorAdminNotes.items || []}
             onLeadStageChange={setLeadStage}
+            onLeadPriceChange={setLeadPrice}
+            onOperatorDealChange={setOperatorDealCount}
+            onAdminNote={addOperatorAdminNote}
             onOpenConversation={selectConversation}
             ownerEmail={ownerEmail}
             onOwnerEmailSave={saveOwnerEmailScope}
             onSignOut={onSignOut}
           />
         )}
-        {activeView === 'inbox' && <DetailColumn conv={conv} t={t} stats={stats} onDelete={deleteConversation} messages={messages} />}
+        {activeView === 'inbox' && <DetailColumn conv={conv} t={t} stats={stats} onDelete={deleteConversation} />}
       </div>
       <Toast message={toast} />
 
