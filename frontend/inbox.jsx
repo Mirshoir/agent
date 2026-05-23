@@ -459,7 +459,7 @@ function apiHeaders() {
   const savedSecret = dashboardSecret();
   if (savedSecret && savedSecret !== 'YOUR_DASHBOARD_SECRET') headers['x-dashboard-secret'] = savedSecret;
   const auth = readAuthSession();
-  if (!savedSecret && auth?.token) headers.Authorization = `Bearer ${auth.token}`;
+  if (auth?.token) headers.Authorization = `Bearer ${auth.token}`;
   const ownerEmail = resolvedOwnerEmail();
   if (ownerEmail) headers['x-owner-email'] = ownerEmail;
   return headers;
@@ -4733,12 +4733,9 @@ function Root() {
   const [showDashboard, setShowDashboard] = useState(() => window.location.hash === DASHBOARD_HASH || urlParams.get('dashboard') === '1');
   const [currentUser, setCurrentUser] = useState(() => readAuthSession() || null);
   const [signedIn, setSignedIn] = useState(() => {
-    const ownerFromUrl = ownerEmailFromUrl();
-    if (ownerFromUrl && dashboardSecret()) {
-      saveAuthSession(ownerFromUrl, { isAdmin: true, role: 'admin' });
-      return true;
-    }
-    return !!readAuthSession();
+    const auth = readAuthSession();
+    if (auth?.token) return true;
+    return !!dashboardSecret();
   });
 
   useEffect(() => {
