@@ -73,6 +73,40 @@ def normalize_text(value):
     return str(value or "").strip()
 
 
+def get_business_channels(business_id: str, aliases: list[str]):
+    business_id = normalize_text(business_id)
+    aliases = [normalize_text(a).lower() for a in (aliases or []) if normalize_text(a)]
+    if not business_id or not aliases:
+        return []
+    try:
+        rows = (
+            supabase.table("business_channels")
+            .select("*")
+            .eq("business_id", business_id)
+            .in_("platform", aliases)
+            .eq("is_active", True)
+            .order("created_at", desc=True)
+            .execute()
+            .data
+            or []
+        )
+        return rows
+    except Exception:
+        return []
+
+
+def get_telegram_bot_token_for_business(business: dict = None):
+    business_id = normalize_text((business or {}).get("id"))
+    if business_id:
+        rows = get_business_channels(business_id, ["telegram", "telegram_bot"])
+        for row in rows:
+            cfg = dict(row.get("config") or {})
+            token = normalize_text(cfg.get("bot_token") or cfg.get("telegram_bot_token") or cfg.get("access_token"))
+            if token:
+                return token
+    return TELEGRAM_BOT_TOKEN
+
+
 def wants_catalog(text: str) -> bool:
     text = normalize_text(text).lower()
     keywords = [
@@ -304,18 +338,19 @@ def safe_json(response):
         return {"text": getattr(response, "text", "")}
 
 
-def get_telegram_bot_id():
+def get_telegram_bot_id(business: dict = None):
     global TELEGRAM_BOT_ID
 
     if TELEGRAM_BOT_ID:
         return TELEGRAM_BOT_ID
 
-    if not TELEGRAM_BOT_TOKEN:
+    token = get_telegram_bot_token_for_business(business)
+    if not token:
         return None
 
     try:
         response = requests.get(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe",
+            f"https://api.telegram.org/bot{token}/getMe",
             timeout=15,
         )
         data = safe_json(response)
@@ -328,9 +363,10 @@ def get_telegram_bot_id():
     return None
 
 
-def get_group_admin_ids(chat_id, ttl_seconds=300):
+def get_group_admin_ids(chat_id, ttl_seconds=300, business: dict = None):
     chat_id = str(chat_id or "")
-    if not chat_id or not TELEGRAM_BOT_TOKEN:
+    token = get_telegram_bot_token_for_business(business)
+    if not chat_id or not token:
         return set()
 
     now = time.time()
@@ -340,7 +376,7 @@ def get_group_admin_ids(chat_id, ttl_seconds=300):
 
     try:
         response = requests.get(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getChatAdministrators",
+            f"https://api.telegram.org/bot{token}/getChatAdministrators",
             params={"chat_id": chat_id},
             timeout=20,
         )
@@ -359,20 +395,20 @@ def get_group_admin_ids(chat_id, ttl_seconds=300):
         return set()
 
 
-def is_group_admin(chat_id, user_id):
+def is_group_admin(chat_id, user_id, business: dict = None):
     uid = str(user_id or "")
     if not uid:
         return False
-    return uid in get_group_admin_ids(chat_id)
+    return uid in get_group_admin_ids(chat_id, business=business)
 
 
-def is_own_or_any_bot_user(user):
+def is_own_or_any_bot_user(user, business: dict = None):
     if not user:
         return False
 
     user_id = str(user.get("id") or "")
     username = normalize_text(user.get("username")).lower().replace("@", "")
-    bot_id = get_telegram_bot_id()
+    bot_id = get_telegram_bot_id(business)
 
     return (
         bool(user.get("is_bot"))
@@ -381,14 +417,14 @@ def is_own_or_any_bot_user(user):
     )
 
 
-def is_telegram_bot_authored_message(message):
+def is_telegram_bot_authored_message(message, business: dict = None):
     if not message:
         return True
 
-    if is_own_or_any_bot_user(message.get("from") or {}):
+    if is_own_or_any_bot_user(message.get("from") or {}, business):
         return True
 
-    if is_own_or_any_bot_user(message.get("via_bot") or {}):
+    if is_own_or_any_bot_user(message.get("via_bot") or {}, business):
         return True
 
     # Posts from channels/anonymous admins do not represent a customer DM.
@@ -1034,9 +1070,10 @@ def save_telegram_message(
         log("Could not save Telegram message", str(exc))
 
 
-def send_telegram_bot_message(chat_id, text, reply_to_message_id=None):
-    if not TELEGRAM_BOT_TOKEN:
-        log("Missing TELEGRAM_BOT_TOKEN")
+def send_telegram_bot_message(chat_id, text, reply_to_message_id=None, business: dict = None):
+    token = get_telegram_bot_token_for_business(business)
+    if not token:
+        log("Missing Telegram bot token")
         return None
 
     payload = {
@@ -1049,7 +1086,7 @@ def send_telegram_bot_message(chat_id, text, reply_to_message_id=None):
         payload["reply_to_message_id"] = reply_to_message_id
 
     response = requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        f"https://api.telegram.org/bot{token}/sendMessage",
         json=payload,
         timeout=30,
     )
@@ -1059,7 +1096,8 @@ def send_telegram_bot_message(chat_id, text, reply_to_message_id=None):
 
 
 def send_telegram_catalog_button(chat_id, business, text="", reply_to_message_id=None):
-    if not TELEGRAM_BOT_TOKEN:
+    token = get_telegram_bot_token_for_business(business)
+    if not token:
         return None
 
     catalog_link = get_catalog_link(business)
@@ -1084,7 +1122,7 @@ def send_telegram_catalog_button(chat_id, business, text="", reply_to_message_id
         payload["reply_to_message_id"] = reply_to_message_id
 
     response = requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        f"https://api.telegram.org/bot{token}/sendMessage",
         json=payload,
         timeout=30,
     )
@@ -1092,8 +1130,9 @@ def send_telegram_catalog_button(chat_id, business, text="", reply_to_message_id
     return response
 
 
-def send_telegram_photo(chat_id, photo_file_id, caption="", reply_to_message_id=None):
-    if not TELEGRAM_BOT_TOKEN:
+def send_telegram_photo(chat_id, photo_file_id, caption="", reply_to_message_id=None, business: dict = None):
+    token = get_telegram_bot_token_for_business(business)
+    if not token:
         return None
 
     payload = {
@@ -1108,7 +1147,7 @@ def send_telegram_photo(chat_id, photo_file_id, caption="", reply_to_message_id=
         payload["reply_to_message_id"] = reply_to_message_id
 
     response = requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+        f"https://api.telegram.org/bot{token}/sendPhoto",
         json=payload,
         timeout=30,
     )
@@ -1116,8 +1155,9 @@ def send_telegram_photo(chat_id, photo_file_id, caption="", reply_to_message_id=
     return response
 
 
-def send_telegram_video(chat_id, video_file_id, caption="", reply_to_message_id=None):
-    if not TELEGRAM_BOT_TOKEN:
+def send_telegram_video(chat_id, video_file_id, caption="", reply_to_message_id=None, business: dict = None):
+    token = get_telegram_bot_token_for_business(business)
+    if not token:
         return None
 
     payload = {
@@ -1132,7 +1172,7 @@ def send_telegram_video(chat_id, video_file_id, caption="", reply_to_message_id=
         payload["reply_to_message_id"] = reply_to_message_id
 
     response = requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo",
+        f"https://api.telegram.org/bot{token}/sendVideo",
         json=payload,
         timeout=30,
     )
@@ -1140,8 +1180,9 @@ def send_telegram_video(chat_id, video_file_id, caption="", reply_to_message_id=
     return response
 
 
-def send_telegram_voice(chat_id, voice_file_id, reply_to_message_id=None):
-    if not TELEGRAM_BOT_TOKEN:
+def send_telegram_voice(chat_id, voice_file_id, reply_to_message_id=None, business: dict = None):
+    token = get_telegram_bot_token_for_business(business)
+    if not token:
         return None
 
     payload = {
@@ -1153,7 +1194,7 @@ def send_telegram_voice(chat_id, voice_file_id, reply_to_message_id=None):
         payload["reply_to_message_id"] = reply_to_message_id
 
     response = requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVoice",
+        f"https://api.telegram.org/bot{token}/sendVoice",
         json=payload,
         timeout=30,
     )
@@ -1161,13 +1202,14 @@ def send_telegram_voice(chat_id, voice_file_id, reply_to_message_id=None):
     return response
 
 
-def get_file_url(file_id):
-    if not TELEGRAM_BOT_TOKEN or not file_id:
+def get_file_url(file_id, business: dict = None):
+    token = get_telegram_bot_token_for_business(business)
+    if not token or not file_id:
         return None
 
     try:
         response = requests.get(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
+            f"https://api.telegram.org/bot{token}/getFile",
             params={"file_id": file_id},
             timeout=30,
         )
@@ -1175,7 +1217,7 @@ def get_file_url(file_id):
         if response.ok:
             file_path = response.json().get("result", {}).get("file_path")
             if file_path:
-                return f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+                return f"https://api.telegram.org/file/bot{token}/{file_path}"
 
     except Exception as exc:
         log("Could not get Telegram file URL", str(exc))
@@ -1360,9 +1402,6 @@ async def telegram_webhook(request: Request):
         if not message:
             return JSONResponse({"status": "ignored"})
 
-        if is_telegram_bot_authored_message(message):
-            return JSONResponse({"status": "ignored_bot"})
-
         chat = message.get("chat", {})
         user = message.get("from", {})
 
@@ -1382,6 +1421,8 @@ async def telegram_webhook(request: Request):
         business = get_active_business()
         if not business:
             return JSONResponse({"status": "no_business"})
+        if is_telegram_bot_authored_message(message, business):
+            return JSONResponse({"status": "ignored_bot"})
 
         if is_group_chat and not should_reply_in_group(message):
                 return JSONResponse({"status": "ignored_group_message"})
@@ -1415,7 +1456,7 @@ async def telegram_webhook(request: Request):
             )
 
             # Never auto-reply to group admins.
-            if is_group_chat and is_group_admin(chat_id, sender_id):
+            if is_group_chat and is_group_admin(chat_id, sender_id, business):
                 return JSONResponse({"status": "ignored_group_admin_message"})
 
             # If this message is in an admin-handled reply context, skip bot reply.
@@ -1425,7 +1466,7 @@ async def telegram_webhook(request: Request):
                 reply_from_id = reply_from.get("id")
                 if reply_to.get("sender_chat"):
                     return JSONResponse({"status": "ignored_admin_thread"})
-                if reply_from_id and is_group_admin(chat_id, reply_from_id):
+                if reply_from_id and is_group_admin(chat_id, reply_from_id, business):
                     return JSONResponse({"status": "ignored_admin_thread"})
 
             if not is_chat_ai_enabled("telegram", channel, customer_id, business.get("id")):
@@ -1456,6 +1497,7 @@ async def telegram_webhook(request: Request):
                     chat_id=chat_id,
                     text=reply,
                     reply_to_message_id=message_id if chat_type in ["group", "supergroup"] else None,
+                    business=business,
                 )
                 saved_reply_text = reply
 
@@ -1488,7 +1530,7 @@ async def telegram_webhook(request: Request):
                 customer_name=customer_name,
                 chat_id=chat_id,
                 media_type="photo",
-                media_url=get_file_url(file_id),
+                media_url=get_file_url(file_id, business),
                 media_file_id=file_id,
             )
 
@@ -1508,7 +1550,7 @@ async def telegram_webhook(request: Request):
                 customer_name=customer_name,
                 chat_id=chat_id,
                 media_type="video",
-                media_url=get_file_url(file_id),
+                media_url=get_file_url(file_id, business),
                 media_file_id=file_id,
             )
 
@@ -1528,7 +1570,7 @@ async def telegram_webhook(request: Request):
                 customer_name=customer_name,
                 chat_id=chat_id,
                 media_type="voice",
-                media_url=get_file_url(file_id),
+                media_url=get_file_url(file_id, business),
                 media_file_id=file_id,
             )
 
@@ -1548,7 +1590,7 @@ async def telegram_webhook(request: Request):
                 customer_name=customer_name,
                 chat_id=chat_id,
                 media_type="file",
-                media_url=get_file_url(file_id),
+                media_url=get_file_url(file_id, business),
                 media_file_id=file_id,
             )
 
