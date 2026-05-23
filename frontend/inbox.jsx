@@ -18,13 +18,14 @@ if (urlParams.get('clear_auth')) {
   window.localStorage.removeItem('instaagent_dashboard_secret');
   window.localStorage.removeItem('instaagent_dashboard_auth');
   window.localStorage.removeItem('instaagent_owner_email');
+  window.localStorage.removeItem('instaagent_api_base');
 }
 const API_BASE = (
   urlParams.get('api') ||
-  (IS_LOCALHOST ? 'http://localhost:8000' : '') ||
+  window.localStorage.getItem('instaagent_api_base') ||
   ENV_API_BASE ||
   window.INSTAAGENT_API_BASE ||
-  window.localStorage.getItem('instaagent_api_base')
+  (IS_LOCALHOST ? 'http://localhost:8000' : '')
 ).replace(/\/$/, '');
 
 const DASHBOARD_SECRET =
