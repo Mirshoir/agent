@@ -423,7 +423,7 @@ window.getThread = (id) => window.THREADS[id] || DEFAULT_THREAD;
 window.STRINGS = {
   en: {
     appName: 'Insta', appNameAccent: 'agent',
-    inbox: 'Inbox', insights: 'Insights', leads: 'Leads', clients: 'Clients', operators: 'Operators', knowledge: 'Knowledge', prompts: 'AI Prompts', accounts: 'Accounts', settings: 'Settings',
+    inbox: 'Inbox', insights: 'Insights', leads: 'Leads', knowledge: 'Knowledge', prompts: 'AI Prompts', accounts: 'Accounts', settings: 'Settings',
     search: 'Search conversations…',
     all: 'All', needs: 'Needs you', unread: 'Unread', aiHandled: 'Handled by AI', closed: 'Closed',
     instagram: 'Instagram', telegram: 'Telegram', whatsapp: 'WhatsApp',
@@ -436,10 +436,13 @@ window.STRINGS = {
     note: 'Loves natural tones. Prefers cash on delivery. Birthday in October.',
     takeover: 'Take over chat', handoffTitle: 'Needs a human',
     aiResume: 'Let AI resume replying',
+    refresh: 'Refresh', syncing: 'Syncing', liveBackend: 'Live backend · auto-sync', mockFallback: 'Mock fallback',
+    dashboardSecret: 'Dashboard secret', connect: 'Connect', noConversations: 'No conversations match.', you: 'You',
+    since: 'Since', channel: 'Channel', platform: 'Platform', customer: 'Customer', chat: 'Chat', sendVia: 'Send via', deleteChat: 'Delete chat',
   },
   uz: {
     appName: 'Insta', appNameAccent: 'agent',
-    inbox: 'Pochta', insights: 'Statistika', leads: 'Lidlar', clients: 'Mijozlar', operators: 'Operatorlar', knowledge: 'Bilim', prompts: 'AI promptlar', accounts: 'Akkauntlar', settings: 'Sozlash',
+    inbox: 'Pochta', insights: 'Statistika', leads: 'Lidlar', knowledge: 'Bilim', prompts: 'AI promptlar', accounts: 'Akkauntlar', settings: 'Sozlash',
     search: 'Suhbatlar ichidan izlash\u2026',
     all: 'Hammasi', needs: 'Sizga kerak', unread: 'O\u02bbqilmagan', aiHandled: 'AI javob berdi', closed: 'Yopilgan',
     instagram: 'Instagram', telegram: 'Telegram', whatsapp: 'WhatsApp',
@@ -452,10 +455,13 @@ window.STRINGS = {
     note: 'Tabiiy ranglarni yaxshi ko\u02bbradi. Yetkazib berishda to\u02bblaydi. Tug\u02bbilgan kuni \u2014 oktyabr.',
     takeover: 'Suhbatni o\u02bbz qo\u02bbliga olish', handoffTitle: 'Insonga muhtoj',
     aiResume: 'AI javob berishni davom ettirsin',
+    refresh: 'Yangilash', syncing: 'Sinxronlanmoqda', liveBackend: 'Live backend · auto-sync', mockFallback: 'Mock rejim',
+    dashboardSecret: 'Dashboard siri', connect: 'Ulash', noConversations: 'Mos suhbat topilmadi.', you: 'Siz',
+    since: 'Boshlangan', channel: 'Kanal', platform: 'Platforma', customer: 'Mijoz', chat: 'Chat', sendVia: 'Yuborish yo‘li', deleteChat: 'Chatni o‘chirish',
   },
   ru: {
     appName: 'Insta', appNameAccent: 'agent',
-    inbox: 'Входящие', insights: 'Аналитика', leads: 'Лиды', clients: 'Клиенты', operators: 'Операторы', knowledge: 'База знаний', prompts: 'AI промпты', accounts: 'Аккаунты', settings: 'Настройки',
+    inbox: 'Входящие', insights: 'Аналитика', leads: 'Лиды', knowledge: 'База знаний', prompts: 'AI промпты', accounts: 'Аккаунты', settings: 'Настройки',
     search: 'Поиск по диалогам\u2026',
     all: 'Все', needs: 'Нужны вы', unread: 'Непрочит.', aiHandled: 'ИИ ответил', closed: 'Закрыты',
     instagram: 'Instagram', telegram: 'Telegram', whatsapp: 'WhatsApp',
@@ -468,5 +474,8 @@ window.STRINGS = {
     note: 'Любит природные оттенки. Платит при доставке. День рождения в октябре.',
     takeover: 'Взять диалог', handoffTitle: 'Нужен человек',
     aiResume: 'Передать обратно ИИ',
+    refresh: 'Обновить', syncing: 'Синхронизация', liveBackend: 'Live backend · авто-синхр.', mockFallback: 'Демо-режим',
+    dashboardSecret: 'Секрет dashboard', connect: 'Подключить', noConversations: 'Подходящих диалогов нет.', you: 'Вы',
+    since: 'С', channel: 'Канал', platform: 'Платформа', customer: 'Клиент', chat: 'Чат', sendVia: 'Отправка через', deleteChat: 'Удалить чат',
   },
 };
