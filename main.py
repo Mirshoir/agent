@@ -273,6 +273,12 @@ class DashboardLoginRequest(BaseModel):
     password: str
 
 
+class OperatorCreateRequest(BaseModel):
+    business_id: str
+    login_id: str
+    password: str
+
+
 # ============================================================================
 # HELPERS - GENERAL
 # ============================================================================
@@ -565,6 +571,21 @@ def list_user_business_ids(email: str) -> list[str]:
     return [normalize_id(row.get("business_id")) for row in rows if normalize_id(row.get("business_id"))]
 
 
+def get_user_business_role(email: str, business_id: str = "") -> str:
+    email = normalize_email(email)
+    business_id = normalize_id(business_id)
+    if not email:
+        return ""
+    try:
+        query = supabase.table("business_users").select("role").eq("user_email", email)
+        if business_id:
+            query = query.eq("business_id", business_id)
+        rows = query.limit(1).execute().data or []
+        return normalize_id(rows[0].get("role")) if rows else ""
+    except Exception:
+        return ""
+
+
 def parse_auth_header(authorization: str) -> str:
     value = normalize_id(authorization)
     if value.lower().startswith("bearer "):
@@ -581,11 +602,11 @@ def resolve_dashboard_access(authorization: str = "", x_dashboard_secret: str = 
         email = normalize_email(payload.get("email"))
         is_admin = bool(payload.get("is_admin"))
         business_ids = [] if is_admin else list_user_business_ids(email)
-        return {"email": email, "is_admin": is_admin, "business_ids": business_ids}
+        return {"email": email, "is_admin": is_admin, "business_ids": business_ids, "role": "admin" if is_admin else get_user_business_role(email)}
 
     # Backward-compatible admin/system path
     if not require_dashboard_secret(x_dashboard_secret):
-        return {"email": "system", "is_admin": True, "business_ids": []}
+        return {"email": "system", "is_admin": True, "business_ids": [], "role": "admin"}
     return None
 
 
@@ -1405,6 +1426,47 @@ def get_message_count(platform=None, business_ids=None):
         return result.count or 0
     except Exception:
         return 0
+
+
+def get_workspace_state(business_id: str):
+    business_id = normalize_id(business_id)
+    if not business_id:
+        return {}
+    try:
+        rows = (
+            supabase.table("dashboard_workspace_state")
+            .select("state_key,state_value")
+            .eq("business_id", business_id)
+            .execute()
+            .data
+            or []
+        )
+        payload = {}
+        for row in rows:
+            key = normalize_id(row.get("state_key"))
+            if key:
+                payload[key] = row.get("state_value")
+        return payload
+    except Exception as e:
+        log("Could not load workspace state", str(e))
+        return {}
+
+
+def upsert_workspace_state(business_id: str, state_key: str, state_value, updated_by: str = ""):
+    business_id = normalize_id(business_id)
+    state_key = normalize_id(state_key)
+    if not business_id or not state_key:
+        return
+    data = {
+        "business_id": business_id,
+        "state_key": state_key,
+        "state_value": state_value if isinstance(state_value, (dict, list, str, int, float, bool)) or state_value is None else {},
+        "updated_by": normalize_email(updated_by),
+    }
+    supabase.table("dashboard_workspace_state").upsert(
+        data,
+        on_conflict="business_id,state_key",
+    ).execute()
 
 
 # ============================================================================
@@ -3839,6 +3901,7 @@ async def dashboard_login(payload: DashboardLoginRequest):
                 )
 
         is_admin = bool(ADMIN_EMAIL and email == normalize_email(ADMIN_EMAIL))
+        role = "admin" if is_admin else get_user_business_role(email)
         token = create_dashboard_auth_token(email=email, is_admin=is_admin)
         return {
             "status": "ok",
@@ -3847,6 +3910,7 @@ async def dashboard_login(payload: DashboardLoginRequest):
                     "id": user.get("id"),
                     "email": email,
                     "is_admin": is_admin,
+                    "role": role or "operator",
                 },
                 "token": token,
                 "businesses": businesses,
@@ -3854,6 +3918,105 @@ async def dashboard_login(payload: DashboardLoginRequest):
         }
     except Exception as exc:
         return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+
+@app.get("/api/v2/operators")
+async def list_operators_v2(
+    business_id: str = "",
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    business_id = normalize_id(business_id)
+    if not business_id:
+        return JSONResponse({"status": "error", "message": "Missing business_id"}, status_code=400)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+
+    try:
+        rows = (
+            supabase.table("business_users")
+            .select("user_email,role,business_id")
+            .eq("business_id", business_id)
+            .eq("role", "operator")
+            .execute()
+            .data
+            or []
+        )
+        return {
+            "status": "ok",
+            "data": [
+                {
+                    "login_id": normalize_email(row.get("user_email")),
+                    "role": row.get("role") or "operator",
+                    "business_id": row.get("business_id"),
+                }
+                for row in rows
+            ],
+        }
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/v2/operators")
+async def create_operator_v2(
+    body: OperatorCreateRequest,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    if not access.get("is_admin"):
+        return JSONResponse({"status": "error", "message": "Only admin can create operator accounts"}, status_code=403)
+
+    business_id = normalize_id(body.business_id)
+    login_id = normalize_email(body.login_id)
+    password = str(body.password or "")
+    if not business_id:
+        return JSONResponse({"status": "error", "message": "Missing business_id"}, status_code=400)
+    if not login_id:
+        return JSONResponse({"status": "error", "message": "Operator ID is required"}, status_code=400)
+    if len(password) < 6:
+        return JSONResponse({"status": "error", "message": "Password must be at least 6 characters"}, status_code=400)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+
+    try:
+        existing = (
+            supabase.table("dashboard_users")
+            .select("id,email")
+            .eq("email", login_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        user_payload = {
+            "email": login_id,
+            "password_hash": hash_dashboard_password(password),
+            "is_active": True,
+        }
+        if existing:
+            supabase.table("dashboard_users").update(user_payload).eq("email", login_id).execute()
+        else:
+            supabase.table("dashboard_users").insert(user_payload).execute()
+
+        supabase.table("business_users").upsert(
+            {
+                "user_email": login_id,
+                "business_id": business_id,
+                "role": "operator",
+            },
+            on_conflict="user_email,business_id",
+        ).execute()
+        return {"status": "ok", "data": {"login_id": login_id, "role": "operator", "business_id": business_id}}
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
 
 @app.get("/api/v2/conversations")
 async def get_conversations_v2(
@@ -4434,6 +4597,148 @@ async def get_stats_v2(
             {"status": "error", "message": str(e)},
             status_code=500
         )
+
+
+@app.get("/api/v2/workspace-state")
+async def get_workspace_state_v2(
+    business_id: str = "",
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    business_id = normalize_id(business_id)
+    if not business_id:
+        return JSONResponse({"error": "Missing business_id"}, status_code=400)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    data = get_workspace_state(business_id)
+    return {"status": "ok", "data": data}
+
+
+@app.post("/api/v2/workspace-state")
+async def update_workspace_state_v2(
+    request: Request,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    try:
+        payload = await request.json()
+        business_id = normalize_id(payload.get("business_id"))
+        if not business_id:
+            return JSONResponse({"error": "Missing business_id"}, status_code=400)
+        if not can_access_business(access, business_id):
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+        allowed_keys = {
+            "lead_stages",
+            "lead_prices",
+            "operator_deals",
+            "operator_admin_notes",
+        }
+        state = payload.get("state") or {}
+        if not isinstance(state, dict):
+            return JSONResponse({"error": "state must be an object"}, status_code=400)
+
+        updated_keys = []
+        for key, value in state.items():
+            if key not in allowed_keys:
+                continue
+            upsert_workspace_state(
+                business_id=business_id,
+                state_key=key,
+                state_value=value,
+                updated_by=access.get("email", ""),
+            )
+            updated_keys.append(key)
+
+        return {"status": "ok", "updated_keys": updated_keys}
+    except Exception as e:
+        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
+
+
+@app.get("/api/settings/{business_id}")
+async def api_get_combined_settings(
+    business_id: str,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+
+    business = get_business_by_id(business_id)
+    if not business:
+        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
+
+    return {
+        "status": "ok",
+        "data": {
+            "business": sanitize_business_row(business),
+            "ai_prompt_settings": get_ai_prompt_settings(business_id),
+            "workspace_state": get_workspace_state(business_id),
+        },
+    }
+
+
+@app.post("/api/settings/{business_id}")
+async def api_update_combined_settings(
+    business_id: str,
+    request: Request,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+
+    business = get_business_by_id(business_id)
+    if not business:
+        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
+
+    payload = await request.json()
+    updated = {}
+
+    business_settings = clean_business_settings(payload.get("business_settings") or {})
+    if business_settings:
+        update_business(business_id, business_settings)
+        updated["business_settings"] = list(business_settings.keys())
+
+    ai_prompt_settings = payload.get("ai_prompt_settings") or {}
+    if isinstance(ai_prompt_settings, dict) and ai_prompt_settings:
+        upsert_ai_prompt_settings(business_id, ai_prompt_settings)
+        updated["ai_prompt_settings"] = [
+            key for key in ai_prompt_settings.keys() if key in AI_PROMPT_SETTING_FIELDS
+        ]
+
+    workspace_state = payload.get("workspace_state") or {}
+    allowed_workspace_keys = {"lead_stages", "lead_prices", "operator_deals", "operator_admin_notes"}
+    if isinstance(workspace_state, dict) and workspace_state:
+        updated_workspace = []
+        for key, value in workspace_state.items():
+            if key not in allowed_workspace_keys:
+                continue
+            upsert_workspace_state(
+                business_id=business_id,
+                state_key=key,
+                state_value=value,
+                updated_by=access.get("email", ""),
+            )
+            updated_workspace.append(key)
+        updated["workspace_state"] = updated_workspace
+
+    return {"status": "ok", "updated": updated}
 
 
 # ============================================================================
