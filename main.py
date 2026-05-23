@@ -13,6 +13,10 @@ import requests
 from urllib.parse import urlencode, urlparse, parse_qs, unquote
 from typing import Optional
 from datetime import datetime
+try:
+    import bcrypt
+except Exception:
+    bcrypt = None
 
 from pydantic import BaseModel
 from fastapi import FastAPI, Request, Header
@@ -126,6 +130,11 @@ FACEBOOK_REDIRECT_URI = os.getenv(
 DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://instaagent.streamlit.app")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://agent-1-xi6h.onrender.com")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
+SUPER_ADMIN_EMAILS = {
+    str(item).strip().lower()
+    for item in os.getenv("SUPER_ADMIN_EMAILS", "").split(",")
+    if str(item).strip()
+}
 WHATSAPP_EMBEDDED_REDIRECT_URI = os.getenv(
     "WHATSAPP_EMBEDDED_REDIRECT_URI",
     f"{PUBLIC_BASE_URL.rstrip('/')}/auth/whatsapp/embedded/callback",
@@ -273,10 +282,33 @@ class DashboardLoginRequest(BaseModel):
     password: str
 
 
+class DashboardSignupRequest(BaseModel):
+    email: str
+    password: str
+    role: str = "operator"
+    business_id: str = ""
+    full_name: str = ""
+
+
 class OperatorCreateRequest(BaseModel):
     business_id: str
     login_id: str
     password: str
+
+
+class BusinessCreateRequest(BaseModel):
+    business_name: str
+    owner_email: str
+    business_type: str = ""
+    language: str = "uz"
+    tone: str = "friendly"
+
+
+class BusinessAdminCreateRequest(BaseModel):
+    email: str
+    password: str
+    role: str = "admin"
+    full_name: str = ""
 
 
 # ============================================================================
@@ -510,22 +542,36 @@ def normalize_email(value: str) -> str:
 
 
 def hash_dashboard_password(password: str) -> str:
-    return hashlib.sha256((str(password) + str(DASHBOARD_SECRET)).encode()).hexdigest()
+    password = str(password or "")
+    if bcrypt:
+        return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
+    return "sha256$" + hashlib.sha256((password + str(DASHBOARD_SECRET)).encode()).hexdigest()
 
 
 def verify_dashboard_password(password: str, password_hash: str) -> bool:
     if not password or not password_hash:
         return False
-    return hmac.compare_digest(hash_dashboard_password(password), str(password_hash))
+    raw_hash = str(password_hash or "")
+    if raw_hash.startswith("$2") and bcrypt:
+        try:
+            return bool(bcrypt.checkpw(str(password).encode(), raw_hash.encode()))
+        except Exception:
+            return False
+    if raw_hash.startswith("sha256$"):
+        expected = "sha256$" + hashlib.sha256((str(password) + str(DASHBOARD_SECRET)).encode()).hexdigest()
+        return hmac.compare_digest(expected, raw_hash)
+    legacy = hashlib.sha256((str(password) + str(DASHBOARD_SECRET)).encode()).hexdigest()
+    return hmac.compare_digest(legacy, raw_hash)
 
 
 AUTH_TOKEN_TTL_SECONDS = int(os.getenv("DASHBOARD_AUTH_TTL_SECONDS", str(60 * 60 * 24 * 30)))
 
 
-def create_dashboard_auth_token(email: str, is_admin: bool = False) -> str:
+def create_dashboard_auth_token(email: str, is_admin: bool = False, role: str = "") -> str:
     payload = {
         "email": normalize_email(email),
         "is_admin": bool(is_admin),
+        "role": normalize_id(role).lower(),
         "exp": int(time.time()) + AUTH_TOKEN_TTL_SECONDS,
     }
     payload_b64 = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()).decode().rstrip("=")
@@ -553,6 +599,7 @@ def decode_dashboard_auth_token(token: str) -> Optional[dict]:
         return None
     payload["email"] = normalize_email(payload.get("email", ""))
     payload["is_admin"] = bool(payload.get("is_admin", False))
+    payload["role"] = normalize_id(payload.get("role", "")).lower()
     return payload
 
 
@@ -586,6 +633,15 @@ def get_user_business_role(email: str, business_id: str = "") -> str:
         return ""
 
 
+def is_super_admin_email(email: str) -> bool:
+    clean = normalize_email(email)
+    if not clean:
+        return False
+    if clean in SUPER_ADMIN_EMAILS:
+        return True
+    return bool(ADMIN_EMAIL and clean == normalize_email(ADMIN_EMAIL))
+
+
 def parse_auth_header(authorization: str) -> str:
     value = normalize_id(authorization)
     if value.lower().startswith("bearer "):
@@ -601,8 +657,14 @@ def resolve_dashboard_access(authorization: str = "", x_dashboard_secret: str = 
             return None
         email = normalize_email(payload.get("email"))
         is_admin = bool(payload.get("is_admin"))
-        business_ids = [] if is_admin else list_user_business_ids(email)
-        return {"email": email, "is_admin": is_admin, "business_ids": business_ids, "role": "admin" if is_admin else get_user_business_role(email)}
+        token_role = normalize_id(payload.get("role", "")).lower()
+        if is_admin:
+            role = token_role or ("super_admin" if is_super_admin_email(email) else "admin")
+            business_ids = []
+        else:
+            business_ids = list_user_business_ids(email)
+            role = token_role or get_user_business_role(email)
+        return {"email": email, "is_admin": is_admin, "business_ids": business_ids, "role": role or "operator"}
 
     # Backward-compatible admin/system path
     if not require_dashboard_secret(x_dashboard_secret):
@@ -1101,10 +1163,35 @@ def get_business_by_id(business_id: str):
     return result.data[0] if result.data else None
 
 
+def get_business_channel(platform: str, external_account_id: str = "", only_active: bool = True):
+    platform = normalize_id(platform).lower()
+    external_account_id = normalize_id(external_account_id)
+    if not platform or not external_account_id:
+        return None
+    try:
+        query = (
+            supabase.table("business_channels")
+            .select("*")
+            .eq("platform", platform)
+            .eq("external_account_id", external_account_id)
+        )
+        if only_active:
+            query = query.eq("is_active", True)
+        result = query.limit(1).execute()
+        return result.data[0] if result.data else None
+    except Exception:
+        return None
+
+
 def get_business(instagram_business_id: str):
     instagram_business_id = normalize_id(instagram_business_id)
     if not instagram_business_id:
         return None
+    channel = get_business_channel("instagram", instagram_business_id)
+    if channel:
+        row = get_business_by_id(channel.get("business_id"))
+        if row:
+            return row
     result = supabase.table("businesses").select("*").eq("instagram_business_id", instagram_business_id).limit(
         1).execute()
     return result.data[0] if result.data else None
@@ -1114,6 +1201,11 @@ def get_business_by_page_id(page_id: str):
     page_id = normalize_id(page_id)
     if not page_id:
         return None
+    channel = get_business_channel("instagram", page_id)
+    if channel:
+        row = get_business_by_id(channel.get("business_id"))
+        if row:
+            return row
     result = supabase.table("businesses").select("*").eq("facebook_page_id", page_id).limit(1).execute()
     return result.data[0] if result.data else None
 
@@ -1123,6 +1215,11 @@ def get_business_by_whatsapp_phone_number_id(phone_number_id: str):
     if not phone_number_id:
         return None
     try:
+        channel = get_business_channel("whatsapp", phone_number_id)
+        if channel:
+            row = get_business_by_id(channel.get("business_id"))
+            if row:
+                return row
         result = (
             supabase.table("businesses")
             .select("*")
@@ -1172,6 +1269,13 @@ def get_active_whatsapp_business():
 def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
     entry_id = normalize_id(entry_id)
     recipient_id = normalize_id(recipient_id)
+
+    for lookup_id in [entry_id, recipient_id]:
+        channel = get_business_channel("instagram", lookup_id)
+        if channel:
+            business = get_business_by_id(channel.get("business_id"))
+            if business:
+                return business
 
     for lookup_id in [entry_id, recipient_id]:
         business = get_business(lookup_id)
@@ -1277,6 +1381,40 @@ def sanitize_channel_row(row: dict):
             cfg[key] = safe_token(cfg.get(key, ""))
     clean["config"] = cfg
     return clean
+
+
+def get_business_channel_rows(business_id: str, platform_aliases: list[str]):
+    business_id = normalize_id(business_id)
+    if not business_id:
+        return []
+    aliases = [normalize_id(x).lower() for x in (platform_aliases or []) if normalize_id(x)]
+    if not aliases:
+        return []
+    try:
+        result = (
+            supabase.table("business_channels")
+            .select("*")
+            .eq("business_id", business_id)
+            .in_("platform", aliases)
+            .eq("is_active", True)
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return result.data or []
+    except Exception:
+        return []
+
+
+def get_business_channel_token(business: dict, platform_aliases: list[str], token_keys: list[str]):
+    business_id = normalize_id((business or {}).get("id"))
+    rows = get_business_channel_rows(business_id, platform_aliases) if business_id else []
+    for row in rows:
+        cfg = dict(row.get("config") or {})
+        for key in token_keys:
+            value = normalize_id(cfg.get(key) or row.get(key))
+            if value:
+                return value
+    return ""
 
 
 def is_chat_ai_enabled(platform, channel, customer_id, business_id=None):
@@ -2516,6 +2654,13 @@ def get_ai_reply(user_text: str, business: dict, platform: str = "instagram", cu
 # INSTAGRAM
 # ============================================================================
 def get_business_access_token(business: dict):
+    channel_token = get_business_channel_token(
+        business,
+        ["instagram"],
+        ["page_access_token", "access_token"],
+    )
+    if channel_token:
+        return channel_token
     return business.get("page_access_token") or business.get("access_token") or ""
 
 
@@ -3062,14 +3207,40 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
 # ============================================================================
 def get_whatsapp_access_token(business: dict = None):
     if business:
+        channel_token = get_business_channel_token(
+            business,
+            ["whatsapp"],
+            ["access_token", "whatsapp_access_token"],
+        )
+        if channel_token:
+            return channel_token
         return business.get("whatsapp_access_token") or WHATSAPP_ACCESS_TOKEN
     return WHATSAPP_ACCESS_TOKEN
 
 
 def get_whatsapp_phone_number_id(business: dict = None):
     if business:
+        channel_phone = get_business_channel_token(
+            business,
+            ["whatsapp"],
+            ["phone_number_id", "whatsapp_phone_number_id", "external_account_id"],
+        )
+        if channel_phone:
+            return channel_phone
         return business.get("whatsapp_phone_number_id") or WHATSAPP_PHONE_NUMBER_ID
     return WHATSAPP_PHONE_NUMBER_ID
+
+
+def get_telegram_bot_token(business: dict = None):
+    if business:
+        token = get_business_channel_token(
+            business,
+            ["telegram", "telegram_bot"],
+            ["telegram_bot_token", "bot_token", "access_token"],
+        )
+        if token:
+            return token
+    return os.getenv("TELEGRAM_BOT_TOKEN", "")
 
 
 def send_whatsapp_text(to: str, text: str, business: dict = None):
@@ -3200,8 +3371,8 @@ def send_whatsapp_audio_upload(to: str, file_bytes: bytes, filename: str, mime_t
     return send_res.ok, send_result, media_id
 
 
-def send_telegram_bot_photo_upload(chat_id: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = ""):
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+def send_telegram_bot_photo_upload(chat_id: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = "", business: dict = None):
+    token = get_telegram_bot_token(business)
 
     if not token:
         return None
@@ -3218,8 +3389,8 @@ def send_telegram_bot_photo_upload(chat_id: str, file_bytes: bytes, filename: st
     )
 
 
-def send_telegram_bot_voice_upload(chat_id: str, file_bytes: bytes, filename: str, mime_type: str):
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+def send_telegram_bot_voice_upload(chat_id: str, file_bytes: bytes, filename: str, mime_type: str, business: dict = None):
+    token = get_telegram_bot_token(business)
 
     if not token:
         return None
@@ -3877,7 +4048,7 @@ async def dashboard_login(payload: DashboardLoginRequest):
             return JSONResponse({"status": "error", "error": "Invalid email or password."}, status_code=401)
 
         businesses = []
-        if ADMIN_EMAIL and email == normalize_email(ADMIN_EMAIL):
+        if is_super_admin_email(email):
             businesses = (supabase.table("businesses").select("*").order("created_at", desc=True).execute().data or [])
         else:
             links = (
@@ -3900,9 +4071,9 @@ async def dashboard_login(payload: DashboardLoginRequest):
                     or []
                 )
 
-        is_admin = bool(ADMIN_EMAIL and email == normalize_email(ADMIN_EMAIL))
-        role = "admin" if is_admin else get_user_business_role(email)
-        token = create_dashboard_auth_token(email=email, is_admin=is_admin)
+        is_admin = is_super_admin_email(email)
+        role = ("super_admin" if is_admin else get_user_business_role(email)) or ("admin" if is_admin else "operator")
+        token = create_dashboard_auth_token(email=email, is_admin=is_admin, role=role)
         return {
             "status": "ok",
             "data": {
@@ -3920,6 +4091,72 @@ async def dashboard_login(payload: DashboardLoginRequest):
         return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
 
 
+@app.post("/api/v2/auth/signup")
+async def dashboard_signup(payload: DashboardSignupRequest):
+    email = normalize_email(payload.email)
+    password = str(payload.password or "")
+    role = normalize_id(payload.role or "operator").lower()
+    business_id = normalize_id(payload.business_id)
+
+    if not email or not password:
+        return JSONResponse({"status": "error", "error": "Email/ID and password are required."}, status_code=400)
+    if len(password) < 6:
+        return JSONResponse({"status": "error", "error": "Password must be at least 6 characters."}, status_code=400)
+    if role not in {"owner", "admin", "operator"}:
+        return JSONResponse({"status": "error", "error": "Role must be owner, admin or operator."}, status_code=400)
+    if role == "operator" and not business_id:
+        return JSONResponse({"status": "error", "error": "Operator sign-up requires business_id."}, status_code=400)
+
+    try:
+        existing = (
+            supabase.table("dashboard_users")
+            .select("id,email")
+            .eq("email", email)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if existing:
+            return JSONResponse({"status": "error", "error": "This ID already exists."}, status_code=409)
+
+        supabase.table("dashboard_users").insert(
+            {
+                "email": email,
+                "password_hash": hash_dashboard_password(password),
+                "is_active": True,
+            }
+        ).execute()
+
+        if business_id:
+            supabase.table("business_users").upsert(
+                {
+                    "user_email": email,
+                    "business_id": business_id,
+                    "role": role,
+                    "full_name": normalize_id(payload.full_name),
+                },
+                on_conflict="user_email,business_id",
+            ).execute()
+
+        is_admin = is_super_admin_email(email)
+        effective_role = "super_admin" if is_admin else role
+        token = create_dashboard_auth_token(email=email, is_admin=is_admin, role=effective_role)
+        return {
+            "status": "ok",
+            "data": {
+                "user": {
+                    "email": email,
+                    "is_admin": is_admin,
+                    "role": effective_role,
+                },
+                "token": token,
+            },
+        }
+    except Exception as exc:
+        return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
+
+
 @app.get("/api/v2/operators")
 async def list_operators_v2(
     business_id: str = "",
@@ -3931,21 +4168,19 @@ async def list_operators_v2(
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
 
     business_id = normalize_id(business_id)
-    if not business_id:
-        return JSONResponse({"status": "error", "message": "Missing business_id"}, status_code=400)
-    if not can_access_business(access, business_id):
+    if business_id and not can_access_business(access, business_id):
         return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
     try:
-        rows = (
-            supabase.table("business_users")
-            .select("user_email,role,business_id")
-            .eq("business_id", business_id)
-            .eq("role", "operator")
-            .execute()
-            .data
-            or []
-        )
+        query = supabase.table("business_users").select("user_email,role,business_id").eq("role", "operator")
+        if business_id:
+            query = query.eq("business_id", business_id)
+        elif not access.get("is_admin"):
+            allowed = access.get("business_ids") or []
+            if not allowed:
+                return {"status": "ok", "data": []}
+            query = query.in_("business_id", allowed)
+        rows = query.execute().data or []
         return {
             "status": "ok",
             "data": [
@@ -3970,7 +4205,7 @@ async def create_operator_v2(
     access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
     if not access:
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-    if not access.get("is_admin"):
+    if not access.get("is_admin") and access.get("role") != "admin":
         return JSONResponse({"status": "error", "message": "Only admin can create operator accounts"}, status_code=403)
 
     business_id = normalize_id(body.business_id)
@@ -4014,6 +4249,111 @@ async def create_operator_v2(
             on_conflict="user_email,business_id",
         ).execute()
         return {"status": "ok", "data": {"login_id": login_id, "role": "operator", "business_id": business_id}}
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/v2/businesses")
+async def create_business_v2(
+    body: BusinessCreateRequest,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    if not access.get("is_admin"):
+        return JSONResponse({"status": "error", "message": "Only super admin can create businesses"}, status_code=403)
+
+    business_name = normalize_id(body.business_name)
+    owner_email = normalize_email(body.owner_email)
+    if not business_name or not owner_email:
+        return JSONResponse({"status": "error", "message": "business_name and owner_email are required"}, status_code=400)
+
+    try:
+        created = (
+            supabase.table("businesses")
+            .insert(
+                {
+                    "business_name": business_name,
+                    "owner_email": owner_email,
+                    "business_type": normalize_id(body.business_type),
+                    "language": normalize_id(body.language) or "uz",
+                    "tone": normalize_id(body.tone) or "friendly",
+                    "bot_enabled": True,
+                }
+            )
+            .execute()
+            .data
+            or []
+        )
+        if not created:
+            return JSONResponse({"status": "error", "message": "Failed to create business"}, status_code=500)
+
+        business_id = normalize_id(created[0].get("id"))
+        supabase.table("business_users").upsert(
+            {
+                "user_email": owner_email,
+                "business_id": business_id,
+                "role": "owner",
+            },
+            on_conflict="user_email,business_id",
+        ).execute()
+        return {"status": "ok", "data": created[0]}
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/v2/businesses/{business_id}/admins")
+async def create_business_admin_v2(
+    business_id: str,
+    body: BusinessAdminCreateRequest,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+    if not access.get("is_admin") and access.get("role") not in {"owner", "admin"}:
+        return JSONResponse({"status": "error", "message": "Only owner/admin can create business admins"}, status_code=403)
+
+    clean_business_id = normalize_id(business_id)
+    email = normalize_email(body.email)
+    password = str(body.password or "")
+    role = normalize_id(body.role or "admin").lower()
+    if role not in {"owner", "admin", "operator"}:
+        return JSONResponse({"status": "error", "message": "Invalid role"}, status_code=400)
+    if not clean_business_id or not email or len(password) < 6:
+        return JSONResponse({"status": "error", "message": "business_id, email and password(>=6) are required"}, status_code=400)
+
+    try:
+        existing = (
+            supabase.table("dashboard_users")
+            .select("id,email")
+            .eq("email", email)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        user_payload = {"email": email, "password_hash": hash_dashboard_password(password), "is_active": True}
+        if existing:
+            supabase.table("dashboard_users").update(user_payload).eq("email", email).execute()
+        else:
+            supabase.table("dashboard_users").insert(user_payload).execute()
+
+        supabase.table("business_users").upsert(
+            {
+                "user_email": email,
+                "business_id": clean_business_id,
+                "role": role,
+                "full_name": normalize_id(body.full_name),
+            },
+            on_conflict="user_email,business_id",
+        ).execute()
+        return {"status": "ok", "data": {"email": email, "business_id": clean_business_id, "role": role}}
     except Exception as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
@@ -5365,6 +5705,7 @@ async def dashboard_send_image_file(
             filename=payload.filename,
             mime_type=payload.mime_type,
             caption=caption,
+            business=business,
         )
         result = safe_json(res) if res is not None else {"error": "Send failed — no bot token configured"}
         ok = res is not None and res.ok
@@ -5488,6 +5829,7 @@ async def dashboard_send_voice_file(
             file_bytes=file_bytes,
             filename=payload.filename,
             mime_type=payload.mime_type,
+            business=business,
         )
         result = safe_json(res) if res is not None else {"error": "Send failed — no bot token configured"}
         ok = res is not None and res.ok
