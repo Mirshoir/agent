@@ -1528,6 +1528,32 @@ input, textarea { background: none; border: 0; outline: 0; }
   font-size: 14px;
 }
 
+.loading-state {
+  min-height: 220px;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  color: var(--muted);
+}
+.loading-state p {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 560;
+  letter-spacing: 0;
+}
+.spinner {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 3px solid rgba(80, 74, 67, .22);
+  border-top-color: var(--accent);
+  animation: spin 0.85s linear infinite;
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 /* Lang switcher */
 .lang {
   display: flex;
@@ -2086,6 +2112,133 @@ input, textarea { background: none; border: 0; outline: 0; }
   background: rgba(248, 246, 242, .92);
   color: #1f1f21;
   font-weight: 650;
+}
+
+/* Auth page */
+.signin-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background:
+    radial-gradient(1000px 500px at 85% -10%, oklch(90% 0.05 65 / .4), transparent 70%),
+    radial-gradient(1000px 500px at -10% 110%, oklch(91% 0.04 220 / .25), transparent 70%),
+    linear-gradient(180deg, #f7f4ef 0%, #f4f0e9 100%);
+}
+.app-loading-screen {
+  min-height: 100vh;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  background:
+    radial-gradient(1000px 500px at 85% -10%, oklch(90% 0.05 65 / .4), transparent 70%),
+    radial-gradient(1000px 500px at -10% 110%, oklch(91% 0.04 220 / .25), transparent 70%),
+    linear-gradient(180deg, #f7f4ef 0%, #f4f0e9 100%);
+}
+.app-loading-screen p {
+  margin: 0;
+  color: #5a5550;
+  font-weight: 560;
+}
+.signin-card {
+  width: min(100%, 520px);
+  border: 1px solid rgba(33, 31, 31, .12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .9);
+  box-shadow: 0 24px 70px rgba(33, 31, 31, .14);
+  padding: 26px;
+}
+.signin-card h1 {
+  margin: 0;
+  font-size: clamp(30px, 3.5vw, 40px);
+  line-height: 1.06;
+  color: #191716;
+}
+.signin-card > p {
+  margin: 10px 0 18px;
+  color: #58524d;
+  font-size: 15px;
+}
+.signin-card .operators-mode-switch {
+  width: 100%;
+  border: 1px solid rgba(33, 31, 31, .16);
+  border-radius: 10px;
+  padding: 4px;
+  background: rgba(241, 236, 229, .9);
+}
+.signin-card .operators-mode-switch button {
+  border-radius: 8px;
+  min-height: 42px;
+  font-weight: 650;
+}
+.signin-card .operators-mode-switch button.active {
+  background: #1f1f21;
+  color: #fff;
+}
+.signin-card form {
+  margin-top: 14px;
+  display: grid;
+  gap: 12px;
+}
+.signin-card label {
+  display: grid;
+  gap: 7px;
+}
+.signin-card label > span {
+  color: #3f3a35;
+  font-weight: 630;
+  font-size: 13px;
+}
+.signin-card input,
+.signin-card select {
+  width: 100%;
+  min-height: 46px;
+  border: 1px solid rgba(33, 31, 31, .18);
+  border-radius: 10px;
+  background: #fff;
+  padding: 0 13px;
+  color: #1f1f21;
+}
+.signin-card input::placeholder {
+  color: #8a837d;
+}
+.signin-card input:focus,
+.signin-card select:focus {
+  outline: none;
+  border-color: #be5a2d;
+  box-shadow: 0 0 0 3px rgba(190, 90, 45, .16);
+}
+.signin-error {
+  border: 1px solid #efb0b0;
+  color: #7c1f1f;
+  background: #fff2f2;
+  border-radius: 10px;
+  font-size: 13px;
+  padding: 10px 12px;
+}
+.signin-actions {
+  margin-top: 4px;
+  display: flex;
+  gap: 10px;
+}
+.signin-actions button {
+  min-height: 46px;
+  border-radius: 10px;
+  padding: 0 16px;
+  font-weight: 650;
+}
+.signin-actions button[type="submit"] {
+  background: #1f1f21;
+  color: #fff;
+}
+.signin-actions button[type="submit"]:disabled {
+  opacity: .62;
+}
+.signin-actions .ghost {
+  border: 1px solid rgba(33, 31, 31, .16);
+  background: #fff;
+  color: #1f1f21;
 }
 .landing-hero {
   position: relative;
@@ -2646,6 +2799,38 @@ input, textarea { background: none; border: 0; outline: 0; }
 .clients-empty {
   text-align: center;
   color: var(--muted);
+}
+.channel-manager {
+  display: grid;
+  gap: 12px;
+}
+.channel-list {
+  display: grid;
+  gap: 8px;
+}
+.channel-row {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.channel-row span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.channel-row strong {
+  font-size: 15px;
+}
+.channel-row em {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  word-break: break-all;
 }
 .stage-pill {
   display: inline-flex;
