@@ -73,16 +73,28 @@ function readAuthSession() {
     if (!parsed || typeof parsed !== 'object') return null;
     const ownerEmail = normalizeOwnerEmail(parsed.ownerEmail);
     if (!ownerEmail) return null;
-    return { ownerEmail, at: parsed.at || '' };
+    return {
+      ownerEmail,
+      token: parsed.token || '',
+      isAdmin: parsed.isAdmin === true,
+      role: parsed.role || '',
+      at: parsed.at || '',
+    };
   } catch {
     return null;
   }
 }
 
-function saveAuthSession(ownerEmail) {
+function saveAuthSession(ownerEmail, session = {}) {
   const clean = normalizeOwnerEmail(ownerEmail);
   if (!clean) return;
-  window.localStorage.setItem(DASHBOARD_AUTH_STORAGE_KEY, JSON.stringify({ ownerEmail: clean, at: new Date().toISOString() }));
+  window.localStorage.setItem(DASHBOARD_AUTH_STORAGE_KEY, JSON.stringify({
+    ownerEmail: clean,
+    token: session.token || '',
+    isAdmin: session.isAdmin === true,
+    role: session.role || '',
+    at: new Date().toISOString(),
+  }));
   window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, clean);
 }
 
@@ -144,6 +156,9 @@ const STATS_POLL_MS = 20000;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
 const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
+const LEAD_PRICES_STORAGE_KEY = 'instaagent_lead_prices';
+const OPERATOR_DEALS_STORAGE_KEY = 'instaagent_operator_deals';
+const OPERATOR_ADMIN_NOTES_STORAGE_KEY = 'instaagent_operator_admin_notes';
 const DASHBOARD_HASH = '#dashboard';
 const UI_LANG_STORAGE_KEY = 'instaagent_ui_lang';
 
@@ -391,6 +406,8 @@ function apiHeaders() {
   const headers = { Accept: 'application/json' };
   const savedSecret = dashboardSecret();
   if (savedSecret && savedSecret !== 'YOUR_DASHBOARD_SECRET') headers['x-dashboard-secret'] = savedSecret;
+  const auth = readAuthSession();
+  if (auth?.token) headers.Authorization = `Bearer ${auth.token}`;
   const ownerEmail = resolvedOwnerEmail();
   if (ownerEmail) headers['x-owner-email'] = ownerEmail;
   return headers;
@@ -758,16 +775,38 @@ function SignInPage({ lang, onSignedIn, onBack }) {
     setLoading(true);
     setError('');
     try {
-      window.localStorage.setItem('instaagent_dashboard_secret', cleanSecret);
+      const login = await API.postJson('/api/v2/auth/login', {
+        email: ownerEmail,
+        password: cleanSecret,
+      });
+      const payload = login.data || {};
+      if (!payload.token) throw new Error('Missing auth token.');
+      window.localStorage.removeItem('instaagent_dashboard_secret');
       window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, ownerEmail);
-      const data = await API.get('/api/businesses');
-      const rows = data.data || [];
-      if (!rows.length) throw new Error('No assigned accounts found for this user.');
-      saveAuthSession(ownerEmail);
-      onSignedIn(ownerEmail);
+      saveAuthSession(ownerEmail, {
+        token: payload.token,
+        isAdmin: payload.user?.is_admin === true,
+        role: payload.user?.role || '',
+      });
+      onSignedIn({
+        ownerEmail,
+        token: payload.token,
+        isAdmin: payload.user?.is_admin === true,
+        role: payload.user?.role || '',
+      });
     } catch (err) {
-      setError(err.message || 'Sign in failed.');
-      clearAuthSession();
+      try {
+        window.localStorage.setItem('instaagent_dashboard_secret', cleanSecret);
+        window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, ownerEmail);
+        const data = await API.get('/api/businesses');
+        const rows = data.data || [];
+        if (!rows.length) throw err;
+        saveAuthSession(ownerEmail, { isAdmin: true, role: 'admin' });
+        onSignedIn({ ownerEmail, isAdmin: true, role: 'admin' });
+      } catch (fallbackErr) {
+        setError(fallbackErr.message || err.message || 'Sign in failed.');
+        clearAuthSession();
+      }
     } finally {
       setLoading(false);
     }
@@ -780,8 +819,8 @@ function SignInPage({ lang, onSignedIn, onBack }) {
         <p>Log in to see only your assigned Instagram, Telegram, and WhatsApp accounts.</p>
         <form onSubmit={submit}>
           <label>
-            <span>Email</span>
-            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="owner@company.com" autoComplete="username" />
+            <span>ID / Email</span>
+            <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="operator@company.com" autoComplete="username" />
           </label>
           <label>
             <span>Access key</span>
@@ -1189,7 +1228,15 @@ const WORKSPACE_TEXT = {
     backendUnavailableLocal: 'Generated locally because the backend endpoint is not available yet.',
     leadNew: 'New', leadQualified: 'Qualified', leadNegotiation: 'Negotiation', leadWon: 'Won', leadLost: 'Lost',
     leadAmount: 'Potential value', leadSource: 'Source', leadUpdated: 'Updated', leadEmpty: 'No leads in this stage yet.',
-    leadOpen: 'Open chat',
+    leadOpen: 'Open chat', leadPrice: 'Price', leadPricePlaceholder: 'Add price', leadPriceClear: 'Clear price',
+    clientsTitle: 'Clients table', clientsSubtitle: 'All customers with status, channel, price, and last message.', clientsEmpty: 'No clients yet.',
+    client: 'Client', lastMessage: 'Last message', status: 'Status', channel: 'Channel',
+    operatorsTitle: 'Operators panel', operatorsSubtitle: 'Operator workspace for admin notes, client messages, and leads.',
+    textToAdmin: 'Text to admin', textToAdminPlaceholder: 'Write a note for the admin...', saveAdminNote: 'Save note',
+    adminNotes: 'Admin notes', noAdminNotes: 'No notes yet.', messagesFromClients: 'Messages from clients',
+    operatorRanking: 'Operators ranking', successfulDeals: 'Successful deals', operatorPanel: 'Operator panel', adminPanel: 'Admin panel',
+    operatorAccounts: 'Operator accounts', operatorAccountsHint: 'Create operator logins for this business.', operatorId: 'Operator ID', operatorPassword: 'Password',
+    addOperator: 'Add operator', noOperators: 'No operators yet.',
   },
   uz: {
     workspace: 'Ish maydoni', leadsTitle: 'Lidlar pipeline', promptsTitle: 'AI Prompt sozlamalari', profile: 'Profil', refresh: 'Yangilash', liveWorkspace: 'Live backend ish maydoni',
@@ -1220,7 +1267,15 @@ const WORKSPACE_TEXT = {
     backendUnavailableLocal: 'Backend endpoint hali ishlamagani uchun lokal yaratildi.',
     leadNew: 'Yangi', leadQualified: 'Saralangan', leadNegotiation: 'Muzokara', leadWon: 'Yutilgan', leadLost: 'Yo‘qotilgan',
     leadAmount: 'Potensial qiymat', leadSource: 'Manba', leadUpdated: 'Yangilangan', leadEmpty: 'Bu bosqichda lid yo‘q.',
-    leadOpen: 'Chatni ochish',
+    leadOpen: 'Chatni ochish', leadPrice: 'Narx', leadPricePlaceholder: 'Narx kiriting', leadPriceClear: 'Narxni o‘chirish',
+    clientsTitle: 'Mijozlar jadvali', clientsSubtitle: 'Barcha mijozlar: status, kanal, narx va oxirgi xabar.', clientsEmpty: 'Hali mijoz yo‘q.',
+    client: 'Mijoz', lastMessage: 'Oxirgi xabar', status: 'Status', channel: 'Kanal',
+    operatorsTitle: 'Operator paneli', operatorsSubtitle: 'Adminga yozish, mijoz xabarlari va lidlar uchun operator ish maydoni.',
+    textToAdmin: 'Adminga xabar', textToAdminPlaceholder: 'Admin uchun izoh yozing...', saveAdminNote: 'Izohni saqlash',
+    adminNotes: 'Admin izohlari', noAdminNotes: 'Hali izoh yo‘q.', messagesFromClients: 'Mijozlardan xabarlar',
+    operatorRanking: 'Operatorlar reytingi', successfulDeals: 'Muvaffaqiyatli bitimlar', operatorPanel: 'Operator panel', adminPanel: 'Admin panel',
+    operatorAccounts: 'Operator akkauntlari', operatorAccountsHint: 'Bu biznes uchun operator loginlarini yarating.', operatorId: 'Operator ID', operatorPassword: 'Parol',
+    addOperator: 'Operator qo‘shish', noOperators: 'Hali operator yo‘q.',
   },
   ru: {
     workspace: 'Рабочая область', leadsTitle: 'Воронка лидов', promptsTitle: 'Настройки AI Prompt', profile: 'Профиль', refresh: 'Обновить', liveWorkspace: 'Рабочая область backend',
@@ -1251,7 +1306,15 @@ const WORKSPACE_TEXT = {
     backendUnavailableLocal: 'Создано локально, потому что backend endpoint пока недоступен.',
     leadNew: 'Новые', leadQualified: 'Квалиф.', leadNegotiation: 'Переговоры', leadWon: 'Сделка', leadLost: 'Потеряно',
     leadAmount: 'Потенциал', leadSource: 'Источник', leadUpdated: 'Обновлено', leadEmpty: 'В этой стадии пока нет лидов.',
-    leadOpen: 'Открыть чат',
+    leadOpen: 'Открыть чат', leadPrice: 'Цена', leadPricePlaceholder: 'Добавить цену', leadPriceClear: 'Удалить цену',
+    clientsTitle: 'Таблица клиентов', clientsSubtitle: 'Все клиенты со статусом, каналом, ценой и последним сообщением.', clientsEmpty: 'Клиентов пока нет.',
+    client: 'Клиент', lastMessage: 'Последнее сообщение', status: 'Статус', channel: 'Канал',
+    operatorsTitle: 'Панель оператора', operatorsSubtitle: 'Рабочая зона оператора: сообщение админу, клиенты и лиды.',
+    textToAdmin: 'Написать админу', textToAdminPlaceholder: 'Напишите заметку для админа...', saveAdminNote: 'Сохранить',
+    adminNotes: 'Заметки админу', noAdminNotes: 'Заметок пока нет.', messagesFromClients: 'Сообщения клиентов',
+    operatorRanking: 'Рейтинг операторов', successfulDeals: 'Успешные сделки', operatorPanel: 'Панель оператора', adminPanel: 'Панель админа',
+    operatorAccounts: 'Аккаунты операторов', operatorAccountsHint: 'Создайте логины операторов для этого бизнеса.', operatorId: 'ID оператора', operatorPassword: 'Пароль',
+    addOperator: 'Добавить оператора', noOperators: 'Операторов пока нет.',
   },
 };
 
@@ -1266,7 +1329,7 @@ function guessLeadStage(conv) {
   return 'qualified';
 }
 
-function buildLeads(conversations, leadStages) {
+function buildLeads(conversations, leadStages, leadPrices = {}) {
   const leads = (conversations || []).map(conv => {
     const stage = leadStages[conv.id] || guessLeadStage(conv);
     const inferredValue = Number(conv.kpis?.orders || 0) > 0
@@ -1282,6 +1345,7 @@ function buildLeads(conversations, leadStages) {
       unread: conv.unread,
       needsHuman: conv.needsHuman,
       amount: inferredValue,
+      price: leadPrices[conv.id] || '',
       updatedAt: conv.lastTime,
       source: conv.channelName || conv.channel || conv.platform,
       conversationId: conv.id,
@@ -1533,8 +1597,8 @@ function PromptGeneratorField({
   );
 }
 
-function LeadsBoard({ conversations, leadStages, setLeadStage, onOpenConversation, w }) {
-  const leads = useMemo(() => buildLeads(conversations, leadStages), [conversations, leadStages]);
+function LeadsBoard({ conversations, leadStages, leadPrices, setLeadStage, setLeadPrice, onOpenConversation, w }) {
+  const leads = useMemo(() => buildLeads(conversations, leadStages, leadPrices), [conversations, leadStages, leadPrices]);
   const stageNames = {
     new: w.leadNew,
     qualified: w.leadQualified,
@@ -1547,7 +1611,7 @@ function LeadsBoard({ conversations, leadStages, setLeadStage, onOpenConversatio
       {LEAD_STAGE_ORDER.map(stage => {
         const list = leads.filter(item => item.stage === stage);
         return (
-          <section className="lead-column" key={stage}>
+          <section className={`lead-column lead-stage-${stage}`} key={stage}>
             <header>
               <h3>{stageNames[stage]}</h3>
               <span>{list.length}</span>
@@ -1565,6 +1629,17 @@ function LeadsBoard({ conversations, leadStages, setLeadStage, onOpenConversatio
                     <span>{w.leadSource}: <b>{lead.source}</b></span>
                     <span>{w.leadUpdated}: <b>{lead.updatedAt}</b></span>
                   </div>
+                  <label className="lead-price-row">
+                    <span>{w.leadPrice}</span>
+                    <input
+                      value={lead.price}
+                      placeholder={w.leadPricePlaceholder}
+                      onChange={(e) => setLeadPrice(lead.id, e.target.value)}
+                    />
+                    {lead.price && (
+                      <button type="button" title={w.leadPriceClear} onClick={() => setLeadPrice(lead.id, '')}>x</button>
+                    )}
+                  </label>
                   <div className="lead-actions">
                     <select value={lead.stage} onChange={(e) => setLeadStage(lead.id, e.target.value)}>
                       {LEAD_STAGE_ORDER.map(option => (
@@ -1579,6 +1654,297 @@ function LeadsBoard({ conversations, leadStages, setLeadStage, onOpenConversatio
           </section>
         );
       })}
+    </div>
+  );
+}
+
+function ClientsTable({ conversations, leadStages, leadPrices, onOpenConversation, w }) {
+  const rows = useMemo(() => (conversations || []).map(conv => ({
+    ...conv,
+    stage: leadStages[conv.id] || guessLeadStage(conv),
+    price: leadPrices[conv.id] || '',
+  })), [conversations, leadStages, leadPrices]);
+
+  const stageNames = {
+    new: w.leadNew,
+    qualified: w.leadQualified,
+    negotiation: w.leadNegotiation,
+    won: w.leadWon,
+    lost: w.leadLost,
+  };
+
+  return (
+    <div className="clients-section">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.clientsTitle}</h3>
+          <p>{w.clientsSubtitle}</p>
+        </div>
+        <span>{rows.length}</span>
+      </div>
+      <div className="clients-table-wrap">
+        <table className="clients-table">
+          <thead>
+            <tr>
+              <th>{w.client}</th>
+              <th>{w.channel}</th>
+              <th>{w.status}</th>
+              <th>{w.leadPrice}</th>
+              <th>{w.lastMessage}</th>
+              <th>{w.unreadMessages}</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {!rows.length && (
+              <tr>
+                <td colSpan="7" className="clients-empty">{w.clientsEmpty}</td>
+              </tr>
+            )}
+            {rows.map(row => (
+              <tr key={row.id}>
+                <td>
+                  <div className="client-cell">
+                    <Avatar data={row.avatar} size={32} platform={row.platform} />
+                    <span>
+                      <strong>{row.name}</strong>
+                      <em>{row.handle}</em>
+                    </span>
+                  </div>
+                </td>
+                <td>{row.channelName || row.platform}</td>
+                <td><span className={`stage-pill stage-${row.stage}`}>{stageNames[row.stage]}</span></td>
+                <td>{row.price || '-'}</td>
+                <td className="client-preview">{row.preview}</td>
+                <td>{row.unread || 0}</td>
+                <td><button className="table-action" onClick={() => onOpenConversation(row.id)}>{w.leadOpen}</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function OperatorsRanking({ leadStages, operatorDeals = {}, setOperatorDealCount, w }) {
+  const wonDeals = Object.values(leadStages || {}).filter(stage => stage === 'won').length;
+  const rows = [
+    { id: 'aziz', name: 'Aziz', deals: Number(operatorDeals.aziz ?? wonDeals ?? 0) },
+    { id: 'admin', name: 'Admin', deals: Number(operatorDeals.admin ?? 0) },
+  ].sort((a, b) => b.deals - a.deals);
+
+  return (
+    <section className="operator-ranking">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.operatorRanking}</h3>
+          <p>{w.successfulDeals}</p>
+        </div>
+      </div>
+      <div className="operator-rank-list">
+        {rows.map((row, index) => (
+          <label className="operator-rank-row" key={row.id}>
+            <span className="rank-number">{index + 1}</span>
+            <strong>{row.name}</strong>
+            <input
+              type="number"
+              min="0"
+              value={row.deals}
+              onChange={(e) => setOperatorDealCount(row.id, e.target.value)}
+            />
+          </label>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function OperatorAccountsPanel({ selectedBusinessId, onToast, w }) {
+  const [operators, setOperators] = useState([]);
+  const [loginId, setLoginId] = useState('');
+  const [password, setPassword] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const loadOperators = async () => {
+    if (!selectedBusinessId) return;
+    try {
+      const response = await API.get(`/api/v2/operators?business_id=${encodeURIComponent(selectedBusinessId)}`);
+      setOperators(response.data || []);
+    } catch (e) {
+      setOperators([]);
+    }
+  };
+
+  useEffect(() => {
+    loadOperators();
+  }, [selectedBusinessId]);
+
+  const createOperator = async (e) => {
+    e.preventDefault();
+    if (!selectedBusinessId || !loginId.trim() || !password.trim()) return;
+    setSaving(true);
+    try {
+      await API.postJson('/api/v2/operators', {
+        business_id: selectedBusinessId,
+        login_id: loginId.trim(),
+        password,
+      });
+      setLoginId('');
+      setPassword('');
+      onToast('Operator account created');
+      loadOperators();
+    } catch (err) {
+      onToast(err.message || 'Could not create operator');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="operator-accounts-card">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.operatorAccounts}</h3>
+          <p>{w.operatorAccountsHint}</p>
+        </div>
+        <span>{operators.length}</span>
+      </div>
+      <form className="operator-account-form" onSubmit={createOperator}>
+        <label className="field-row">
+          <span>{w.operatorId}</span>
+          <input value={loginId} onChange={(e) => setLoginId(e.target.value)} placeholder="operator@business.com" />
+        </label>
+        <label className="field-row">
+          <span>{w.operatorPassword}</span>
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Minimum 6 characters" />
+        </label>
+        <button disabled={saving || !loginId.trim() || password.length < 6}>{saving ? w.saving : w.addOperator}</button>
+      </form>
+      <div className="operator-account-list">
+        {!operators.length && <span>{w.noOperators}</span>}
+        {operators.map(operator => (
+          <div key={operator.login_id}>
+            <strong>{operator.login_id}</strong>
+            <em>{operator.role || 'operator'}</em>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function OperatorNotesCard({ adminNotes, onAdminNote, w }) {
+  const [draft, setDraft] = useState('');
+  const saveNote = () => {
+    const clean = draft.trim();
+    if (!clean) return;
+    onAdminNote(clean);
+    setDraft('');
+  };
+
+  return (
+    <section className="operator-note-card">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.textToAdmin}</h3>
+          <p>{w.operatorsSubtitle}</p>
+        </div>
+      </div>
+      <textarea value={draft} placeholder={w.textToAdminPlaceholder} onChange={(e) => setDraft(e.target.value)} rows={5} />
+      <div className="panel-actions">
+        <button disabled={!draft.trim()} onClick={saveNote}>{w.saveAdminNote}</button>
+      </div>
+      <div className="admin-note-list">
+        <strong>{w.adminNotes}</strong>
+        {!adminNotes.length && <span>{w.noAdminNotes}</span>}
+        {adminNotes.slice(0, 4).map(note => (
+          <p key={note.id}>{note.text}</p>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function OperatorMessagesCard({ conversations, onOpenConversation, w }) {
+  const priorityRows = useMemo(() => [...(conversations || [])]
+    .sort((a, b) => Number(b.unread || 0) - Number(a.unread || 0))
+    .slice(0, 8), [conversations]);
+
+  return (
+    <section className="operator-messages-card">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.messagesFromClients}</h3>
+          <p>{w.clientsSubtitle}</p>
+        </div>
+        <span>{priorityRows.length}</span>
+      </div>
+      <div className="operator-message-list">
+        {priorityRows.map(row => (
+          <button key={row.id} onClick={() => onOpenConversation(row.id)}>
+            <Avatar data={row.avatar} size={32} platform={row.platform} />
+            <span>
+              <strong>{row.name}</strong>
+              <em>{row.preview}</em>
+            </span>
+            <b>{row.unread || 0}</b>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AdminPanel(props) {
+  const { conversations, leadStages, leadPrices, operatorDeals, adminNotes, onAdminNote, setOperatorDealCount, setLeadStage, setLeadPrice, onOpenConversation, w } = props;
+  return (
+    <div className="operator-panel">
+      <OperatorNotesCard adminNotes={adminNotes} onAdminNote={onAdminNote} w={w} />
+      <OperatorMessagesCard conversations={conversations} onOpenConversation={onOpenConversation} w={w} />
+      <OperatorsRanking leadStages={leadStages} operatorDeals={operatorDeals} setOperatorDealCount={setOperatorDealCount} w={w} />
+      <section className="operator-leads-card">
+        <div className="section-card-head">
+          <div>
+            <h3>{w.leadsTitle}</h3>
+            <p>{w.clientsSubtitle}</p>
+          </div>
+        </div>
+        <LeadsBoard conversations={conversations} leadStages={leadStages} leadPrices={leadPrices} setLeadStage={setLeadStage} setLeadPrice={setLeadPrice} onOpenConversation={onOpenConversation} w={w} />
+      </section>
+    </div>
+  );
+}
+
+function OperatorPanel(props) {
+  const { conversations, leadStages, leadPrices, adminNotes, onAdminNote, setLeadStage, setLeadPrice, onOpenConversation, w } = props;
+  return (
+    <div className="operator-panel">
+      <OperatorNotesCard adminNotes={adminNotes} onAdminNote={onAdminNote} w={w} />
+      <OperatorMessagesCard conversations={conversations} onOpenConversation={onOpenConversation} w={w} />
+      <section className="operator-leads-card">
+        <div className="section-card-head">
+          <div>
+            <h3>{w.leadsTitle}</h3>
+            <p>{w.clientsSubtitle}</p>
+          </div>
+        </div>
+        <LeadsBoard conversations={conversations} leadStages={leadStages} leadPrices={leadPrices} setLeadStage={setLeadStage} setLeadPrice={setLeadPrice} onOpenConversation={onOpenConversation} w={w} />
+      </section>
+    </div>
+  );
+}
+
+function OperatorsSection(props) {
+  const [mode, setMode] = useState('admin');
+  const w = props.w;
+  return (
+    <div className="operators-section">
+      <div className="operators-mode-switch" role="tablist" aria-label={w.operatorsTitle}>
+        <button className={mode === 'admin' ? 'active' : ''} onClick={() => setMode('admin')} role="tab" aria-selected={mode === 'admin'}>{w.adminPanel}</button>
+        <button className={mode === 'operator' ? 'active' : ''} onClick={() => setMode('operator')} role="tab" aria-selected={mode === 'operator'}>{w.operatorPanel}</button>
+      </div>
+      {mode === 'admin' ? <AdminPanel {...props} /> : <OperatorPanel {...props} />}
     </div>
   );
 }
@@ -1603,13 +1969,22 @@ function WorkspacePanel({
   onGeneratePrompt,
   generatorState,
   leadStages,
+  leadPrices,
+  operatorDeals,
+  adminNotes,
   onLeadStageChange,
+  onLeadPriceChange,
+  onOperatorDealChange,
+  onAdminNote,
   onOpenConversation,
   ownerEmail,
   onOwnerEmailSave,
   onSignOut,
+  currentUser,
 }) {
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
+  const isOperator = currentUser?.role === 'operator' && currentUser?.isAdmin !== true;
+  if (isOperator && !['leads', 'inbox', 'settings'].includes(view)) return null;
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId) || businesses[0] || {};
   const activeProviderId = aiProviderForBusiness(selectedBusiness);
   const activeProvider = AI_PROVIDERS.find(provider => provider.id === activeProviderId) || AI_PROVIDERS[0];
@@ -1618,6 +1993,8 @@ function WorkspacePanel({
   const title = {
     insights: t.insights,
     leads: t.leads,
+    clients: t.clients || w.clientsTitle,
+    operators: t.operators || w.operatorsTitle,
     knowledge: t.knowledge,
     prompts: w.promptsTitle,
     accounts: t.accounts,
@@ -1645,7 +2022,35 @@ function WorkspacePanel({
         <LeadsBoard
           conversations={conversations}
           leadStages={leadStages}
+          leadPrices={leadPrices}
           setLeadStage={onLeadStageChange}
+          setLeadPrice={onLeadPriceChange}
+          onOpenConversation={onOpenConversation}
+          w={w}
+        />
+      )}
+
+      {view === 'clients' && (
+        <ClientsTable
+          conversations={conversations}
+          leadStages={leadStages}
+          leadPrices={leadPrices}
+          onOpenConversation={onOpenConversation}
+          w={w}
+        />
+      )}
+
+      {view === 'operators' && (
+        <OperatorsSection
+          conversations={conversations}
+          leadStages={leadStages}
+          leadPrices={leadPrices}
+          operatorDeals={operatorDeals}
+          adminNotes={adminNotes}
+          onAdminNote={onAdminNote}
+          setOperatorDealCount={onOperatorDealChange}
+          setLeadStage={onLeadStageChange}
+          setLeadPrice={onLeadPriceChange}
           onOpenConversation={onOpenConversation}
           w={w}
         />
@@ -1925,6 +2330,14 @@ function WorkspacePanel({
         </div>
       )}
 
+      {view === 'settings' && !isOperator && (
+        <OperatorAccountsPanel
+          selectedBusinessId={selectedBusiness.id}
+          onToast={onToast}
+          w={w}
+        />
+      )}
+
       {view === 'profile' && (
         <div className="settings-view">
           <div className="metric-card"><span>API base</span><b>{API_BASE}</b></div>
@@ -1948,26 +2361,43 @@ function WorkspacePanel({
 }
 
 // ---------- Rail ----------
-function Rail({ t, activeView, onView }) {
+function Rail({ t, activeView, onView, currentUser }) {
+  const isOperator = currentUser?.role === 'operator' && currentUser?.isAdmin !== true;
   const items = [
-    { id: 'inbox', icon: <I.Inbox />, label: t.inbox, dot: true },
-    { id: 'insights', icon: <I.Chart />, label: t.insights },
     { id: 'leads', icon: <I.Star />, label: t.leads || 'Leads' },
+    { id: 'inbox', icon: <I.Inbox />, label: t.inbox, dot: true },
+    { id: 'clients', icon: <I.Comment />, label: t.clients || 'Clients' },
+    { id: 'operators', icon: <I.Phone />, label: t.operators || 'Operators' },
     { id: 'knowledge', icon: <I.Book />, label: t.knowledge },
     { id: 'prompts', icon: <I.Sparkle />, label: t.prompts || 'AI Prompts' },
     { id: 'accounts', icon: <I.Layers />, label: t.accounts },
-  ];
+  ].filter(item => !isOperator || ['leads', 'inbox'].includes(item.id));
   return (
     <aside className="rail">
       {items.map(it => (
         <button key={it.id} className={`rail-btn ${activeView === it.id ? 'active' : ''}`} title={it.label} onClick={() => onView(it.id)}>
           {it.icon}
+          <span className="rail-label">{it.label}</span>
           {it.dot && <span className="dot" />}
         </button>
       ))}
       <div className="rail-spacer" />
-      <button className={`rail-btn ${activeView === 'settings' ? 'active' : ''}`} title={t.settings} onClick={() => onView('settings')}><I.Sett /></button>
-      <button className="rail-avatar" title="You" style={{ marginTop: 8 }} onClick={() => onView('profile')}>A</button>
+      <button className={`rail-btn ${activeView === 'settings' ? 'active' : ''}`} title={t.settings} onClick={() => onView('settings')}>
+        <I.Sett />
+        <span className="rail-label">{t.settings}</span>
+      </button>
+      {!isOperator && (
+        <button className={`rail-btn ${activeView === 'profile' ? 'active' : ''}`} title={t.you || 'You'} onClick={() => onView('profile')}>
+          <span className="rail-avatar-mini">A</span>
+          <span className="rail-label">{t.you || 'You'}</span>
+        </button>
+      )}
+      {!isOperator && (
+        <button className={`rail-btn ${activeView === 'insights' ? 'active' : ''}`} title={t.insights} onClick={() => onView('insights')}>
+          <I.Chart />
+          <span className="rail-label">{t.insights}</span>
+        </button>
+      )}
     </aside>
   );
 }
@@ -2830,8 +3260,9 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "theme": "light"
 }/*EDITMODE-END*/;
 
-function App({ lang, setLang, onSignOut }) {
+function App({ lang, setLang, onSignOut, currentUser }) {
   const t = window.STRINGS[lang];
+  const isOperator = currentUser?.role === 'operator' && currentUser?.isAdmin !== true;
 
   const [conversations, setConversations] = useState(window.CONVERSATIONS);
   const [selectedId, setSelectedId] = useState('c1');
@@ -2853,6 +3284,12 @@ function App({ lang, setLang, onSignOut }) {
   const [promptSaving, setPromptSaving] = useState(false);
   const [promptGeneratorState, setPromptGeneratorState] = useState({});
   const [leadStages, setLeadStages] = useState(() => readStoredObject(LEAD_STAGES_STORAGE_KEY));
+  const [leadPrices, setLeadPrices] = useState(() => readStoredObject(LEAD_PRICES_STORAGE_KEY));
+  const [operatorDeals, setOperatorDeals] = useState(() => readStoredObject(OPERATOR_DEALS_STORAGE_KEY));
+  const [operatorAdminNotes, setOperatorAdminNotes] = useState(() => {
+    const stored = readStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY);
+    return Array.isArray(stored.items) ? stored.items : [];
+  });
   const [aiOverrides, setAiOverrides] = useState(() => readStoredObject(AI_OVERRIDE_STORAGE_KEY));
   const [deletedConversations, setDeletedConversations] = useState(() => readStoredObject(DELETED_CONVERSATIONS_STORAGE_KEY));
   const selectedIdRef = useRef(selectedId);
@@ -2863,6 +3300,8 @@ function App({ lang, setLang, onSignOut }) {
   const inboxPollBusy = useRef(false);
   const statsPollBusy = useRef(false);
   const businessesRef = useRef([]);
+  const workspaceStateHydratedRef = useRef(false);
+  const workspaceStateTimersRef = useRef({});
   const conv = conversations.find(c => c.id === selectedId);
   const aiOn = conv ? conv.aiOn : false;
   const messages = threads[selectedId] || window.getThread(selectedId);
@@ -2901,6 +3340,56 @@ function App({ lang, setLang, onSignOut }) {
     } catch (e) {
       setStats(null);
     }
+  };
+
+  const loadWorkspaceState = async (businessId = selectedBusinessId) => {
+    const business = String(businessId || '').trim();
+    if (!business || !liveModeRef.current) return;
+    try {
+      const response = await API.get(`/api/v2/workspace-state?business_id=${encodeURIComponent(business)}`);
+      const state = response?.data || {};
+      workspaceStateHydratedRef.current = true;
+
+      if (state.lead_stages && typeof state.lead_stages === 'object') {
+        setLeadStages(state.lead_stages);
+        writeStoredObject(LEAD_STAGES_STORAGE_KEY, state.lead_stages);
+      }
+      if (state.lead_prices && typeof state.lead_prices === 'object') {
+        setLeadPrices(state.lead_prices);
+        writeStoredObject(LEAD_PRICES_STORAGE_KEY, state.lead_prices);
+      }
+      if (state.operator_deals && typeof state.operator_deals === 'object') {
+        setOperatorDeals(state.operator_deals);
+        writeStoredObject(OPERATOR_DEALS_STORAGE_KEY, state.operator_deals);
+      }
+      if (state.operator_admin_notes && typeof state.operator_admin_notes === 'object') {
+        const notes = Array.isArray(state.operator_admin_notes.items) ? state.operator_admin_notes.items : [];
+        setOperatorAdminNotes(notes);
+        writeStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY, { items: notes });
+      }
+    } catch (e) {
+      workspaceStateHydratedRef.current = true;
+    }
+  };
+
+  const queueWorkspaceStateSave = (statePatch = {}) => {
+    if (!liveModeRef.current || !workspaceStateHydratedRef.current) return;
+    const business = String(selectedBusinessId || '').trim();
+    if (!business) return;
+
+    Object.entries(statePatch).forEach(([key, value]) => {
+      window.clearTimeout(workspaceStateTimersRef.current[key]);
+      workspaceStateTimersRef.current[key] = window.setTimeout(async () => {
+        try {
+          await API.postJson('/api/v2/workspace-state', {
+            business_id: business,
+            state: { [key]: value },
+          });
+        } catch (e) {
+          // Keep local UX fast; backend sync can retry on the next edit.
+        }
+      }, 450);
+    });
   };
 
   const loadBusinesses = async ({ silent = false, ownerEmailOverride = '' } = {}) => {
@@ -3293,6 +3782,12 @@ function App({ lang, setLang, onSignOut }) {
   }, [selectedBusinessId]);
 
   useEffect(() => {
+    if (!selectedBusinessId || !liveMode) return;
+    workspaceStateHydratedRef.current = false;
+    loadWorkspaceState(selectedBusinessId);
+  }, [selectedBusinessId, liveMode]);
+
+  useEffect(() => {
     loadThread(selectedId);
   }, [selectedId, liveMode]);
 
@@ -3492,8 +3987,24 @@ function App({ lang, setLang, onSignOut }) {
   };
 
   const changeView = (view) => {
+    if (isOperator && !['leads', 'inbox', 'settings'].includes(view)) {
+      setActiveView('leads');
+      showToast('Operator access is limited to Leads, Inbox, and Settings');
+      return;
+    }
     setActiveView(view);
-    const names = { inbox: t.inbox, insights: t.insights, leads: t.leads || 'Leads', knowledge: t.knowledge, prompts: 'AI Prompt Settings', accounts: t.accounts, settings: t.settings, profile: 'Profile' };
+    const names = {
+      inbox: t.inbox,
+      insights: t.insights,
+      leads: t.leads || 'Leads',
+      clients: t.clients || 'Clients',
+      operators: t.operators || 'Operators',
+      knowledge: t.knowledge,
+      prompts: 'AI Prompt Settings',
+      accounts: t.accounts,
+      settings: t.settings,
+      profile: 'Profile',
+    };
     showToast(`${names[view] || view} selected`);
   };
 
@@ -3502,9 +4013,41 @@ function App({ lang, setLang, onSignOut }) {
     setLeadStages(prev => {
       const next = { ...prev, [conversationId]: stage };
       writeStoredObject(LEAD_STAGES_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ lead_stages: next });
       return next;
     });
     showToast(`Lead stage updated to ${stage}`);
+  };
+
+  const setLeadPrice = (conversationId, price) => {
+    setLeadPrices(prev => {
+      const next = { ...prev };
+      const clean = String(price || '').trim();
+      if (clean) next[conversationId] = price;
+      else delete next[conversationId];
+      writeStoredObject(LEAD_PRICES_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ lead_prices: next });
+      return next;
+    });
+  };
+
+  const setOperatorDealCount = (operatorId, value) => {
+    setOperatorDeals(prev => {
+      const next = { ...prev, [operatorId]: Math.max(0, Number(value || 0)) };
+      writeStoredObject(OPERATOR_DEALS_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ operator_deals: next });
+      return next;
+    });
+  };
+
+  const addOperatorAdminNote = (text) => {
+    setOperatorAdminNotes(prev => {
+      const next = [{ id: `${Date.now()}`, text, createdAt: new Date().toISOString() }, ...prev].slice(0, 20);
+      writeStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY, { items: next });
+      queueWorkspaceStateSave({ operator_admin_notes: { items: next } });
+      return next;
+    });
+    showToast('Note sent to admin');
   };
 
   const selectConversation = (conversationId) => {
@@ -3540,7 +4083,7 @@ function App({ lang, setLang, onSignOut }) {
           onMore={() => setMoreOpen(v => !v)}
           moreOpen={moreOpen}
         />
-        <Rail t={t} activeView={activeView} onView={changeView} />
+        <Rail t={t} activeView={activeView} onView={changeView} currentUser={currentUser} />
         <ListColumn
           conversations={conversations}
           selectedId={selectedId}
@@ -3585,11 +4128,18 @@ function App({ lang, setLang, onSignOut }) {
             onGeneratePrompt={generatePromptSuggestion}
             generatorState={promptGeneratorState}
             leadStages={leadStages}
+            leadPrices={leadPrices}
+            operatorDeals={operatorDeals}
+            adminNotes={operatorAdminNotes}
             onLeadStageChange={setLeadStage}
+            onLeadPriceChange={setLeadPrice}
+            onOperatorDealChange={setOperatorDealCount}
+            onAdminNote={addOperatorAdminNote}
             onOpenConversation={selectConversation}
             ownerEmail={ownerEmail}
             onOwnerEmailSave={saveOwnerEmailScope}
             onSignOut={onSignOut}
+            currentUser={currentUser}
           />
         )}
         {activeView === 'inbox' && <DetailColumn conv={conv} t={t} stats={stats} onDelete={deleteConversation} messages={messages} />}
@@ -3624,10 +4174,11 @@ function App({ lang, setLang, onSignOut }) {
 function Root() {
   const [lang, setLang] = useState(() => window.localStorage.getItem(UI_LANG_STORAGE_KEY) || 'en');
   const [showDashboard, setShowDashboard] = useState(() => window.location.hash === DASHBOARD_HASH || urlParams.get('dashboard') === '1');
+  const [currentUser, setCurrentUser] = useState(() => readAuthSession() || null);
   const [signedIn, setSignedIn] = useState(() => {
     const ownerFromUrl = ownerEmailFromUrl();
     if (ownerFromUrl && dashboardSecret()) {
-      saveAuthSession(ownerFromUrl);
+      saveAuthSession(ownerFromUrl, { isAdmin: true, role: 'admin' });
       return true;
     }
     return !!readAuthSession();
@@ -3655,13 +4206,14 @@ function Root() {
 
   const signOut = () => {
     clearAuthSession();
+    setCurrentUser(null);
     setSignedIn(false);
     backToLanding();
   };
 
   if (!showDashboard) return <LandingPage onOpenDashboard={openDashboard} lang={lang} setLang={setLang} />;
-  if (!signedIn) return <SignInPage lang={lang} onSignedIn={() => setSignedIn(true)} onBack={backToLanding} />;
-  return <App lang={lang} setLang={setLang} onSignOut={signOut} />;
+  if (!signedIn) return <SignInPage lang={lang} onSignedIn={(session) => { setCurrentUser(session || readAuthSession()); setSignedIn(true); }} onBack={backToLanding} />;
+  return <App lang={lang} setLang={setLang} onSignOut={signOut} currentUser={currentUser || readAuthSession()} />;
 }
 
 createRoot(document.getElementById('root')).render(<Root />);
