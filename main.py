@@ -664,18 +664,21 @@ def resolve_dashboard_access(authorization: str = "", x_dashboard_secret: str = 
     token = parse_auth_header(authorization)
     if token:
         payload = decode_dashboard_auth_token(token)
-        if not payload:
-            return None
-        email = normalize_email(payload.get("email"))
-        is_admin = bool(payload.get("is_admin"))
-        token_role = normalize_id(payload.get("role", "")).lower()
-        if is_admin:
-            role = token_role or ("super_admin" if is_super_admin_email(email) else "admin")
-            business_ids = []
-        else:
-            business_ids = list_user_business_ids(email)
-            role = token_role or get_user_business_role(email)
-        return {"email": email, "is_admin": is_admin, "business_ids": business_ids, "role": role or "operator"}
+        if payload:
+            email = normalize_email(payload.get("email"))
+            is_admin = bool(payload.get("is_admin"))
+            token_role = normalize_id(payload.get("role", "")).lower()
+            if is_admin:
+                role = token_role or ("super_admin" if is_super_admin_email(email) else "admin")
+                business_ids = []
+            else:
+                business_ids = list_user_business_ids(email)
+                role = token_role or get_user_business_role(email)
+            return {"email": email, "is_admin": is_admin, "business_ids": business_ids, "role": role or "operator"}
+        # Fallback path for stale/invalid browser token when dashboard secret is valid.
+        if not require_dashboard_secret(x_dashboard_secret):
+            return {"email": "system", "is_admin": True, "business_ids": [], "role": "admin"}
+        return None
 
     # Backward-compatible admin/system path
     if not require_dashboard_secret(x_dashboard_secret):
