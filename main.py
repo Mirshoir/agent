@@ -139,6 +139,8 @@ SUPER_ADMIN_EMAILS = {
 # Fallback store used only when `dashboard_workspace_state` table is missing.
 # This keeps operator tasks usable until SQL migration is applied.
 WORKSPACE_STATE_FALLBACK: dict[str, dict] = {}
+STATS_CACHE_TTL_SECONDS = int(os.getenv("STATS_CACHE_TTL_SECONDS", "20"))
+STATS_CACHE: dict[str, dict] = {}
 WHATSAPP_EMBEDDED_REDIRECT_URI = os.getenv(
     "WHATSAPP_EMBEDDED_REDIRECT_URI",
     f"{PUBLIC_BASE_URL.rstrip('/')}/auth/whatsapp/embedded/callback",
@@ -4570,7 +4572,16 @@ async def get_conversations_v2(
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     try:
-        query = supabase.table("inbox_messages").select("*").order("created_at", desc=True).limit(900)
+        # Keep payload slim on hot path; this endpoint is polled frequently.
+        query = (
+            supabase.table("inbox_messages")
+            .select(
+                "business_id,platform,channel,customer_id,chat_id,customer_name,"
+                "content,created_at,direction,is_read,needs_human,raw_payload,post_id,media_id"
+            )
+            .order("created_at", desc=True)
+            .limit(700)
+        )
         clean_business_id = normalize_id(business_id)
         if clean_business_id:
             if not can_access_business(access, clean_business_id):
@@ -4585,8 +4596,7 @@ async def get_conversations_v2(
         if platform != "all":
             query = query.eq("platform", platform)
 
-        result = query.execute()
-        rows = result.data or []
+        rows = query.execute().data or []
 
         conversations_map = {}
         for row in rows:
@@ -4677,7 +4687,11 @@ async def get_conversation_messages_v2(
 
         query = (
             supabase.table("inbox_messages")
-            .select("*")
+            .select(
+                "id,direction,role,created_at,media_type,content,platform,channel,customer_id,"
+                "external_message_id,media_file_id,media_url,raw_payload,post_permalink,"
+                "post_image_url,post_media_type,post_id,media_id"
+            )
             .eq("platform", platform)
             .eq("business_id", business_id)
         )
@@ -5100,34 +5114,44 @@ async def get_stats_v2(
 
     try:
         if access.get("is_admin"):
-            businesses = get_all_businesses()
             scoped_ids = []
+            cache_key = "admin"
         else:
             scoped_ids = access.get("business_ids") or []
+            cache_key = f"user:{','.join(sorted(scoped_ids))}"
+
+        now = time.time()
+        cached = STATS_CACHE.get(cache_key)
+        if cached and (now - float(cached.get("ts", 0))) < STATS_CACHE_TTL_SECONDS:
+            return {'status': 'ok', 'data': cached.get("data", {})}
+
+        if access.get("is_admin"):
+            businesses = get_all_businesses()
+        else:
             businesses = []
             if scoped_ids:
                 businesses = (
                     supabase.table("businesses")
-                    .select("*")
+                    .select("id,bot_enabled")
                     .in_("id", scoped_ids)
                     .order("created_at", desc=True)
                     .execute()
                     .data
                     or []
                 )
-        return {
-            'status': 'ok',
-            'data': {
-                'total_messages': get_message_count(business_ids=scoped_ids) if not access.get("is_admin") else get_message_count(),
-                'total_accounts': len(businesses),
-                'active_accounts': sum(1 for b in businesses if b.get("bot_enabled")),
-                'instagram_messages': get_message_count('instagram', scoped_ids) if not access.get("is_admin") else get_message_count('instagram'),
-                'telegram_messages': get_message_count('telegram', scoped_ids) if not access.get("is_admin") else get_message_count('telegram'),
-                'whatsapp_messages': get_message_count('whatsapp', scoped_ids) if not access.get("is_admin") else get_message_count('whatsapp'),
-                'active_conversations': 0,
-                'needing_human': 0,
-            }
+
+        payload = {
+            'total_messages': get_message_count(business_ids=scoped_ids) if not access.get("is_admin") else get_message_count(),
+            'total_accounts': len(businesses),
+            'active_accounts': sum(1 for b in businesses if b.get("bot_enabled")),
+            'instagram_messages': get_message_count('instagram', scoped_ids) if not access.get("is_admin") else get_message_count('instagram'),
+            'telegram_messages': get_message_count('telegram', scoped_ids) if not access.get("is_admin") else get_message_count('telegram'),
+            'whatsapp_messages': get_message_count('whatsapp', scoped_ids) if not access.get("is_admin") else get_message_count('whatsapp'),
+            'active_conversations': 0,
+            'needing_human': 0,
         }
+        STATS_CACHE[cache_key] = {"ts": now, "data": payload}
+        return {'status': 'ok', 'data': payload}
 
     except Exception as e:
         log("Error getting stats", str(e))
