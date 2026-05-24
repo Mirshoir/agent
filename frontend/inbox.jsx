@@ -105,7 +105,7 @@ function saveAuthSession(ownerEmail, session = {}) {
   window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, clean);
 }
 
-function clearAuthSession({ preserveSecret = true, preserveOwner = false } = {}) {
+function clearAuthSession({ preserveSecret = false, preserveOwner = false } = {}) {
   window.localStorage.removeItem(DASHBOARD_AUTH_STORAGE_KEY);
   if (!preserveOwner) window.localStorage.removeItem(OWNER_EMAIL_STORAGE_KEY);
   if (!preserveSecret) window.localStorage.removeItem('instaagent_dashboard_secret');
@@ -808,7 +808,7 @@ function SignInPage({ lang, onSignedIn, onBack }) {
   const l = LANDING_TEXT[lang] || LANDING_TEXT.en;
   const [mode, setMode] = useState('signin');
   const [email, setEmail] = useState(resolvedOwnerEmail());
-  const [secret, setSecret] = useState(dashboardSecret());
+  const [secret, setSecret] = useState('');
   const [signUpRole, setSignUpRole] = useState('operator');
   const [businessId, setBusinessId] = useState('');
   const [loading, setLoading] = useState(false);
@@ -823,7 +823,7 @@ function SignInPage({ lang, onSignedIn, onBack }) {
       return;
     }
     if (!cleanSecret) {
-      setError('Access key is required.');
+      setError('Password is required.');
       return;
     }
     setLoading(true);
@@ -2791,7 +2791,6 @@ function WorkspacePanel({
             />
           </label>
           <div className="panel-actions">
-            <button onClick={() => { window.localStorage.removeItem('instaagent_dashboard_secret'); onToast('Dashboard secret cleared'); }}>Clear secret</button>
             <button onClick={() => navigator.clipboard?.writeText(API_BASE).then(() => onToast('API base copied'))}>Copy API base</button>
             <button onClick={onSignOut}>Sign out</button>
           </div>
@@ -3710,7 +3709,6 @@ function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onT
             <div className="pop-menu profile-menu">
               <button onClick={() => { onOpenProfile?.(); setProfileOpen(false); }}>Profile settings</button>
               <button onClick={() => fileInputRef.current?.click()}>Change photo</button>
-              <button onClick={() => { window.localStorage.removeItem('instaagent_dashboard_secret'); onToast('Dashboard secret cleared'); }}>Clear secret</button>
               <button onClick={onSignOut}>Sign out</button>
             </div>
           )}
@@ -4061,20 +4059,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       if (sideLoad || !businessesRef.current.length) {
         await loadBusinesses({ silent: true, ownerEmailOverride });
       }
-      let data;
-      try {
-        data = await API.get('/api/v2/conversations');
-      } catch (e) {
-        const hasSecret = !!dashboardSecret();
-        const hasToken = !!readAuthSession()?.token;
-        const unauthorized = /unauthorized|401/i.test(String(e?.message || ''));
-        if (unauthorized && hasSecret && hasToken) {
-          clearAuthSession({ preserveSecret: true, preserveOwner: true });
-          data = await API.get('/api/v2/conversations');
-        } else {
-          throw e;
-        }
-      }
+      const data = await API.get('/api/v2/conversations');
       const selectedCurrent = selectedIdRef.current;
       const ownerScoped = normalizeOwnerEmail(ownerEmailOverride || ownerEmail);
       const allowedBusinessIds = new Set((businessesRef.current || []).map(row => row.id).filter(Boolean));
@@ -4104,7 +4089,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       const unauthorized = /unauthorized|401/i.test(String(e?.message || ''));
       if (unauthorized && readAuthSession()?.token) {
         showToast('Session expired. Please sign in again.');
-        onSignOut?.();
+        onSignOut?.(false);
         return false;
       }
       if (silent) {
@@ -4120,16 +4105,6 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     } finally {
       if (!silent) setLoading(false);
     }
-  };
-
-  const saveSecretAndRefresh = (secret) => {
-    const clean = String(secret || '').trim();
-    if (clean) {
-      window.localStorage.setItem('instaagent_dashboard_secret', clean);
-    } else {
-      window.localStorage.removeItem('instaagent_dashboard_secret');
-    }
-    loadConversations();
   };
 
   const saveOwnerEmailScope = async (value) => {
@@ -4814,11 +4789,15 @@ function Root() {
     setShowDashboard(false);
   };
 
-  const signOut = () => {
+  const signOut = (backToHome = true) => {
     clearAuthSession();
     setCurrentUser(null);
     setSignedIn(false);
-    backToLanding();
+    if (backToHome) backToLanding();
+    else {
+      window.location.hash = DASHBOARD_HASH;
+      setShowDashboard(true);
+    }
   };
 
   if (!showDashboard) return <LandingPage onOpenDashboard={openDashboard} lang={lang} setLang={setLang} />;
