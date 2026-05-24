@@ -3939,6 +3939,20 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     }
   };
 
+  const loadOperatorTasks = async (businessId = selectedBusinessId) => {
+    const business = String(businessId || '').trim();
+    if (!business || !liveModeRef.current) return [];
+    try {
+      const response = await API.get(`/api/v2/operator-tasks?business_id=${encodeURIComponent(business)}&for_me=true`);
+      const rows = Array.isArray(response?.data) ? response.data : [];
+      setOperatorAdminNotes(rows);
+      writeStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY, { items: rows });
+      return rows;
+    } catch {
+      return [];
+    }
+  };
+
   const updatePromptSetting = (key, value) => {
     setPromptSettings(settings => ({ ...settings, [key]: value }));
   };
@@ -4313,6 +4327,10 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   }, [selectedBusinessId, liveMode]);
 
   useEffect(() => {
+    if (liveMode) loadOperatorTasks(selectedBusinessId);
+  }, [selectedBusinessId, liveMode, currentUser?.email, currentUser?.ownerEmail, currentUser?.role]);
+
+  useEffect(() => {
     if (!selectedBusinessId || !liveMode) return;
     workspaceStateHydratedRef.current = false;
     loadWorkspaceState(selectedBusinessId);
@@ -4574,20 +4592,44 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     });
   };
 
-  const addOperatorAdminNote = (text, recipients = ['*'], mode = 'all') => {
-    setOperatorAdminNotes(prev => {
-      const next = [{
-        id: `${Date.now()}`,
-        text,
-        recipients,
-        mode,
-        createdAt: new Date().toISOString(),
-      }, ...prev].slice(0, 50);
-      writeStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY, { items: next });
-      queueWorkspaceStateSave({ operator_admin_notes: { items: next } });
-      return next;
-    });
-    showToast('Task sent to operators');
+  const addOperatorAdminNote = async (text, recipients = ['*'], mode = 'all') => {
+    const clean = String(text || '').trim();
+    if (!clean) return;
+    if (!selectedBusinessId) {
+      showToast('Select a business first');
+      return;
+    }
+
+    if (!liveMode) {
+      setOperatorAdminNotes(prev => {
+        const next = [{
+          id: `${Date.now()}`,
+          text: clean,
+          recipients,
+          mode,
+          createdAt: new Date().toISOString(),
+        }, ...prev].slice(0, 50);
+        writeStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY, { items: next });
+        queueWorkspaceStateSave({ operator_admin_notes: { items: next } });
+        return next;
+      });
+      showToast('Task saved locally. Connect live backend to sync with operators.');
+      return;
+    }
+
+    try {
+      await API.postJson('/api/v2/operator-tasks', {
+        business_id: selectedBusinessId,
+        text: clean,
+        recipients: Array.isArray(recipients) ? recipients : ['*'],
+        assign_mode: String(mode || 'all'),
+      });
+      await loadOperatorTasks(selectedBusinessId);
+      showToast('Task sent to operators');
+    } catch (e) {
+      setApiError(e.message);
+      showToast(e.message);
+    }
   };
 
   const selectConversation = (conversationId) => {
