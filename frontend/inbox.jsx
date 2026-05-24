@@ -123,7 +123,7 @@ function scopedPath(path) {
 const API = {
   async fetchWithTimeout(url, options = {}, timeoutMs = 35000) {
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort('timeout'), timeoutMs);
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
       return await fetch(url, { ...options, signal: controller.signal });
     } finally {
@@ -180,17 +180,14 @@ const THREAD_POLL_MS = 5000;
 const INBOX_POLL_MS = 12000;
 const STATS_POLL_MS = 60000;
 const TASKS_POLL_MS = 5000;
-const THREAD_LOAD_LIMIT = 50;
+const THREAD_LOAD_LIMIT = 80;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
 const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
 const LEAD_PRICES_STORAGE_KEY = 'instaagent_lead_prices';
 const OPERATOR_DEALS_STORAGE_KEY = 'instaagent_operator_deals';
 const OPERATOR_ADMIN_NOTES_STORAGE_KEY = 'instaagent_operator_admin_notes';
-const MANUAL_CLIENTS_STORAGE_KEY = 'instaagent_manual_clients';
 const USER_PROFILE_STORAGE_KEY = 'instaagent_user_profiles';
-const CONVERSATIONS_CACHE_STORAGE_KEY = 'instaagent_conversations_cache_v1';
-const CONVERSATIONS_CACHE_TTL_MS = 90 * 1000;
 const DASHBOARD_HASH = '#dashboard';
 const UI_LANG_STORAGE_KEY = 'instaagent_ui_lang';
 
@@ -365,27 +362,6 @@ function writeStoredObject(key, value) {
   window.localStorage.setItem(key, JSON.stringify(value || {}));
 }
 
-function readConversationsCache(ownerEmail = '') {
-  try {
-    const payload = JSON.parse(window.localStorage.getItem(CONVERSATIONS_CACHE_STORAGE_KEY) || '{}');
-    if (!payload || typeof payload !== 'object') return [];
-    const sameOwner = normalizeOwnerEmail(payload.ownerEmail) === normalizeOwnerEmail(ownerEmail);
-    const ageMs = Date.now() - Number(payload.at || 0);
-    if (!sameOwner || !Array.isArray(payload.items) || ageMs > CONVERSATIONS_CACHE_TTL_MS) return [];
-    return payload.items;
-  } catch {
-    return [];
-  }
-}
-
-function writeConversationsCache(ownerEmail = '', items = []) {
-  window.localStorage.setItem(CONVERSATIONS_CACHE_STORAGE_KEY, JSON.stringify({
-    ownerEmail: normalizeOwnerEmail(ownerEmail),
-    at: Date.now(),
-    items: Array.isArray(items) ? items : [],
-  }));
-}
-
 function userIdentity(currentUser = {}) {
   return normalizeOwnerEmail(
     currentUser?.ownerEmail ||
@@ -488,15 +464,6 @@ function apiErrorMessage(data, status) {
   if (typeof message === 'string') return message;
   if (message) return JSON.stringify(message);
   return `Request failed: ${status}`;
-}
-
-function isAbortLike(error) {
-  const text = String(error?.message || error || '').toLowerCase();
-  return error?.name === 'AbortError'
-    || text.includes('aborterror')
-    || text.includes('signal is aborted')
-    || text.includes('aborted')
-    || text.includes('timeout');
 }
 
 function apiHeaders({ includeAuth = true } = {}) {
@@ -1393,9 +1360,8 @@ const WORKSPACE_TEXT = {
     leadNew: 'New', leadQualified: 'Qualified', leadNegotiation: 'Negotiation', leadWon: 'Won', leadLost: 'Lost',
     leadAmount: 'Potential value', leadSource: 'Source', leadUpdated: 'Updated', leadEmpty: 'No leads in this stage yet.',
     leadOpen: 'Open chat', leadPrice: 'Price', leadPricePlaceholder: 'Add price', leadPriceClear: 'Clear price',
-    clientsTitle: 'Clients table', clientsSubtitle: 'Clients are added manually by admins and operators.', clientsEmpty: 'No clients added yet.',
+    clientsTitle: 'Clients table', clientsSubtitle: 'All customers with status, channel, price, and last message.', clientsEmpty: 'No clients yet.',
     client: 'Client', lastMessage: 'Last message', status: 'Status', channel: 'Channel',
-    addClient: 'Add client', removeClient: 'Remove', clientSelectPlaceholder: 'Select chat to add',
     operatorsTitle: 'Operators panel', operatorsSubtitle: 'Operator workspace for tasks, client messages, and leads.',
     textToOperators: 'Text to operators', textToOperatorsPlaceholder: 'Write task for operators...', saveAdminNote: 'Send task',
     adminNotes: 'Tasks history', noAdminNotes: 'No tasks yet.', messagesFromClients: 'Messages from clients',
@@ -1435,9 +1401,8 @@ const WORKSPACE_TEXT = {
     leadNew: 'Yangi', leadQualified: 'Saralangan', leadNegotiation: 'Muzokara', leadWon: 'Yutilgan', leadLost: 'Yo‘qotilgan',
     leadAmount: 'Potensial qiymat', leadSource: 'Manba', leadUpdated: 'Yangilangan', leadEmpty: 'Bu bosqichda lid yo‘q.',
     leadOpen: 'Chatni ochish', leadPrice: 'Narx', leadPricePlaceholder: 'Narx kiriting', leadPriceClear: 'Narxni o‘chirish',
-    clientsTitle: 'Mijozlar jadvali', clientsSubtitle: 'Mijozlar admin va operatorlar tomonidan qo‘lda qo‘shiladi.', clientsEmpty: 'Hali mijoz qo‘shilmagan.',
+    clientsTitle: 'Mijozlar jadvali', clientsSubtitle: 'Barcha mijozlar: status, kanal, narx va oxirgi xabar.', clientsEmpty: 'Hali mijoz yo‘q.',
     client: 'Mijoz', lastMessage: 'Oxirgi xabar', status: 'Status', channel: 'Kanal',
-    addClient: 'Mijoz qo‘shish', removeClient: 'O‘chirish', clientSelectPlaceholder: 'Qo‘shish uchun chat tanlang',
     operatorsTitle: 'Operator paneli', operatorsSubtitle: 'Vazifalar, mijoz xabarlari va lidlar uchun operator ish maydoni.',
     textToOperators: 'Operatorlarga topshiriq', textToOperatorsPlaceholder: 'Operatorlar uchun vazifa yozing...', saveAdminNote: 'Vazifani yuborish',
     adminNotes: 'Vazifalar tarixi', noAdminNotes: 'Hali vazifa yo‘q.', messagesFromClients: 'Mijozlardan xabarlar',
@@ -1477,9 +1442,8 @@ const WORKSPACE_TEXT = {
     leadNew: 'Новые', leadQualified: 'Квалиф.', leadNegotiation: 'Переговоры', leadWon: 'Сделка', leadLost: 'Потеряно',
     leadAmount: 'Потенциал', leadSource: 'Источник', leadUpdated: 'Обновлено', leadEmpty: 'В этой стадии пока нет лидов.',
     leadOpen: 'Открыть чат', leadPrice: 'Цена', leadPricePlaceholder: 'Добавить цену', leadPriceClear: 'Удалить цену',
-    clientsTitle: 'Таблица клиентов', clientsSubtitle: 'Клиенты добавляются вручную админами и операторами.', clientsEmpty: 'Клиенты еще не добавлены.',
+    clientsTitle: 'Таблица клиентов', clientsSubtitle: 'Все клиенты со статусом, каналом, ценой и последним сообщением.', clientsEmpty: 'Клиентов пока нет.',
     client: 'Клиент', lastMessage: 'Последнее сообщение', status: 'Статус', channel: 'Канал',
-    addClient: 'Добавить клиента', removeClient: 'Удалить', clientSelectPlaceholder: 'Выберите чат',
     operatorsTitle: 'Панель оператора', operatorsSubtitle: 'Рабочая зона оператора: задачи, клиенты и лиды.',
     textToOperators: 'Задача операторам', textToOperatorsPlaceholder: 'Напишите задачу для операторов...', saveAdminNote: 'Отправить задачу',
     adminNotes: 'История задач', noAdminNotes: 'Задач пока нет.', messagesFromClients: 'Сообщения клиентов',
@@ -1831,40 +1795,12 @@ function LeadsBoard({ conversations, leadStages, leadPrices, setLeadStage, setLe
   );
 }
 
-function snapshotClientFromConversation(conv = {}) {
-  return {
-    id: conv.id,
-    name: conv.name,
-    handle: conv.handle,
-    avatar: conv.avatar,
-    platform: conv.platform,
-    channelName: conv.channelName,
-    preview: conv.preview,
-    unread: conv.unread,
-  };
-}
-
-function ClientsTable({ conversations, manualClients = {}, leadStages, leadPrices, onAddClient, onRemoveClient, onOpenConversation, w }) {
-  const [selectedClientId, setSelectedClientId] = useState('');
-  const conversationMap = useMemo(() => {
-    const map = new Map();
-    (conversations || []).forEach(conv => map.set(conv.id, conv));
-    return map;
-  }, [conversations]);
-  const clientIds = useMemo(() => Object.keys(manualClients || {}), [manualClients]);
-  const rows = useMemo(() => clientIds.map(id => {
-    const saved = manualClients[id] || {};
-    const source = conversationMap.get(id) || saved.snapshot || {};
-    return {
-      ...source,
-      id,
-      stage: leadStages[id] || guessLeadStage(source),
-      price: leadPrices[id] || '',
-    };
-  }).filter(row => row.id && row.name), [clientIds, conversationMap, manualClients, leadStages, leadPrices]);
-  const addOptions = useMemo(() => (conversations || [])
-    .filter(conv => conv.id && !manualClients[conv.id])
-    .slice(0, 120), [conversations, manualClients]);
+function ClientsTable({ conversations, leadStages, leadPrices, onOpenConversation, w }) {
+  const rows = useMemo(() => (conversations || []).map(conv => ({
+    ...conv,
+    stage: leadStages[conv.id] || guessLeadStage(conv),
+    price: leadPrices[conv.id] || '',
+  })), [conversations, leadStages, leadPrices]);
 
   const stageNames = {
     new: w.leadNew,
@@ -1882,25 +1818,6 @@ function ClientsTable({ conversations, manualClients = {}, leadStages, leadPrice
           <p>{w.clientsSubtitle}</p>
         </div>
         <span>{rows.length}</span>
-      </div>
-      <div className="client-add-row">
-        <select value={selectedClientId} onChange={(e) => setSelectedClientId(e.target.value)}>
-          <option value="">{w.clientSelectPlaceholder}</option>
-          {addOptions.map(option => (
-            <option key={option.id} value={option.id}>{option.name} - {option.channelName || option.platform}</option>
-          ))}
-        </select>
-        <button
-          type="button"
-          disabled={!selectedClientId}
-          onClick={() => {
-            if (!selectedClientId) return;
-            onAddClient?.(selectedClientId);
-            setSelectedClientId('');
-          }}
-        >
-          {w.addClient}
-        </button>
       </div>
       <div className="clients-table-wrap">
         <table className="clients-table">
@@ -1937,12 +1854,7 @@ function ClientsTable({ conversations, manualClients = {}, leadStages, leadPrice
                 <td>{row.price || '-'}</td>
                 <td className="client-preview">{row.preview}</td>
                 <td>{row.unread || 0}</td>
-                <td>
-                  <div className="client-row-actions">
-                    <button className="table-action" onClick={() => onOpenConversation(row.id)}>{w.leadOpen}</button>
-                    <button className="table-action ghost" onClick={() => onRemoveClient?.(row.id)}>{w.removeClient}</button>
-                  </div>
-                </td>
+                <td><button className="table-action" onClick={() => onOpenConversation(row.id)}>{w.leadOpen}</button></td>
               </tr>
             ))}
           </tbody>
@@ -2480,15 +2392,12 @@ function WorkspacePanel({
   generatorState,
   leadStages,
   leadPrices,
-  manualClients,
   operatorDeals,
   adminNotes,
   operatorAccounts,
   onReloadOperatorAccounts,
   onLeadStageChange,
   onLeadPriceChange,
-  onAddClient,
-  onRemoveClient,
   onOperatorDealChange,
   onAdminNote,
   onOpenConversation,
@@ -2501,7 +2410,7 @@ function WorkspacePanel({
 }) {
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
   const isOperator = currentUser?.role === 'operator' && currentUser?.isAdmin !== true;
-  if (isOperator && !['leads', 'inbox', 'clients', 'operators', 'settings', 'profile'].includes(view)) return null;
+  if (isOperator && !['leads', 'inbox', 'operators', 'settings', 'profile'].includes(view)) return null;
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId) || businesses[0] || {};
   const activeProviderId = aiProviderForBusiness(selectedBusiness);
   const activeProvider = AI_PROVIDERS.find(provider => provider.id === activeProviderId) || AI_PROVIDERS[0];
@@ -2550,11 +2459,8 @@ function WorkspacePanel({
       {view === 'clients' && (
         <ClientsTable
           conversations={conversations}
-          manualClients={manualClients}
           leadStages={leadStages}
           leadPrices={leadPrices}
-          onAddClient={onAddClient}
-          onRemoveClient={onRemoveClient}
           onOpenConversation={onOpenConversation}
           w={w}
         />
@@ -2918,7 +2824,7 @@ function Rail({ t, activeView, onView, currentUser, userProfile }) {
     { id: 'knowledge', icon: <I.Book />, label: t.knowledge },
     { id: 'prompts', icon: <I.Sparkle />, label: t.prompts || 'AI Prompts' },
     { id: 'accounts', icon: <I.Layers />, label: t.accounts },
-  ].filter(item => !isOperator || ['leads', 'inbox', 'clients', 'operators'].includes(item.id));
+  ].filter(item => !isOperator || ['leads', 'inbox', 'operators'].includes(item.id));
   return (
     <aside className="rail">
       {items.map(it => (
@@ -3013,7 +2919,6 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
 
   const priority = filtered.filter(c => c.needsHuman || c.unread > 0);
   const rest = filtered.filter(c => !c.needsHuman && c.unread === 0);
-  const visibleApiError = apiError && !isAbortLike(apiError) ? apiError : '';
 
   return (
     <section className="list-col">
@@ -3022,7 +2927,7 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
           <span>{liveMode || conversations.length > 0 ? t.liveBackend : (showLoadingState ? 'Loading... please wait' : 'Waiting for live data')}</span>
           <button onClick={onRefresh} title={t.refresh}>{loading ? t.syncing : t.refresh}</button>
         </div>
-        {visibleApiError && <div className="api-error">{visibleApiError}</div>}
+        {apiError && <div className="api-error">{apiError}</div>}
         <div className="search">
           <I.Search />
           <input
@@ -3835,20 +3740,10 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 function App({ lang, setLang, onSignOut, currentUser }) {
   const t = window.STRINGS[lang];
   const isOperator = currentUser?.role === 'operator' && currentUser?.isAdmin !== true;
-  const cachedConversationSeed = useMemo(() => {
-    const deleted = readStoredObject(DELETED_CONVERSATIONS_STORAGE_KEY);
-    const aiLocal = readStoredObject(AI_OVERRIDE_STORAGE_KEY);
-    return readConversationsCache(resolvedOwnerEmail())
-      .map(normalizeConversation)
-      .filter(item => !deleted[item.id])
-      .map(item => Object.prototype.hasOwnProperty.call(aiLocal, item.id)
-        ? { ...item, aiOn: aiLocal[item.id] === true }
-        : item);
-  }, []);
   const [booting, setBooting] = useState(true);
 
-  const [conversations, setConversations] = useState(cachedConversationSeed);
-  const [selectedId, setSelectedId] = useState(cachedConversationSeed[0]?.id || '');
+  const [conversations, setConversations] = useState([]);
+  const [selectedId, setSelectedId] = useState('');
   const [threads, setThreads] = useState({});
   const [loading, setLoading] = useState(false);
   const [threadLoading, setThreadLoading] = useState(false);
@@ -3869,7 +3764,6 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   const [operatorAccounts, setOperatorAccounts] = useState([]);
   const [leadStages, setLeadStages] = useState(() => readStoredObject(LEAD_STAGES_STORAGE_KEY));
   const [leadPrices, setLeadPrices] = useState(() => readStoredObject(LEAD_PRICES_STORAGE_KEY));
-  const [manualClients, setManualClients] = useState(() => readStoredObject(MANUAL_CLIENTS_STORAGE_KEY));
   const [operatorDeals, setOperatorDeals] = useState(() => readStoredObject(OPERATOR_DEALS_STORAGE_KEY));
   const [operatorAdminNotes, setOperatorAdminNotes] = useState(() => {
     const stored = readStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY);
@@ -3953,10 +3847,6 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       if (state.lead_prices && typeof state.lead_prices === 'object') {
         setLeadPrices(state.lead_prices);
         writeStoredObject(LEAD_PRICES_STORAGE_KEY, state.lead_prices);
-      }
-      if (state.manual_clients && typeof state.manual_clients === 'object') {
-        setManualClients(state.manual_clients);
-        writeStoredObject(MANUAL_CLIENTS_STORAGE_KEY, state.manual_clients);
       }
       if (state.operator_deals && typeof state.operator_deals === 'object') {
         setOperatorDeals(state.operator_deals);
@@ -4177,7 +4067,6 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   };
 
   const loadConversations = async ({ sideLoad = true, silent = false, ownerEmailOverride = '' } = {}) => {
-    const ownerScoped = normalizeOwnerEmail(ownerEmailOverride || ownerEmail);
     if (!silent) setLoading(true);
     try {
       if (sideLoad || !businessesRef.current.length) {
@@ -4185,6 +4074,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       }
       const data = await API.get('/api/v2/conversations');
       const selectedCurrent = selectedIdRef.current;
+      const ownerScoped = normalizeOwnerEmail(ownerEmailOverride || ownerEmail);
       const allowedBusinessIds = new Set((businessesRef.current || []).map(row => row.id).filter(Boolean));
       const next = (data.data || [])
         .map(normalizeConversation)
@@ -4199,7 +4089,6 @@ function App({ lang, setLang, onSignOut, currentUser }) {
           : item)
         .map(item => item.id === selectedCurrent ? clearConversationUnread(item) : item);
       setConversations(next);
-      writeConversationsCache(ownerScoped || resolvedOwnerEmail(), next);
       setSelectedId(current => next.some(c => c.id === current) ? current : (next[0]?.id || ''));
       setLiveMode(true);
       setApiError('');
@@ -4209,7 +4098,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       }
       return true;
     } catch (e) {
-      const isAbort = isAbortLike(e);
+      const isAbort = /aborted|aborterror|signal is aborted/i.test(String(e?.message || ''));
       const unauthorized = /unauthorized|401/i.test(String(e?.message || ''));
       if (unauthorized) {
         showToast('Session expired. Please sign in again.');
@@ -4218,13 +4107,6 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       }
       if (silent) {
         if (!isAbort) setApiError(`Live sync delayed: ${e.message}`);
-        return false;
-      }
-      const cached = readConversationsCache(ownerScoped || resolvedOwnerEmail()).map(normalizeConversation);
-      if (cached.length) {
-        setConversations(cached);
-        setSelectedId(current => cached.some(c => c.id === current) ? current : (cached[0]?.id || ''));
-        setApiError(isAbort ? '' : `Live sync delayed: ${e.message}`);
         return false;
       }
       setLiveMode(false);
@@ -4258,7 +4140,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     try {
       const data = await API.get(
         `/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?limit=${THREAD_LOAD_LIMIT}&mark_read=${markRead ? '1' : '0'}`,
-        { timeoutMs: 25000 },
+        { timeoutMs: 12000 },
       );
       setThreads(prev => ({
         ...prev,
@@ -4268,10 +4150,6 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       setApiError('');
       return true;
     } catch (e) {
-      if (isAbortLike(e)) {
-        if (!silent) setApiError('');
-        return false;
-      }
       setApiError(`${e.message} Showing cached messages.`);
       return false;
     } finally {
@@ -4715,37 +4593,6 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     });
   };
 
-  const addManualClient = (conversationId) => {
-    const conversation = conversations.find(item => item.id === conversationId);
-    if (!conversation) return;
-    setManualClients(prev => {
-      const next = {
-        ...prev,
-        [conversationId]: {
-          id: conversationId,
-          added_at: new Date().toISOString(),
-          added_by: userIdentity(currentUser),
-          snapshot: snapshotClientFromConversation(conversation),
-        },
-      };
-      writeStoredObject(MANUAL_CLIENTS_STORAGE_KEY, next);
-      queueWorkspaceStateSave({ manual_clients: next });
-      return next;
-    });
-    showToast('Client added');
-  };
-
-  const removeManualClient = (conversationId) => {
-    setManualClients(prev => {
-      const next = { ...prev };
-      delete next[conversationId];
-      writeStoredObject(MANUAL_CLIENTS_STORAGE_KEY, next);
-      queueWorkspaceStateSave({ manual_clients: next });
-      return next;
-    });
-    showToast('Client removed');
-  };
-
   const setOperatorDealCount = (operatorId, value) => {
     setOperatorDeals(prev => {
       const next = { ...prev, [operatorId]: Math.max(0, Number(value || 0)) };
@@ -4886,15 +4733,12 @@ function App({ lang, setLang, onSignOut, currentUser }) {
             generatorState={promptGeneratorState}
             leadStages={leadStages}
             leadPrices={leadPrices}
-            manualClients={manualClients}
             operatorDeals={operatorDeals}
             adminNotes={operatorAdminNotes}
             operatorAccounts={operatorAccounts}
             onReloadOperatorAccounts={() => loadOperatorAccounts(selectedBusinessId)}
             onLeadStageChange={setLeadStage}
             onLeadPriceChange={setLeadPrice}
-            onAddClient={addManualClient}
-            onRemoveClient={removeManualClient}
             onOperatorDealChange={setOperatorDealCount}
             onAdminNote={addOperatorAdminNote}
             onOpenConversation={selectConversation}
