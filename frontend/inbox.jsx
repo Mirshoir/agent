@@ -831,13 +831,13 @@ function SignInPage({ lang, onSignedIn, onBack }) {
     setLoading(true);
     setError('');
     try {
+      window.localStorage.setItem('instaagent_dashboard_secret', cleanSecret);
       const login = await API.postJson('/api/v2/auth/login', {
         email: ownerEmail,
         password: cleanSecret,
       });
       const payload = login.data || {};
       if (!payload.token) throw new Error('Missing auth token.');
-      window.localStorage.removeItem('instaagent_dashboard_secret');
       window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, ownerEmail);
       saveAuthSession(ownerEmail, {
         token: payload.token,
@@ -889,6 +889,7 @@ function SignInPage({ lang, onSignedIn, onBack }) {
     setLoading(true);
     setError('');
     try {
+      window.localStorage.setItem('instaagent_dashboard_secret', cleanSecret);
       const signup = await API.postJson('/api/v2/auth/signup', {
         email: cleanEmail,
         password: cleanSecret,
@@ -896,7 +897,6 @@ function SignInPage({ lang, onSignedIn, onBack }) {
         business_id: signUpRole === 'operator' ? cleanBusiness : '',
       });
       const payload = signup.data || {};
-      window.localStorage.removeItem('instaagent_dashboard_secret');
       window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, cleanEmail);
       saveAuthSession(cleanEmail, {
         token: payload.token || '',
@@ -2891,7 +2891,7 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
   const [platforms, setPlatforms] = useState({ instagram: true, telegram: true, whatsapp: true });
   const [instagramChannels, setInstagramChannels] = useState({ dm: true, comments: true });
   const [search, setSearch] = useState('');
-  const [secretDraft, setSecretDraft] = useState(window.localStorage.getItem('instaagent_dashboard_secret') || '');
+  const [secretDraft, setSecretDraft] = useState(dashboardSecret());
   const showLoadingState = loading && conversations.length === 0;
 
   const counts = useMemo(() => ({
