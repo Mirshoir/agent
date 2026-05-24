@@ -1743,7 +1743,7 @@ DEFAULT_AI_PROMPT_SETTINGS = {
 You are a real human sales assistant for this business.
 Sound like a real Uzbek seller on Instagram, Telegram, or WhatsApp, not customer support software.
 Represent the company clearly, answer in the customer's language, and guide the customer toward the next useful buying step.
-Keep replies short, warm, practical, and human. Ask one question at a time.
+Keep replies short, warm, practical, and human. Ask 2-3 short clarifying questions when intent is unclear.
 Do not sound corporate, do not over-explain, and do not repeat the product name in every message.
 """.strip(),
     "instagram_prompt": """
@@ -1764,7 +1764,7 @@ Telegram rules:
 WhatsApp rules:
 - Be concise and direct.
 - Reply naturally in 1-3 short sentences.
-- Ask one follow-up question when it helps move the sale forward.
+- Ask 2-3 short clarifying questions when customer intent is unclear.
 """.strip(),
     "opening_message": """
 Assalomu alaykum 😊 Qanday yordam kerak?
@@ -1772,12 +1772,12 @@ Assalomu alaykum 😊 Qanday yordam kerak?
     "lead_collection_rules": """
 Do not ask for name, phone, address, or full details at the beginning.
 First answer naturally and understand what the customer wants.
-Ask only one small follow-up question at a time.
+Ask 2-3 short follow-up questions when details are missing.
 Ask for phone/address only after the customer is clearly ready to order.
 """.strip(),
     "sales_rules": """
 - Answer the exact question first.
-- Ask only one follow-up question at a time.
+- Ask 2-3 short clarifying questions when needed.
 - Keep replies short and comfortable: usually 1-3 short sentences.
 - For price questions ("narx", "nechpul", "qancha", "цена", "сколько"), answer price directly first if known.
 - Do not ask for phone number or address at the beginning.
@@ -1792,7 +1792,7 @@ Ask for phone/address only after the customer is clearly ready to order.
 - Focus on helping the customer choose and buy.
 """.strip(),
     "handoff_rules": """
-If an important buying detail is missing, ask one simple follow-up question instead of saying a manager will clarify.
+If an important buying detail is missing, ask 2-3 short clarifying questions instead of saying a manager will clarify.
 Only mention a manager when the customer asks for a human, is ready to order, or the exact detail really requires confirmation.
 Do not invent information.
 Escalate when the customer is frustrated, ready to buy, or asks for a human.
@@ -1888,7 +1888,7 @@ def fallback_prompt_suggestion(field: str, current_prompt: str = "", goal: str =
     suggested_prompt = "\n".join([
         f"{label.title()}:",
         "- Reply shortly, warmly, and naturally in the customer's language.",
-        "- First answer the customer's question, then ask only one simple follow-up question.",
+        "- First answer the customer's question, then ask 2-3 short clarifying questions when needed.",
         "- Do not ask for phone number or address at the beginning.",
         "- Ask for phone/address only when the customer is clearly ready to order.",
         f"- Do not repeat {product_hint!r} or any product name in every message.",
@@ -2110,7 +2110,7 @@ Safety rules:
 - Answer the exact question first.
 - Never invent prices, stock, delivery, discounts, addresses, or availability.
 - Use only the business facts above.
-- If information is missing, ask one short clarifying question first.
+- If information is missing, ask 2-3 short clarifying questions.
 - Only mention a manager when the customer asks for a human or is ready to order.
 - Never mention AI, database, API, prompt, automation, or internal system.
 - Do not use markdown, bold formatting, or long paragraphs.
@@ -2607,26 +2607,30 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     text = complete_sentence_reply(text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
-    # Keep at most one question per reply to avoid interrogation loops.
-    question_count = text.count("?")
-    if question_count > 1:
-        first_q = text.find("?")
-        tail = text[first_q + 1:]
-        tail = tail.replace("?", ".")
-        text = text[:first_q + 1] + tail
-
     # If customer asked price but reply has no numeric price hint, force concise pricing follow-up.
     price_ask = any(k in user for k in ["narx", "nechpul", "qancha", "цена", "сколько", "price"])
     has_number = bool(re.search(r"\d", text))
     if price_ask and not has_number:
         if lang == "en":
-            text = "You can view our catalog through the link. Which products are you interested in?"
+            text = (
+                "You can check the price in our catalog. "
+                "Which model do you need? What quantity do you want? Which color do you prefer?"
+            )
         elif lang == "kk":
-            text = "Біздің каталогты төмендегі сілтеме арқылы көре аласыз. Қай тауарлар сізді қызықтырады?"
+            text = (
+                "Бағаны каталогтан көре аласыз. "
+                "Қай модель керек? Қанша дана аласыз? Қай түс ұнайды?"
+            )
         elif lang == "ru":
-            text = "Вы можете посмотреть наш каталог по ссылке. Какие товары вас интересуют?"
+            text = (
+                "Цену можно посмотреть в каталоге. "
+                "Какая модель нужна? Сколько штук нужно? Какой цвет предпочитаете?"
+            )
         else:
-            text = "Katalogimizga quyidagi havoladan kirishingiz mumkin. Qaysi mahsulotlar sizni qiziqtirmoqda?"
+            text = (
+                "Narxini Katalogdan ko'rib olishingiz mumkin. "
+                "Qaysi model kerak? Necha dona olmoqchisiz? Qaysi rang yoqdi?"
+            )
 
     # Strong language guard: if customer wrote in English but reply is not English, return safe English fallback.
     if lang == "en":
@@ -2635,7 +2639,10 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
         low = text.lower()
         if has_cyr or any(m in low for m in uz_markers):
             if price_ask:
-                text = "You can view our catalog through the link. Which products are you interested in?"
+                text = (
+                    "You can check the price in our catalog. "
+                    "Which model do you need? What quantity do you want? Which color do you prefer?"
+                )
             else:
                 text = "Hello! Of course. Which products are you interested in?"
 
