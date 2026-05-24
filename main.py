@@ -311,6 +311,13 @@ class BusinessAdminCreateRequest(BaseModel):
     full_name: str = ""
 
 
+class OperatorTaskCreateRequest(BaseModel):
+    business_id: str
+    text: str
+    recipients: list[str] = []
+    assign_mode: str = "all"
+
+
 # ============================================================================
 # HELPERS - GENERAL
 # ============================================================================
@@ -1605,6 +1612,78 @@ def upsert_workspace_state(business_id: str, state_key: str, state_value, update
         data,
         on_conflict="business_id,state_key",
     ).execute()
+
+
+def list_business_operator_ids(business_id: str) -> list[str]:
+    business_id = normalize_id(business_id)
+    if not business_id:
+        return []
+    try:
+        rows = (
+            supabase.table("business_users")
+            .select("user_email,role")
+            .eq("business_id", business_id)
+            .eq("role", "operator")
+            .execute()
+            .data
+            or []
+        )
+        return sorted({normalize_email(row.get("user_email")) for row in rows if normalize_email(row.get("user_email"))})
+    except Exception:
+        return []
+
+
+def append_operator_task(business_id: str, text: str, recipients: list[str], assign_mode: str, created_by: str) -> dict:
+    business_id = normalize_id(business_id)
+    clean_text = normalize_id(text)
+    if not business_id or not clean_text:
+        return {}
+
+    safe_assign_mode = normalize_id(assign_mode).lower() or "all"
+    allowed_modes = {"one", "group", "all"}
+    if safe_assign_mode not in allowed_modes:
+        safe_assign_mode = "all"
+
+    all_operator_ids = list_business_operator_ids(business_id)
+    normalized_recipients = [normalize_email(item) for item in (recipients or []) if normalize_email(item)]
+    normalized_recipients = list(dict.fromkeys(normalized_recipients))
+
+    if safe_assign_mode == "all" or "*" in normalized_recipients:
+        final_recipients = ["*"]
+    else:
+        final_recipients = [item for item in normalized_recipients if item in set(all_operator_ids)]
+        if not final_recipients and all_operator_ids:
+            final_recipients = [all_operator_ids[0]]
+
+    task = {
+        "id": f"task_{int(time.time() * 1000)}_{secrets.token_hex(3)}",
+        "text": clean_text,
+        "recipients": final_recipients or ["*"],
+        "assign_mode": safe_assign_mode,
+        "created_by": normalize_email(created_by),
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+
+    state = get_workspace_state(business_id)
+    existing = state.get("operator_tasks") or {}
+    items = existing.get("items") if isinstance(existing, dict) else []
+    if not isinstance(items, list):
+        items = []
+
+    next_items = [task] + items
+    next_items = next_items[:200]
+    payload = {"items": next_items}
+    upsert_workspace_state(business_id, "operator_tasks", payload, updated_by=created_by)
+
+    # Backward compatibility for dashboards still reading old key.
+    legacy = state.get("operator_admin_notes") or {}
+    legacy_items = legacy.get("items") if isinstance(legacy, dict) else []
+    if not isinstance(legacy_items, list):
+        legacy_items = []
+    merged_legacy = [task] + legacy_items
+    upsert_workspace_state(business_id, "operator_admin_notes", {"items": merged_legacy[:200]}, updated_by=created_by)
+
+    return task
 
 
 # ============================================================================
@@ -4253,6 +4332,99 @@ async def create_operator_v2(
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
+@app.post("/api/v2/operator-tasks")
+async def create_operator_task_v2(
+    body: OperatorTaskCreateRequest,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    business_id = normalize_id(body.business_id)
+    text = normalize_id(body.text)
+    assign_mode = normalize_id(body.assign_mode).lower() or "all"
+
+    if not business_id:
+        return JSONResponse({"status": "error", "message": "Missing business_id"}, status_code=400)
+    if not text:
+        return JSONResponse({"status": "error", "message": "Task text is required"}, status_code=400)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+
+    # Only owners/admins/super_admin can assign tasks.
+    role = normalize_id(access.get("role", "")).lower()
+    if role not in {"owner", "admin", "super_admin"} and not access.get("is_admin"):
+        return JSONResponse({"status": "error", "message": "Only admin can assign tasks"}, status_code=403)
+
+    try:
+        task = append_operator_task(
+            business_id=business_id,
+            text=text,
+            recipients=body.recipients or [],
+            assign_mode=assign_mode,
+            created_by=access.get("email", ""),
+        )
+        if not task:
+            return JSONResponse({"status": "error", "message": "Could not create task"}, status_code=500)
+        return {"status": "ok", "data": task}
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.get("/api/v2/operator-tasks")
+async def list_operator_tasks_v2(
+    business_id: str = "",
+    for_me: bool = True,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    business_id = normalize_id(business_id)
+    if not business_id:
+        return JSONResponse({"status": "error", "message": "Missing business_id"}, status_code=400)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+
+    try:
+        state = get_workspace_state(business_id)
+        bucket = state.get("operator_tasks") or state.get("operator_admin_notes") or {}
+        items = bucket.get("items") if isinstance(bucket, dict) else []
+        if not isinstance(items, list):
+            items = []
+
+        viewer = normalize_email(access.get("email", ""))
+        is_admin = bool(access.get("is_admin")) or normalize_id(access.get("role", "")).lower() in {"owner", "admin", "super_admin"}
+
+        normalized = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            recipients = item.get("recipients") if isinstance(item.get("recipients"), list) else ["*"]
+            recipients = [normalize_email(x) if x != "*" else "*" for x in recipients]
+            if for_me and not is_admin:
+                if "*" not in recipients and viewer not in recipients:
+                    continue
+            normalized.append(
+                {
+                    "id": item.get("id"),
+                    "text": normalize_id(item.get("text")),
+                    "recipients": recipients,
+                    "assign_mode": normalize_id(item.get("assign_mode", "all")) or "all",
+                    "created_by": normalize_email(item.get("created_by")),
+                    "created_at": item.get("created_at"),
+                }
+            )
+
+        return {"status": "ok", "count": len(normalized), "data": normalized}
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
 @app.post("/api/v2/businesses")
 async def create_business_v2(
     body: BusinessCreateRequest,
@@ -4982,6 +5154,7 @@ async def update_workspace_state_v2(
             "lead_prices",
             "operator_deals",
             "operator_admin_notes",
+            "operator_tasks",
         }
         state = payload.get("state") or {}
         if not isinstance(state, dict):
@@ -5063,7 +5236,7 @@ async def api_update_combined_settings(
         ]
 
     workspace_state = payload.get("workspace_state") or {}
-    allowed_workspace_keys = {"lead_stages", "lead_prices", "operator_deals", "operator_admin_notes"}
+    allowed_workspace_keys = {"lead_stages", "lead_prices", "operator_deals", "operator_admin_notes", "operator_tasks"}
     if isinstance(workspace_state, dict) and workspace_state:
         updated_workspace = []
         for key, value in workspace_state.items():
