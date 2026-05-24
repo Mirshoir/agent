@@ -664,22 +664,18 @@ def resolve_dashboard_access(authorization: str = "", x_dashboard_secret: str = 
     token = parse_auth_header(authorization)
     if token:
         payload = decode_dashboard_auth_token(token)
-        if payload:
-            email = normalize_email(payload.get("email"))
-            is_admin = bool(payload.get("is_admin"))
-            token_role = normalize_id(payload.get("role", "")).lower()
-            if is_admin:
-                role = token_role or ("super_admin" if is_super_admin_email(email) else "admin")
-                business_ids = []
-            else:
-                business_ids = list_user_business_ids(email)
-                role = token_role or get_user_business_role(email)
-            return {"email": email, "is_admin": is_admin, "business_ids": business_ids, "role": role or "operator"}
-        # If token is invalid/expired but a valid dashboard secret is present,
-        # allow the backward-compatible admin/system path instead of hard-failing.
-        if not require_dashboard_secret(x_dashboard_secret):
-            return {"email": "system", "is_admin": True, "business_ids": [], "role": "admin"}
-        return None
+        if not payload:
+            return None
+        email = normalize_email(payload.get("email"))
+        is_admin = bool(payload.get("is_admin"))
+        token_role = normalize_id(payload.get("role", "")).lower()
+        if is_admin:
+            role = token_role or ("super_admin" if is_super_admin_email(email) else "admin")
+            business_ids = []
+        else:
+            business_ids = list_user_business_ids(email)
+            role = token_role or get_user_business_role(email)
+        return {"email": email, "is_admin": is_admin, "business_ids": business_ids, "role": role or "operator"}
 
     # Backward-compatible admin/system path
     if not require_dashboard_secret(x_dashboard_secret):
@@ -5848,10 +5844,16 @@ async def dashboard_send_telegram_user_message(
 @app.post("/dashboard/send-image-file")
 async def dashboard_send_image_file(
         payload: DashboardImageFile,
+        authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
-    if require_dashboard_secret(x_dashboard_secret):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    clean_business_id = normalize_id(payload.business_id)
+    if clean_business_id and not can_access_business(access, clean_business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
     if not str(payload.mime_type or "").startswith("image/"):
         return JSONResponse({"status": "error", "message": "Only image files are supported right now"}, status_code=400)
@@ -5861,9 +5863,11 @@ async def dashboard_send_image_file(
     except ValueError as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
 
-    business = get_business_by_id(payload.business_id) if payload.business_id else get_active_business()
+    business = get_business_by_id(clean_business_id) if clean_business_id else get_active_business()
     if not business:
         return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
+    if not can_access_business(access, normalize_id(business.get("id"))):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
     customer_id = normalize_id(payload.customer_id)
     chat_id = normalize_id(payload.chat_id or payload.customer_id)
@@ -5975,10 +5979,16 @@ async def dashboard_send_image_file(
 @app.post("/dashboard/send-voice-file")
 async def dashboard_send_voice_file(
         payload: DashboardVoiceFile,
+        authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
-    if require_dashboard_secret(x_dashboard_secret):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    clean_business_id = normalize_id(payload.business_id)
+    if clean_business_id and not can_access_business(access, clean_business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
     if not str(payload.mime_type or "").startswith("audio/"):
         return JSONResponse({"status": "error", "message": "Only audio files are supported for voice notes"}, status_code=400)
@@ -5988,9 +5998,11 @@ async def dashboard_send_voice_file(
     except ValueError as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
 
-    business = get_business_by_id(payload.business_id) if payload.business_id else get_active_business()
+    business = get_business_by_id(clean_business_id) if clean_business_id else get_active_business()
     if not business:
         return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
+    if not can_access_business(access, normalize_id(business.get("id"))):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
     customer_id = normalize_id(payload.customer_id)
     chat_id = normalize_id(payload.chat_id or payload.customer_id)
