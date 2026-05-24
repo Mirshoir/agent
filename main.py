@@ -4578,7 +4578,7 @@ async def get_conversations_v2(
             supabase.table("inbox_messages")
             .select(
                 "business_id,platform,channel,customer_id,chat_id,customer_name,"
-                "content,created_at,direction,is_read,needs_human,raw_payload,post_id,media_id"
+                "content,created_at,direction,is_read,raw_payload"
             )
             .order("created_at", desc=True)
             .limit(700)
@@ -4691,10 +4691,9 @@ async def get_conversation_messages_v2(
         limit = max(1, min(int(limit or 120), 300))
         base_fields = (
             "id,direction,role,created_at,media_type,content,platform,channel,customer_id,"
-            "external_message_id,media_file_id,media_url,post_permalink,post_image_url,"
-            "post_media_type,post_id,media_id"
+            "external_message_id,media_url,raw_payload"
         )
-        select_fields = f"{base_fields},raw_payload" if (platform == "instagram" and "comment" in channel) else base_fields
+        select_fields = base_fields
 
         query = (
             supabase.table("inbox_messages")
