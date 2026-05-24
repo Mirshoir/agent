@@ -4660,7 +4660,7 @@ async def get_conversations_v2(
 async def get_conversation_messages_v2(
         conversation_id: str,
         background_tasks: BackgroundTasks,
-        limit: int = 250,
+        limit: int = 50,
         mark_read: bool = True,
         authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
@@ -4688,7 +4688,7 @@ async def get_conversation_messages_v2(
         if platform == "instagram" and "comment" in channel:
             customer_id, post_id = decode_comment_scope(customer_scope)
 
-        limit = max(1, min(int(limit or 120), 300))
+        limit = max(1, min(int(limit or 50), 50))
         base_fields = (
             "id,direction,role,created_at,media_type,content,platform,channel,customer_id,"
             "external_message_id,media_url,raw_payload"
@@ -4716,8 +4716,8 @@ async def get_conversation_messages_v2(
             if channel:
                 query = query.eq("channel", channel)
 
-        result = query.order("created_at", desc=False).limit(limit).execute()
-        rows = result.data or []
+        result = query.order("created_at", desc=True).limit(limit).execute()
+        rows = list(reversed(result.data or []))
 
         messages = [transform_message_to_react(row) for row in rows]
 
@@ -5216,6 +5216,7 @@ async def update_workspace_state_v2(
         allowed_keys = {
             "lead_stages",
             "lead_prices",
+            "manual_clients",
             "operator_deals",
             "operator_admin_notes",
             "operator_tasks",
@@ -5300,7 +5301,7 @@ async def api_update_combined_settings(
         ]
 
     workspace_state = payload.get("workspace_state") or {}
-    allowed_workspace_keys = {"lead_stages", "lead_prices", "operator_deals", "operator_admin_notes", "operator_tasks"}
+    allowed_workspace_keys = {"lead_stages", "lead_prices", "manual_clients", "operator_deals", "operator_admin_notes", "operator_tasks"}
     if isinstance(workspace_state, dict) and workspace_state:
         updated_workspace = []
         for key, value in workspace_state.items():
