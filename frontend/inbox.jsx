@@ -4087,7 +4087,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     } catch (e) {
       const isAbort = /aborted|aborterror|signal is aborted/i.test(String(e?.message || ''));
       const unauthorized = /unauthorized|401/i.test(String(e?.message || ''));
-      if (unauthorized && readAuthSession()?.token) {
+      if (unauthorized) {
         showToast('Session expired. Please sign in again.');
         onSignOut?.(false);
         return false;
