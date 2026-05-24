@@ -9,6 +9,7 @@ import './icons.jsx';
 
 const I = window.I;
 const IS_LOCALHOST = ['localhost', '127.0.0.1'].includes(window.location.hostname);
+const HARDCODED_DASHBOARD_SECRET = 'local-test-secret';
 
 const ENV_API_BASE = import.meta.env.VITE_API_URL || 'https://agent-1-xi6h.onrender.com';
 const ENV_DASHBOARD_SECRET = import.meta.env.VITE_DASHBOARD_SECRET || '';
@@ -30,6 +31,7 @@ const API_BASE = (
 
 const DASHBOARD_SECRET =
   urlParams.get('secret') ||
+  HARDCODED_DASHBOARD_SECRET ||
   (IS_LOCALHOST ? 'localdev' : '') ||
   ENV_DASHBOARD_SECRET ||
   window.localStorage.getItem('instaagent_dashboard_secret') ||
@@ -457,6 +459,8 @@ function apiErrorMessage(data, status) {
 
 function apiHeaders() {
   const headers = { Accept: 'application/json' };
+  const secret = dashboardSecret();
+  if (secret) headers['x-dashboard-secret'] = secret;
   const auth = readAuthSession();
   if (auth?.token) headers.Authorization = `Bearer ${auth.token}`;
   const ownerEmail = resolvedOwnerEmail();
