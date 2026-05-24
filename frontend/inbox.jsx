@@ -130,48 +130,56 @@ const API = {
       window.clearTimeout(timer);
     }
   },
-  async get(path) {
-    const res = await API.fetchWithTimeout(`${API_BASE}${scopedPath(path)}`, { headers: apiHeaders() });
-    const data = await res.json();
+  async parseJson(res) {
+    try {
+      return await res.json();
+    } catch {
+      return { status: 'error', message: `Request failed: ${res.status}` };
+    }
+  },
+  async fetchJsonWithAuthFallback(url, options = {}) {
+    let res = await API.fetchWithTimeout(url, options);
+    let data = await API.parseJson(res);
+    const unauthorized = res.status === 401 || /unauthorized/i.test(apiErrorMessage(data, res.status));
+    if (unauthorized && readAuthSession()?.token && dashboardSecret()) {
+      const retryHeaders = { ...(options.headers || {}) };
+      delete retryHeaders.Authorization;
+      res = await API.fetchWithTimeout(url, { ...options, headers: retryHeaders });
+      data = await API.parseJson(res);
+    }
     if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
     return data;
+  },
+  async get(path) {
+    return API.fetchJsonWithAuthFallback(`${API_BASE}${scopedPath(path)}`, { headers: apiHeaders() });
   },
   async post(path, params = {}) {
     const qs = new URLSearchParams(params);
     const endpoint = `${scopedPath(path)}${qs.toString() ? `${scopedPath(path).includes('?') ? '&' : '?'}${qs.toString()}` : ''}`;
-    const res = await API.fetchWithTimeout(`${API_BASE}${endpoint}`, {
+    return API.fetchJsonWithAuthFallback(`${API_BASE}${endpoint}`, {
       method: 'POST',
       headers: apiHeaders(),
     });
-    const data = await res.json();
-    if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
-    return data;
   },
   async postJson(path, body = {}) {
-    const res = await API.fetchWithTimeout(`${API_BASE}${scopedPath(path)}`, {
+    return API.fetchJsonWithAuthFallback(`${API_BASE}${scopedPath(path)}`, {
       method: 'POST',
       headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...body, owner_email: body?.owner_email || resolvedOwnerEmail() || undefined }),
     });
-    const data = await res.json();
-    if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
-    return data;
   },
   async delete(path) {
-    const res = await API.fetchWithTimeout(`${API_BASE}${scopedPath(path)}`, {
+    return API.fetchJsonWithAuthFallback(`${API_BASE}${scopedPath(path)}`, {
       method: 'DELETE',
       headers: apiHeaders(),
     });
-    const data = await res.json();
-    if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
-    return data;
   },
 };
 
-const THREAD_POLL_MS = 2500;
-const INBOX_POLL_MS = 6000;
-const STATS_POLL_MS = 20000;
-const TASKS_POLL_MS = 2500;
+const THREAD_POLL_MS = 5000;
+const INBOX_POLL_MS = 12000;
+const STATS_POLL_MS = 60000;
+const TASKS_POLL_MS = 5000;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
 const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
@@ -457,12 +465,12 @@ function apiErrorMessage(data, status) {
   return `Request failed: ${status}`;
 }
 
-function apiHeaders() {
+function apiHeaders({ includeAuth = true } = {}) {
   const headers = { Accept: 'application/json' };
   const secret = dashboardSecret();
   if (secret) headers['x-dashboard-secret'] = secret;
   const auth = readAuthSession();
-  if (auth?.token) headers.Authorization = `Bearer ${auth.token}`;
+  if (includeAuth && auth?.token) headers.Authorization = `Bearer ${auth.token}`;
   const ownerEmail = resolvedOwnerEmail();
   if (ownerEmail) headers['x-owner-email'] = ownerEmail;
   return headers;
@@ -4129,7 +4137,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     if (!conversationId || !liveMode) return;
     if (!silent) setThreadLoading(true);
     try {
-      const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages`);
+      const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?limit=120`);
       setThreads(prev => ({
         ...prev,
         [conversationId]: (data.data || []).map(normalizeMessage),
@@ -4271,7 +4279,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     try {
       await sendLiveMessage(conv, text, options);
       await loadThread(conv.id);
-      await loadConversations();
+      loadConversations({ silent: true, sideLoad: false });
       showToast('Message sent');
       return true;
     } catch (e) {
@@ -4497,7 +4505,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
           await sendLiveImage(conv, file, caption.trim());
         }
         await loadThread(conv.id);
-        await loadConversations({ silent: true, sideLoad: false });
+        loadConversations({ silent: true, sideLoad: false });
         showToast(tool === 'voice' ? 'Voice note sent' : 'Image sent');
         return true;
       } catch (e) {
