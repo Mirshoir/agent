@@ -105,10 +105,10 @@ function saveAuthSession(ownerEmail, session = {}) {
   window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, clean);
 }
 
-function clearAuthSession() {
+function clearAuthSession({ preserveSecret = true, preserveOwner = false } = {}) {
   window.localStorage.removeItem(DASHBOARD_AUTH_STORAGE_KEY);
-  window.localStorage.removeItem(OWNER_EMAIL_STORAGE_KEY);
-  window.localStorage.removeItem('instaagent_dashboard_secret');
+  if (!preserveOwner) window.localStorage.removeItem(OWNER_EMAIL_STORAGE_KEY);
+  if (!preserveSecret) window.localStorage.removeItem('instaagent_dashboard_secret');
 }
 
 function scopedPath(path) {
@@ -169,6 +169,7 @@ const API = {
 const THREAD_POLL_MS = 2500;
 const INBOX_POLL_MS = 6000;
 const STATS_POLL_MS = 20000;
+const TASKS_POLL_MS = 2500;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
 const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
@@ -3793,6 +3794,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   const threadPollBusy = useRef(false);
   const inboxPollBusy = useRef(false);
   const statsPollBusy = useRef(false);
+  const tasksPollBusy = useRef(false);
   const businessesRef = useRef([]);
   const workspaceStateHydratedRef = useRef(false);
   const workspaceStateTimersRef = useRef({});
@@ -4039,7 +4041,14 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   };
 
   const refreshWorkspace = async () => {
-    await Promise.all([loadConversations({ sideLoad: false }), loadStats(), loadBusinesses(), loadPromptSettings(selectedBusinessId, { silent: true }), loadOperatorAccounts(selectedBusinessId)]);
+    await Promise.all([
+      loadConversations({ sideLoad: false }),
+      loadStats(),
+      loadBusinesses(),
+      loadPromptSettings(selectedBusinessId, { silent: true }),
+      loadOperatorAccounts(selectedBusinessId),
+      loadOperatorTasks(selectedBusinessId),
+    ]);
     showToast('Workspace refreshed');
   };
 
@@ -4078,7 +4087,20 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       if (sideLoad || !businessesRef.current.length) {
         await loadBusinesses({ silent: true, ownerEmailOverride });
       }
-      const data = await API.get('/api/v2/conversations');
+      let data;
+      try {
+        data = await API.get('/api/v2/conversations');
+      } catch (e) {
+        const hasSecret = !!dashboardSecret();
+        const hasToken = !!readAuthSession()?.token;
+        const unauthorized = /unauthorized|401/i.test(String(e?.message || ''));
+        if (unauthorized && hasSecret && hasToken) {
+          clearAuthSession({ preserveSecret: true, preserveOwner: true });
+          data = await API.get('/api/v2/conversations');
+        } else {
+          throw e;
+        }
+      }
       const selectedCurrent = selectedIdRef.current;
       const ownerScoped = normalizeOwnerEmail(ownerEmailOverride || ownerEmail);
       const allowedBusinessIds = new Set((businessesRef.current || []).map(row => row.id).filter(Boolean));
@@ -4377,11 +4399,22 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       }
     };
 
+    const pollTasks = async () => {
+      if (tasksPollBusy.current) return;
+      tasksPollBusy.current = true;
+      try {
+        await loadOperatorTasks(selectedBusinessId);
+      } finally {
+        tasksPollBusy.current = false;
+      }
+    };
+
     const syncVisible = () => {
       if (document.hidden || !liveModeRef.current) return;
       pollThread();
       pollInbox();
       pollStats();
+      pollTasks();
     };
 
     const threadTimer = window.setInterval(() => {
@@ -4393,6 +4426,9 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     const statsTimer = window.setInterval(() => {
       if (!document.hidden) pollStats();
     }, STATS_POLL_MS);
+    const tasksTimer = window.setInterval(() => {
+      if (!document.hidden) pollTasks();
+    }, TASKS_POLL_MS);
 
     document.addEventListener('visibilitychange', syncVisible);
     syncVisible();
@@ -4401,9 +4437,10 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       window.clearInterval(threadTimer);
       window.clearInterval(inboxTimer);
       window.clearInterval(statsTimer);
+      window.clearInterval(tasksTimer);
       document.removeEventListener('visibilitychange', syncVisible);
     };
-  }, [liveMode]);
+  }, [liveMode, selectedBusinessId]);
 
   const toggleAi = async () => {
     if (!conv) return;
