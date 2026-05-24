@@ -457,8 +457,6 @@ function apiErrorMessage(data, status) {
 
 function apiHeaders() {
   const headers = { Accept: 'application/json' };
-  const savedSecret = dashboardSecret();
-  if (savedSecret && savedSecret !== 'YOUR_DASHBOARD_SECRET') headers['x-dashboard-secret'] = savedSecret;
   const auth = readAuthSession();
   if (auth?.token) headers.Authorization = `Bearer ${auth.token}`;
   const ownerEmail = resolvedOwnerEmail();
@@ -831,7 +829,6 @@ function SignInPage({ lang, onSignedIn, onBack }) {
     setLoading(true);
     setError('');
     try {
-      window.localStorage.setItem('instaagent_dashboard_secret', cleanSecret);
       const login = await API.postJson('/api/v2/auth/login', {
         email: ownerEmail,
         password: cleanSecret,
@@ -851,18 +848,8 @@ function SignInPage({ lang, onSignedIn, onBack }) {
         role: payload.user?.role || '',
       });
     } catch (err) {
-      try {
-        window.localStorage.setItem('instaagent_dashboard_secret', cleanSecret);
-        window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, ownerEmail);
-        const data = await API.get('/api/businesses');
-        const rows = data.data || [];
-        if (!rows.length) throw err;
-        saveAuthSession(ownerEmail, { isAdmin: true, role: 'admin' });
-        onSignedIn({ ownerEmail, isAdmin: true, role: 'admin' });
-      } catch (fallbackErr) {
-        setError(fallbackErr.message || err.message || 'Sign in failed.');
-        clearAuthSession();
-      }
+      setError(err.message || 'Sign in failed.');
+      clearAuthSession();
     } finally {
       setLoading(false);
     }
@@ -889,7 +876,6 @@ function SignInPage({ lang, onSignedIn, onBack }) {
     setLoading(true);
     setError('');
     try {
-      window.localStorage.setItem('instaagent_dashboard_secret', cleanSecret);
       const signup = await API.postJson('/api/v2/auth/signup', {
         email: cleanEmail,
         password: cleanSecret,
@@ -2886,12 +2872,11 @@ function Row({ c, selected, onClick, t }) {
 }
 
 // ---------- List column ----------
-function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError, liveMode, onRefresh, onSaveSecret }) {
+function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError, liveMode, onRefresh }) {
   const [filter, setFilter] = useState('all');
   const [platforms, setPlatforms] = useState({ instagram: true, telegram: true, whatsapp: true });
   const [instagramChannels, setInstagramChannels] = useState({ dm: true, comments: true });
   const [search, setSearch] = useState('');
-  const [secretDraft, setSecretDraft] = useState(dashboardSecret());
   const showLoadingState = loading && conversations.length === 0;
 
   const counts = useMemo(() => ({
@@ -2931,17 +2916,6 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
           <button onClick={onRefresh} title={t.refresh}>{loading ? t.syncing : t.refresh}</button>
         </div>
         {apiError && <div className="api-error">{apiError}</div>}
-        {apiError.toLowerCase().includes('unauthorized') && (
-          <div className="secret-box">
-            <input
-              type="password"
-              placeholder={t.dashboardSecret}
-              value={secretDraft}
-              onChange={(e) => setSecretDraft(e.target.value)}
-            />
-            <button onClick={() => onSaveSecret(secretDraft)}>{t.connect}</button>
-          </div>
-        )}
         <div className="search">
           <I.Search />
           <input
@@ -4116,9 +4090,8 @@ function App({ lang, setLang, onSignOut, currentUser }) {
           ? { ...item, aiOn: aiOverridesRef.current[item.id] === true }
           : item)
         .map(item => item.id === selectedCurrent ? clearConversationUnread(item) : item);
-      if (!next.length) throw new Error('No conversations returned from backend yet.');
       setConversations(next);
-      setSelectedId(current => next.some(c => c.id === current) ? current : next[0].id);
+      setSelectedId(current => next.some(c => c.id === current) ? current : (next[0]?.id || ''));
       setLiveMode(true);
       setApiError('');
       if (sideLoad) {
@@ -4128,6 +4101,12 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       return true;
     } catch (e) {
       const isAbort = /aborted|aborterror|signal is aborted/i.test(String(e?.message || ''));
+      const unauthorized = /unauthorized|401/i.test(String(e?.message || ''));
+      if (unauthorized && readAuthSession()?.token) {
+        showToast('Session expired. Please sign in again.');
+        onSignOut?.();
+        return false;
+      }
       if (silent) {
         if (!isAbort) setApiError(`Live sync delayed: ${e.message}`);
         return false;
@@ -4728,7 +4707,6 @@ function App({ lang, setLang, onSignOut, currentUser }) {
           apiError={apiError}
           liveMode={liveMode}
           onRefresh={refreshWorkspace}
-          onSaveSecret={saveSecretAndRefresh}
         />
         {activeView === 'inbox' ? (
           <ThreadColumn
@@ -4814,11 +4792,7 @@ function Root() {
   const [lang, setLang] = useState(() => window.localStorage.getItem(UI_LANG_STORAGE_KEY) || 'en');
   const [showDashboard, setShowDashboard] = useState(() => window.location.hash === DASHBOARD_HASH || urlParams.get('dashboard') === '1');
   const [currentUser, setCurrentUser] = useState(() => readAuthSession() || null);
-  const [signedIn, setSignedIn] = useState(() => {
-    const auth = readAuthSession();
-    if (auth?.token) return true;
-    return !!dashboardSecret();
-  });
+  const [signedIn, setSignedIn] = useState(() => !!readAuthSession()?.token);
 
   useEffect(() => {
     window.localStorage.setItem(UI_LANG_STORAGE_KEY, lang);
