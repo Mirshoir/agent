@@ -19,7 +19,7 @@ except Exception:
     bcrypt = None
 
 from pydantic import BaseModel
-from fastapi import FastAPI, Request, Header
+from fastapi import FastAPI, Request, Header, BackgroundTasks
 from fastapi.responses import PlainTextResponse, JSONResponse, RedirectResponse, Response, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -1489,6 +1489,7 @@ def mark_conversation_read_in_db(conversation_id: str):
         .eq("business_id", business_id)
         .eq("customer_id", str(customer_id))
         .eq("direction", "inbound")
+        .eq("is_read", False)
     )
 
     if channel:
@@ -4658,7 +4659,9 @@ async def get_conversations_v2(
 @app.get("/api/v2/conversation/{conversation_id}/messages")
 async def get_conversation_messages_v2(
         conversation_id: str,
+        background_tasks: BackgroundTasks,
         limit: int = 250,
+        mark_read: bool = True,
         authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
@@ -4685,13 +4688,17 @@ async def get_conversation_messages_v2(
         if platform == "instagram" and "comment" in channel:
             customer_id, post_id = decode_comment_scope(customer_scope)
 
+        limit = max(1, min(int(limit or 120), 300))
+        base_fields = (
+            "id,direction,role,created_at,media_type,content,platform,channel,customer_id,"
+            "external_message_id,media_file_id,media_url,post_permalink,post_image_url,"
+            "post_media_type,post_id,media_id"
+        )
+        select_fields = f"{base_fields},raw_payload" if (platform == "instagram" and "comment" in channel) else base_fields
+
         query = (
             supabase.table("inbox_messages")
-            .select(
-                "id,direction,role,created_at,media_type,content,platform,channel,customer_id,"
-                "external_message_id,media_file_id,media_url,raw_payload,post_permalink,"
-                "post_image_url,post_media_type,post_id,media_id"
-            )
+            .select(select_fields)
             .eq("platform", platform)
             .eq("business_id", business_id)
         )
@@ -4715,30 +4722,38 @@ async def get_conversation_messages_v2(
 
         messages = [transform_message_to_react(row) for row in rows]
 
-        try:
-            mark_query = (
-                supabase.table("inbox_messages")
-                .update({"is_read": True})
-                .eq("platform", platform)
-                .eq("business_id", business_id)
-                .eq("direction", "inbound")
-            )
-            if platform == "telegram" and channel in ("telegram_bot_group", "telegram_bot_private"):
-                mark_query = mark_query.or_(f"chat_id.eq.{customer_id},customer_id.eq.{customer_id}")
-            elif platform == "instagram" and "comment" in channel:
-                if channel:
-                    mark_query = mark_query.eq("channel", channel)
-                if post_id:
-                    mark_query = mark_query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
-                elif customer_id:
-                    mark_query = mark_query.eq("customer_id", str(customer_id))
+        if mark_read:
+            def mark_read_task():
+                try:
+                    mark_query = (
+                        supabase.table("inbox_messages")
+                        .update({"is_read": True})
+                        .eq("platform", platform)
+                        .eq("business_id", business_id)
+                        .eq("direction", "inbound")
+                        .eq("is_read", False)
+                    )
+                    if platform == "telegram" and channel in ("telegram_bot_group", "telegram_bot_private"):
+                        mark_query = mark_query.or_(f"chat_id.eq.{customer_id},customer_id.eq.{customer_id}")
+                    elif platform == "instagram" and "comment" in channel:
+                        if channel:
+                            mark_query = mark_query.eq("channel", channel)
+                        if post_id:
+                            mark_query = mark_query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
+                        elif customer_id:
+                            mark_query = mark_query.eq("customer_id", str(customer_id))
+                    else:
+                        mark_query = mark_query.eq("customer_id", str(customer_id))
+                        if channel:
+                            mark_query = mark_query.eq("channel", channel)
+                    mark_query.execute()
+                except Exception:
+                    pass
+
+            if background_tasks is not None:
+                background_tasks.add_task(mark_read_task)
             else:
-                mark_query = mark_query.eq("customer_id", str(customer_id))
-                if channel:
-                    mark_query = mark_query.eq("channel", channel)
-            mark_query.execute()
-        except Exception:
-            pass
+                mark_read_task()
 
         return {
             'status': 'ok',
