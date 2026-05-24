@@ -137,21 +137,21 @@ const API = {
       return { status: 'error', message: `Request failed: ${res.status}` };
     }
   },
-  async fetchJsonWithAuthFallback(url, options = {}) {
-    let res = await API.fetchWithTimeout(url, options);
+  async fetchJsonWithAuthFallback(url, options = {}, timeoutMs = 35000) {
+    let res = await API.fetchWithTimeout(url, options, timeoutMs);
     let data = await API.parseJson(res);
     const unauthorized = res.status === 401 || /unauthorized/i.test(apiErrorMessage(data, res.status));
     if (unauthorized && readAuthSession()?.token && dashboardSecret()) {
       const retryHeaders = { ...(options.headers || {}) };
       delete retryHeaders.Authorization;
-      res = await API.fetchWithTimeout(url, { ...options, headers: retryHeaders });
+      res = await API.fetchWithTimeout(url, { ...options, headers: retryHeaders }, timeoutMs);
       data = await API.parseJson(res);
     }
     if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
     return data;
   },
-  async get(path) {
-    return API.fetchJsonWithAuthFallback(`${API_BASE}${scopedPath(path)}`, { headers: apiHeaders() });
+  async get(path, { timeoutMs = 35000 } = {}) {
+    return API.fetchJsonWithAuthFallback(`${API_BASE}${scopedPath(path)}`, { headers: apiHeaders() }, timeoutMs);
   },
   async post(path, params = {}) {
     const qs = new URLSearchParams(params);
@@ -180,6 +180,7 @@ const THREAD_POLL_MS = 5000;
 const INBOX_POLL_MS = 12000;
 const STATS_POLL_MS = 60000;
 const TASKS_POLL_MS = 5000;
+const THREAD_LOAD_LIMIT = 80;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
 const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
@@ -4133,11 +4134,14 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     showToast(clean ? `Owner scoped to ${clean}` : 'Owner scope cleared');
   };
 
-  const loadThread = async (conversationId, { silent = false } = {}) => {
+  const loadThread = async (conversationId, { silent = false, markRead = !silent } = {}) => {
     if (!conversationId || !liveMode) return;
     if (!silent) setThreadLoading(true);
     try {
-      const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?limit=120`);
+      const data = await API.get(
+        `/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?limit=${THREAD_LOAD_LIMIT}&mark_read=${markRead ? '1' : '0'}`,
+        { timeoutMs: 12000 },
+      );
       setThreads(prev => ({
         ...prev,
         [conversationId]: (data.data || []).map(normalizeMessage),
@@ -4278,7 +4282,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     setSending(true);
     try {
       await sendLiveMessage(conv, text, options);
-      await loadThread(conv.id);
+      await loadThread(conv.id, { markRead: false });
       loadConversations({ silent: true, sideLoad: false });
       showToast('Message sent');
       return true;
@@ -4339,7 +4343,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       if (!currentId || threadPollBusy.current) return;
       threadPollBusy.current = true;
       try {
-        await loadThread(currentId, { silent: true });
+        await loadThread(currentId, { silent: true, markRead: false });
       } finally {
         threadPollBusy.current = false;
       }
@@ -4504,7 +4508,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
         } else {
           await sendLiveImage(conv, file, caption.trim());
         }
-        await loadThread(conv.id);
+        await loadThread(conv.id, { markRead: false });
         loadConversations({ silent: true, sideLoad: false });
         showToast(tool === 'voice' ? 'Voice note sent' : 'Image sent');
         return true;
