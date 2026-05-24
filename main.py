@@ -135,6 +135,10 @@ SUPER_ADMIN_EMAILS = {
     for item in os.getenv("SUPER_ADMIN_EMAILS", "").split(",")
     if str(item).strip()
 }
+
+# Fallback store used only when `dashboard_workspace_state` table is missing.
+# This keeps operator tasks usable until SQL migration is applied.
+WORKSPACE_STATE_FALLBACK: dict[str, dict] = {}
 WHATSAPP_EMBEDDED_REDIRECT_URI = os.getenv(
     "WHATSAPP_EMBEDDED_REDIRECT_URI",
     f"{PUBLIC_BASE_URL.rstrip('/')}/auth/whatsapp/embedded/callback",
@@ -1591,10 +1595,15 @@ def get_workspace_state(business_id: str):
             key = normalize_id(row.get("state_key"))
             if key:
                 payload[key] = row.get("state_value")
+        # Merge runtime fallback (used only if DB table is unavailable).
+        fallback = WORKSPACE_STATE_FALLBACK.get(business_id) or {}
+        if isinstance(fallback, dict):
+            payload = {**payload, **fallback}
         return payload
     except Exception as e:
         log("Could not load workspace state", str(e))
-        return {}
+        fallback = WORKSPACE_STATE_FALLBACK.get(business_id) or {}
+        return fallback if isinstance(fallback, dict) else {}
 
 
 def upsert_workspace_state(business_id: str, state_key: str, state_value, updated_by: str = ""):
@@ -1608,10 +1617,17 @@ def upsert_workspace_state(business_id: str, state_key: str, state_value, update
         "state_value": state_value if isinstance(state_value, (dict, list, str, int, float, bool)) or state_value is None else {},
         "updated_by": normalize_email(updated_by),
     }
-    supabase.table("dashboard_workspace_state").upsert(
-        data,
-        on_conflict="business_id,state_key",
-    ).execute()
+    try:
+        supabase.table("dashboard_workspace_state").upsert(
+            data,
+            on_conflict="business_id,state_key",
+        ).execute()
+    except Exception as e:
+        # Temporary safety-net if DB migration wasn't applied yet.
+        log("Could not save workspace state", str(e))
+        if business_id not in WORKSPACE_STATE_FALLBACK:
+            WORKSPACE_STATE_FALLBACK[business_id] = {}
+        WORKSPACE_STATE_FALLBACK[business_id][state_key] = data.get("state_value")
 
 
 def list_business_operator_ids(business_id: str) -> list[str]:
