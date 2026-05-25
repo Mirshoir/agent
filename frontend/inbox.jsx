@@ -83,7 +83,7 @@ function readAuthSession() {
     const parsed = JSON.parse(window.localStorage.getItem(DASHBOARD_AUTH_STORAGE_KEY) || '{}');
     if (!parsed || typeof parsed !== 'object') return null;
     const ownerEmail = normalizeOwnerEmail(parsed.ownerEmail);
-    const token = normalizeId(parsed.token || '');
+    const token = String(parsed.token || '').trim();
     if (!ownerEmail || !token) return null;
     return {
       ownerEmail,
