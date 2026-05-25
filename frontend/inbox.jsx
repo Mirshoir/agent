@@ -179,6 +179,7 @@ const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
 const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
 const LEAD_PRICES_STORAGE_KEY = 'instaagent_lead_prices';
+const CLIENT_OWNERS_STORAGE_KEY = 'instaagent_client_owners';
 const OPERATOR_DEALS_STORAGE_KEY = 'instaagent_operator_deals';
 const OPERATOR_ADMIN_NOTES_STORAGE_KEY = 'instaagent_operator_admin_notes';
 const USER_PROFILE_STORAGE_KEY = 'instaagent_user_profiles';
@@ -1362,7 +1363,7 @@ const WORKSPACE_TEXT = {
     leadAmount: 'Potential value', leadSource: 'Source', leadUpdated: 'Updated', leadEmpty: 'No leads in this stage yet.',
     leadOpen: 'Open chat', leadPrice: 'Price', leadPricePlaceholder: 'Add price', leadPriceClear: 'Clear price',
     clientsTitle: 'Clients table', clientsSubtitle: 'All customers with status, channel, price, and last message.', clientsEmpty: 'No clients yet.',
-    client: 'Client', lastMessage: 'Last message', status: 'Status', channel: 'Channel',
+    client: 'Client', lastMessage: 'Last message', status: 'Status', channel: 'Channel', ownerAssigned: 'Owner', pickClient: 'Pick me', unpickClient: 'Unpick',
     operatorsTitle: 'Operators panel', operatorsSubtitle: 'Operator workspace for tasks, client messages, and leads.',
     textToOperators: 'Text to operators', textToOperatorsPlaceholder: 'Write task for operators...', saveAdminNote: 'Send task',
     adminNotes: 'Tasks history', noAdminNotes: 'No tasks yet.', messagesFromClients: 'Messages from clients',
@@ -1403,7 +1404,7 @@ const WORKSPACE_TEXT = {
     leadAmount: 'Potensial qiymat', leadSource: 'Manba', leadUpdated: 'Yangilangan', leadEmpty: 'Bu bosqichda lid yo‘q.',
     leadOpen: 'Chatni ochish', leadPrice: 'Narx', leadPricePlaceholder: 'Narx kiriting', leadPriceClear: 'Narxni o‘chirish',
     clientsTitle: 'Mijozlar jadvali', clientsSubtitle: 'Barcha mijozlar: status, kanal, narx va oxirgi xabar.', clientsEmpty: 'Hali mijoz yo‘q.',
-    client: 'Mijoz', lastMessage: 'Oxirgi xabar', status: 'Status', channel: 'Kanal',
+    client: 'Mijoz', lastMessage: 'Oxirgi xabar', status: 'Status', channel: 'Kanal', ownerAssigned: 'Egası', pickClient: 'O‘zim olish', unpickClient: 'Bo‘shatish',
     operatorsTitle: 'Operator paneli', operatorsSubtitle: 'Vazifalar, mijoz xabarlari va lidlar uchun operator ish maydoni.',
     textToOperators: 'Operatorlarga topshiriq', textToOperatorsPlaceholder: 'Operatorlar uchun vazifa yozing...', saveAdminNote: 'Vazifani yuborish',
     adminNotes: 'Vazifalar tarixi', noAdminNotes: 'Hali vazifa yo‘q.', messagesFromClients: 'Mijozlardan xabarlar',
@@ -1444,7 +1445,7 @@ const WORKSPACE_TEXT = {
     leadAmount: 'Потенциал', leadSource: 'Источник', leadUpdated: 'Обновлено', leadEmpty: 'В этой стадии пока нет лидов.',
     leadOpen: 'Открыть чат', leadPrice: 'Цена', leadPricePlaceholder: 'Добавить цену', leadPriceClear: 'Удалить цену',
     clientsTitle: 'Таблица клиентов', clientsSubtitle: 'Все клиенты со статусом, каналом, ценой и последним сообщением.', clientsEmpty: 'Клиентов пока нет.',
-    client: 'Клиент', lastMessage: 'Последнее сообщение', status: 'Статус', channel: 'Канал',
+    client: 'Клиент', lastMessage: 'Последнее сообщение', status: 'Статус', channel: 'Канал', ownerAssigned: 'Ответственный', pickClient: 'Взять себе', unpickClient: 'Снять',
     operatorsTitle: 'Панель оператора', operatorsSubtitle: 'Рабочая зона оператора: задачи, клиенты и лиды.',
     textToOperators: 'Задача операторам', textToOperatorsPlaceholder: 'Напишите задачу для операторов...', saveAdminNote: 'Отправить задачу',
     adminNotes: 'История задач', noAdminNotes: 'Задач пока нет.', messagesFromClients: 'Сообщения клиентов',
@@ -1796,11 +1797,14 @@ function LeadsBoard({ conversations, leadStages, leadPrices, setLeadStage, setLe
   );
 }
 
-function ClientsTable({ conversations, leadStages, leadPrices, onOpenConversation, w }) {
+function ClientsTable({ conversations, leadStages, leadPrices, onOpenConversation, clientOwners = {}, currentUser = null, onPickClient = () => {}, w }) {
+  const currentOwnerLabel = userOwnerLabel(currentUser);
+  const currentOwnerKeys = useMemo(() => userOwnerKeys(currentUser), [currentUser]);
   const rows = useMemo(() => (conversations || []).map(conv => ({
     ...conv,
     stage: leadStages[conv.id] || guessLeadStage(conv),
     price: leadPrices[conv.id] || '',
+    owner: String(clientOwners?.[conv.id] || '').trim(),
   })), [conversations, leadStages, leadPrices]);
 
   const stageNames = {
@@ -1830,13 +1834,14 @@ function ClientsTable({ conversations, leadStages, leadPrices, onOpenConversatio
               <th>{w.leadPrice}</th>
               <th>{w.lastMessage}</th>
               <th>{w.unreadMessages}</th>
+              <th>{w.ownerAssigned || 'Owner'}</th>
               <th />
             </tr>
           </thead>
           <tbody>
             {!rows.length && (
               <tr>
-                <td colSpan="7" className="clients-empty">{w.clientsEmpty}</td>
+                <td colSpan="8" className="clients-empty">{w.clientsEmpty}</td>
               </tr>
             )}
             {rows.map(row => (
@@ -1855,7 +1860,21 @@ function ClientsTable({ conversations, leadStages, leadPrices, onOpenConversatio
                 <td>{row.price || '-'}</td>
                 <td className="client-preview">{row.preview}</td>
                 <td>{row.unread || 0}</td>
-                <td><button className="table-action" onClick={() => onOpenConversation(row.id)}>{w.leadOpen}</button></td>
+                <td>
+                  {row.owner ? (
+                    <span className="chip human" style={{ textTransform: 'none' }}>{row.owner}</span>
+                  ) : (
+                    <span style={{ opacity: 0.65 }}>-</span>
+                  )}
+                </td>
+                <td style={{ display: 'flex', gap: 8 }}>
+                  <button className="table-action" onClick={() => onOpenConversation(row.id)}>{w.leadOpen}</button>
+                  {row.owner && currentOwnerKeys.has(row.owner.toLowerCase()) ? (
+                    <button className="table-action" onClick={() => onPickClient(row.id, '')}>{w.unpickClient || 'Unpick'}</button>
+                  ) : (
+                    <button className="table-action" onClick={() => onPickClient(row.id, currentOwnerLabel)}>{w.pickClient || 'Pick me'}</button>
+                  )}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -1863,6 +1882,28 @@ function ClientsTable({ conversations, leadStages, leadPrices, onOpenConversatio
       </div>
     </div>
   );
+}
+
+function userOwnerKeys(currentUser) {
+  const keys = new Set();
+  const add = (value) => {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw) return;
+    keys.add(raw);
+    const short = raw.split('@')[0];
+    if (short) keys.add(short);
+  };
+  add(currentUser?.ownerEmail);
+  add(currentUser?.email);
+  add(currentUser?.name);
+  add(currentUser?.id);
+  return keys;
+}
+
+function userOwnerLabel(currentUser) {
+  const raw = String(currentUser?.ownerEmail || currentUser?.email || currentUser?.name || currentUser?.id || '').trim();
+  if (!raw) return 'operator';
+  return raw.split('@')[0] || raw;
 }
 
 function OperatorsRanking({ leadStages, operatorDeals = {}, operatorAccounts = [], setOperatorDealCount, w }) {
@@ -2383,7 +2424,7 @@ function OperatorPanel(props) {
 }
 
 function OperatorsSection(props) {
-  const isOperator = props.currentUser?.role === 'operator' && props.currentUser?.isAdmin !== true;
+  const isOperator = !['admin','owner','super_admin'].includes(String(props.currentUser?.role || '').toLowerCase());
   const [mode, setMode] = useState(isOperator ? 'operator' : 'admin');
   const w = props.w;
   useEffect(() => {
@@ -2423,12 +2464,14 @@ function WorkspacePanel({
   generatorState,
   leadStages,
   leadPrices,
+  clientOwners,
   operatorDeals,
   adminNotes,
   operatorAccounts,
   onReloadOperatorAccounts,
   onLeadStageChange,
   onLeadPriceChange,
+  onPickClient,
   onOperatorDealChange,
   onAdminNote,
   onOpenConversation,
@@ -2440,7 +2483,7 @@ function WorkspacePanel({
   onUpdateUserProfile,
 }) {
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
-  const isOperator = currentUser?.role === 'operator' && currentUser?.isAdmin !== true;
+  const isOperator = !['admin','owner','super_admin'].includes(String(currentUser?.role || '').toLowerCase());
   if (isOperator && !['leads', 'inbox', 'clients', 'operators', 'settings', 'profile'].includes(view)) return null;
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId) || businesses[0] || {};
   const activeProviderId = aiProviderForBusiness(selectedBusiness);
@@ -2492,6 +2535,9 @@ function WorkspacePanel({
           conversations={conversations}
           leadStages={leadStages}
           leadPrices={leadPrices}
+          clientOwners={clientOwners}
+          currentUser={currentUser}
+          onPickClient={onPickClient}
           onOpenConversation={onOpenConversation}
           w={w}
         />
@@ -2846,7 +2892,7 @@ function WorkspacePanel({
 
 // ---------- Rail ----------
 function Rail({ t, activeView, onView, currentUser, userProfile }) {
-  const isOperator = currentUser?.role === 'operator' && currentUser?.isAdmin !== true;
+  const isOperator = !['admin','owner','super_admin'].includes(String(currentUser?.role || '').toLowerCase());
   const items = [
     { id: 'leads', icon: <I.Star />, label: t.leads || 'Leads' },
     { id: 'inbox', icon: <I.Inbox />, label: t.inbox, dot: true },
@@ -3771,7 +3817,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 
 function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const t = window.STRINGS[lang];
-  const isOperator = currentUser?.role === 'operator' && currentUser?.isAdmin !== true;
+  const isOperator = !['admin','owner','super_admin'].includes(String(currentUser?.role || '').toLowerCase());
   const [booting, setBooting] = useState(true);
 
   const [conversations, setConversations] = useState([]);
@@ -3796,6 +3842,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const [operatorAccounts, setOperatorAccounts] = useState([]);
   const [leadStages, setLeadStages] = useState(() => readStoredObject(LEAD_STAGES_STORAGE_KEY));
   const [leadPrices, setLeadPrices] = useState(() => readStoredObject(LEAD_PRICES_STORAGE_KEY));
+  const [clientOwners, setClientOwners] = useState(() => readStoredObject(CLIENT_OWNERS_STORAGE_KEY));
   const [operatorDeals, setOperatorDeals] = useState(() => readStoredObject(OPERATOR_DEALS_STORAGE_KEY));
   const [operatorAdminNotes, setOperatorAdminNotes] = useState(() => {
     const stored = readStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY);
@@ -3897,6 +3944,10 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       if (state.lead_prices && typeof state.lead_prices === 'object') {
         setLeadPrices(state.lead_prices);
         writeStoredObject(LEAD_PRICES_STORAGE_KEY, state.lead_prices);
+      }
+      if (state.client_owners && typeof state.client_owners === 'object') {
+        setClientOwners(state.client_owners);
+        writeStoredObject(CLIENT_OWNERS_STORAGE_KEY, state.client_owners);
       }
       if (state.operator_deals && typeof state.operator_deals === 'object') {
         setOperatorDeals(state.operator_deals);
@@ -4610,6 +4661,19 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     });
   };
 
+  const setClientOwner = (conversationId, owner) => {
+    setClientOwners(prev => {
+      const next = { ...prev };
+      const clean = String(owner || '').trim();
+      if (clean) next[conversationId] = clean;
+      else delete next[conversationId];
+      writeStoredObject(CLIENT_OWNERS_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ client_owners: next });
+      return next;
+    });
+    showToast(owner ? `Client picked by ${owner}` : 'Client unpicked');
+  };
+
   const addOperatorAdminNote = (text, recipients = ['*'], mode = 'all') => {
     setOperatorAdminNotes(prev => {
       const next = [{
@@ -4717,12 +4781,14 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
             generatorState={promptGeneratorState}
             leadStages={leadStages}
             leadPrices={leadPrices}
+            clientOwners={clientOwners}
             operatorDeals={operatorDeals}
             adminNotes={operatorAdminNotes}
             operatorAccounts={operatorAccounts}
             onReloadOperatorAccounts={() => loadOperatorAccounts(selectedBusinessId)}
             onLeadStageChange={setLeadStage}
             onLeadPriceChange={setLeadPrice}
+            onPickClient={setClientOwner}
             onOperatorDealChange={setOperatorDealCount}
             onAdminNote={addOperatorAdminNote}
             onOpenConversation={selectConversation}
