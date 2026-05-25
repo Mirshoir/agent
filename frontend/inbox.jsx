@@ -117,6 +117,21 @@ function clearAuthSession() {
   window.sessionStorage.removeItem('instaagent_dashboard_secret');
 }
 
+function resolveRoleScope(currentUser = {}, businesses = []) {
+  const rawRole = normalizeId(currentUser?.role || '').toLowerCase();
+  const adminRoles = new Set(['owner', 'admin', 'super_admin']);
+  if (adminRoles.has(rawRole)) return { role: rawRole, isOperator: false };
+  if (rawRole === 'operator') return { role: 'operator', isOperator: true };
+  if (currentUser?.isAdmin === true) return { role: 'admin', isOperator: false };
+
+  const email = normalizeOwnerEmail(currentUser?.ownerEmail || currentUser?.email || '');
+  if (email) {
+    const ownsBusiness = (businesses || []).some((row) => normalizeOwnerEmail(row?.owner_email || '') === email);
+    if (ownsBusiness) return { role: 'owner', isOperator: false };
+  }
+  return { role: rawRole || 'operator', isOperator: true };
+}
+
 function scopedPath(path) {
   const ownerEmail = resolvedOwnerEmail();
   if (!ownerEmail) return path;
@@ -2424,7 +2439,8 @@ function OperatorPanel(props) {
 }
 
 function OperatorsSection(props) {
-  const isOperator = !['admin','owner','super_admin'].includes(String(props.currentUser?.role || '').toLowerCase());
+  const roleScope = resolveRoleScope(props.currentUser, props.businesses || []);
+  const isOperator = roleScope.isOperator;
   const [mode, setMode] = useState(isOperator ? 'operator' : 'admin');
   const w = props.w;
   useEffect(() => {
@@ -2483,7 +2499,8 @@ function WorkspacePanel({
   onUpdateUserProfile,
 }) {
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
-  const isOperator = !['admin','owner','super_admin'].includes(String(currentUser?.role || '').toLowerCase());
+  const roleScope = resolveRoleScope(currentUser, businesses || []);
+  const isOperator = roleScope.isOperator;
   if (isOperator && !['leads', 'inbox', 'clients', 'operators', 'settings', 'profile'].includes(view)) return null;
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId) || businesses[0] || {};
   const activeProviderId = aiProviderForBusiness(selectedBusiness);
@@ -2527,6 +2544,8 @@ function WorkspacePanel({
           setLeadPrice={onLeadPriceChange}
           onOpenConversation={onOpenConversation}
           w={w}
+          businesses={businesses}
+          currentUser={currentUser}
         />
       )}
 
@@ -2891,8 +2910,9 @@ function WorkspacePanel({
 }
 
 // ---------- Rail ----------
-function Rail({ t, activeView, onView, currentUser, userProfile }) {
-  const isOperator = !['admin','owner','super_admin'].includes(String(currentUser?.role || '').toLowerCase());
+function Rail({ t, activeView, onView, currentUser, userProfile, businesses }) {
+  const roleScope = resolveRoleScope(currentUser, businesses || []);
+  const isOperator = roleScope.isOperator;
   const items = [
     { id: 'leads', icon: <I.Star />, label: t.leads || 'Leads' },
     { id: 'inbox', icon: <I.Inbox />, label: t.inbox, dot: true },
@@ -3817,7 +3837,6 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 
 function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const t = window.STRINGS[lang];
-  const isOperator = !['admin','owner','super_admin'].includes(String(currentUser?.role || '').toLowerCase());
   const [booting, setBooting] = useState(true);
 
   const [conversations, setConversations] = useState([]);
@@ -4736,7 +4755,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
           userProfile={userProfile}
           onUpdateUserProfile={updateUserProfile}
         />
-        <Rail t={t} activeView={activeView} onView={changeView} currentUser={currentUser} userProfile={userProfile} />
+        <Rail t={t} activeView={activeView} onView={changeView} currentUser={currentUser} userProfile={userProfile} businesses={businesses} />
         <ListColumn
           conversations={conversations}
           selectedId={selectedId}
@@ -4879,3 +4898,5 @@ function Root() {
 }
 
 createRoot(document.getElementById('root')).render(<Root />);
+  const roleScope = resolveRoleScope(currentUser, businesses);
+  const isOperator = roleScope.isOperator;
