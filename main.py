@@ -12,7 +12,7 @@ import subprocess
 import requests
 from urllib.parse import urlencode, urlparse, parse_qs, unquote
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 try:
     import bcrypt
 except Exception:
@@ -141,6 +141,8 @@ SUPER_ADMIN_EMAILS = {
 WORKSPACE_STATE_FALLBACK: dict[str, dict] = {}
 STATS_CACHE_TTL_SECONDS = int(os.getenv("STATS_CACHE_TTL_SECONDS", "20"))
 STATS_CACHE: dict[str, dict] = {}
+INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS", str(60 * 60 * 6)))
+INSTAGRAM_PUBLIC_PREVIEW_CACHE: dict[str, tuple[float, dict]] = {}
 WHATSAPP_EMBEDDED_REDIRECT_URI = os.getenv(
     "WHATSAPP_EMBEDDED_REDIRECT_URI",
     f"{PUBLIC_BASE_URL.rstrip('/')}/auth/whatsapp/embedded/callback",
@@ -365,6 +367,130 @@ def is_instagram_public_link(value: str) -> bool:
     )
 
 
+def _extract_meta_content(html: str, *keys: str) -> str:
+    if not html:
+        return ""
+    for key in keys:
+        key_re = re.escape(key)
+        patterns = [
+            rf'<meta[^>]+property=["\']{key_re}["\'][^>]*content=["\']([^"\']+)["\']',
+            rf'<meta[^>]+name=["\']{key_re}["\'][^>]*content=["\']([^"\']+)["\']',
+            rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']{key_re}["\']',
+            rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']{key_re}["\']',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, html, flags=re.IGNORECASE)
+            if match:
+                value = normalize_id(match.group(1))
+                if value:
+                    return value
+    return ""
+
+
+def fetch_instagram_public_preview(permalink: str) -> dict:
+    """
+    Best-effort fallback for forwarded Instagram reels/posts that arrive without direct media URL.
+    Scrapes OG meta from public link and caches it.
+    """
+    permalink = normalize_id(unwrap_meta_redirect_url(permalink))
+    if not is_instagram_public_link(permalink):
+        return {}
+
+    now = time.time()
+    cached = INSTAGRAM_PUBLIC_PREVIEW_CACHE.get(permalink)
+    if cached and (now - cached[0]) < INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS:
+        return cached[1] or {}
+
+    user_agents = [
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+        "Twitterbot/1.0",
+    ]
+
+    try:
+        best_video = ""
+        best_image = ""
+        for user_agent in user_agents:
+            headers = {
+                "User-Agent": user_agent,
+                "Accept-Language": "en-US,en;q=0.9",
+            }
+            res = requests.get(permalink, headers=headers, timeout=12, allow_redirects=True)
+            html = res.text if res.ok else ""
+            if not html:
+                continue
+            og_video = _extract_meta_content(
+                html,
+                "og:video:secure_url",
+                "og:video:url",
+                "og:video",
+                "twitter:player:stream",
+            )
+            og_image = _extract_meta_content(
+                html,
+                "og:image:secure_url",
+                "og:image:url",
+                "og:image",
+                "twitter:image",
+            )
+            if og_video and not best_video:
+                best_video = og_video
+            if og_image and not best_image:
+                best_image = og_image
+            if best_video or best_image:
+                break
+
+        media_type = "video" if best_video else ("image" if best_image else "")
+        payload = {
+            "media_url": best_video or "",
+            "post_image_url": best_image or "",
+            "post_media_type": media_type,
+            "post_permalink": permalink,
+        }
+        INSTAGRAM_PUBLIC_PREVIEW_CACHE[permalink] = (now, payload)
+        return payload
+    except Exception:
+        INSTAGRAM_PUBLIC_PREVIEW_CACHE[permalink] = (now, {})
+        return {}
+
+
+def extract_instagram_permalink_from_payload(raw_payload: dict) -> str:
+    raw_payload = raw_payload or {}
+    candidates = []
+
+    def collect_candidate(value):
+        value = normalize_id(value)
+        if not value:
+            return
+        value = unwrap_meta_redirect_url(value)
+        if is_instagram_public_link(value) and value not in candidates:
+            candidates.append(value)
+
+    for key in ("post_permalink", "permalink", "link", "url"):
+        collect_candidate(raw_payload.get(key))
+
+    msg = raw_payload.get("message") if isinstance(raw_payload.get("message"), dict) else {}
+    for key in ("permalink", "link", "url"):
+        collect_candidate(msg.get(key))
+
+    shares = msg.get("shares") if isinstance(msg.get("shares"), list) else []
+    for share in shares:
+        if not isinstance(share, dict):
+            continue
+        for key in ("permalink", "link", "url"):
+            collect_candidate(share.get(key))
+
+    attachments = msg.get("attachments") if isinstance(msg.get("attachments"), list) else []
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        payload = att.get("payload") if isinstance(att.get("payload"), dict) else {}
+        for key in ("permalink", "link", "url", "external_url"):
+            collect_candidate(payload.get(key))
+
+    return candidates[0] if candidates else ""
+
+
 def normalize_email(value) -> str:
     return str(value or "").strip().lower()
 
@@ -578,6 +704,8 @@ def verify_dashboard_password(password: str, password_hash: str) -> bool:
 
 
 AUTH_TOKEN_TTL_SECONDS = int(os.getenv("DASHBOARD_AUTH_TTL_SECONDS", str(60 * 60 * 24 * 30)))
+CONVERSATIONS_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATIONS_CACHE_TTL_SECONDS", "10"))
+_conversations_cache: dict[str, tuple[float, dict]] = {}
 
 
 def create_dashboard_auth_token(email: str, is_admin: bool = False, role: str = "") -> str:
@@ -1095,7 +1223,74 @@ def transform_message_to_react(row: dict) -> dict:
     return message
 
 
-def transform_conversation_to_react(key: str, rows: list, business: dict = None) -> dict:
+def _looks_like_numeric_id(value: str) -> bool:
+    text = normalize_id(value)
+    return bool(text and re.fullmatch(r"\d{6,}", text))
+
+
+def _extract_username_candidates(raw_payload: dict) -> list[str]:
+    raw = raw_payload or {}
+    candidates = []
+    for key in ("username", "user_name", "from_username", "customer_username"):
+        value = normalize_id(raw.get(key))
+        if value:
+            candidates.append(value)
+
+    for obj_key in ("from", "sender", "user", "contact", "profile"):
+        obj = raw.get(obj_key)
+        if isinstance(obj, dict):
+            for key in ("username", "user_name", "name"):
+                value = normalize_id(obj.get(key))
+                if value:
+                    candidates.append(value)
+    return [item for item in candidates if item]
+
+
+def resolve_customer_label(rows: list, platform: str, fallback_scope: str) -> tuple[str, str]:
+    """
+    Returns (display_name, handle_value_without_at).
+    Prefers real usernames/names found in payloads and historical customer_name,
+    falls back to scoped ids only when nothing human-readable is available.
+    """
+    best_name = ""
+    best_username = ""
+
+    for row in reversed(rows or []):
+        customer_name = normalize_id(row.get("customer_name"))
+        if customer_name and not _looks_like_numeric_id(customer_name):
+            if not best_name:
+                best_name = customer_name
+            if platform == "instagram" and re.fullmatch(r"[A-Za-z0-9._]{2,64}", customer_name):
+                best_username = best_username or customer_name
+
+        raw = row.get("raw_payload") if isinstance(row, dict) else {}
+        for candidate in _extract_username_candidates(raw if isinstance(raw, dict) else {}):
+            if platform == "instagram":
+                if re.fullmatch(r"[A-Za-z0-9._]{2,64}", candidate):
+                    best_username = best_username or candidate
+                    if not best_name:
+                        best_name = candidate
+            elif not best_name:
+                best_name = candidate
+
+        if best_name and (best_username or platform != "instagram"):
+            break
+
+    if not best_name:
+        if platform == "instagram":
+            best_name = f"Instagram user {fallback_scope[-4:]}"
+        elif platform == "telegram":
+            best_name = f"Telegram user {fallback_scope[-4:]}"
+        elif platform == "whatsapp":
+            best_name = f"WhatsApp user {fallback_scope[-4:]}"
+        else:
+            best_name = f"Customer {fallback_scope[-4:]}"
+
+    handle_value = best_username or fallback_scope
+    return best_name, handle_value
+
+
+def transform_conversation_to_react(key: str, rows: list, business: dict = None, ai_lookup_enabled: bool = True) -> dict:
     """Transform database rows to React conversation format"""
     if not rows:
         return None
@@ -1117,17 +1312,15 @@ def transform_conversation_to_react(key: str, rows: list, business: dict = None)
     else:
         effective_scope = comment_customer_id
 
-    customer_name = latest_row.get('customer_name') or (
-        f"Post {effective_scope[-6:]}" if platform == "instagram" and "comment" in normalize_id(channel).lower()
-        else f'Customer {effective_scope[-4:]}'
-    )
+    customer_name, handle_value = resolve_customer_label(rows, platform, effective_scope)
     ai_scope = encode_comment_scope("", comment_post_id) if (platform == "instagram" and "comment" in normalize_id(channel).lower() and comment_post_id) else effective_scope
-    ai_enabled = is_chat_ai_enabled(platform, channel, ai_scope, business_id)
+    # Fast conversation list path should avoid per-conversation DB lookups.
+    ai_enabled = is_chat_ai_enabled(platform, channel, ai_scope, business_id) if ai_lookup_enabled else True
 
     return {
         'id': key,
         'name': customer_name,
-        'handle': f'@{effective_scope}',
+        'handle': f'@{handle_value}',
         'platform': platform,
         'isCommentThread': platform == "instagram" and "comment" in normalize_id(channel).lower(),
         'postId': comment_post_id or extract_instagram_comment_post_id(latest_row),
@@ -1340,6 +1533,7 @@ ALLOWED_BUSINESS_SETTINGS = {
     "openai_api_key",
     "gemini_api_key",
     "anthropic_api_key",
+    "ai_provider",
 }
 
 
@@ -1361,10 +1555,19 @@ def clean_business_settings(settings: dict) -> dict:
                 continue
         elif key in {"bot_enabled", "auto_reply_dms", "auto_reply_comments"}:
             cleaned[key] = bool(value)
+        elif key == "ai_provider":
+            provider = str(value or "").strip().lower()
+            if provider in {"mistral", "openai", "gemini", "anthropic"}:
+                cleaned[key] = provider
         elif key.endswith("_api_key"):
             cleaned[key] = str(value or "").strip()
         else:
             cleaned[key] = str(value or "").strip()
+
+    if "ai_model" in cleaned and "ai_provider" not in cleaned:
+        inferred_provider = infer_ai_provider_strict(cleaned.get("ai_model"))
+        if inferred_provider:
+            cleaned["ai_provider"] = inferred_provider
 
     return cleaned
 
@@ -1550,6 +1753,7 @@ def save_inbox_message(
             "post_permalink": post_permalink,
             "post_image_url": post_image_url,
             "post_media_type": post_media_type,
+            "created_at": datetime.utcnow().isoformat(),
         }
 
         try:
@@ -2396,11 +2600,29 @@ def infer_ai_provider(model: str) -> str:
         return "gemini"
     if model.startswith("claude"):
         return "anthropic"
-    return "mistral"
+    if model.startswith("mistral"):
+        return "mistral"
+    return "openai"
+
+
+def infer_ai_provider_strict(model: str) -> str:
+    model = str(model or "").lower()
+    if model.startswith(("gpt-", "o1", "o3", "o4")):
+        return "openai"
+    if model.startswith("gemini"):
+        return "gemini"
+    if model.startswith("claude"):
+        return "anthropic"
+    if model.startswith("mistral"):
+        return "mistral"
+    return ""
 
 
 def get_ai_provider(business: dict) -> str:
     provider = str(business.get("ai_provider") or "").strip().lower()
+    inferred = infer_ai_provider_strict(business.get("ai_model"))
+    if inferred and inferred != provider:
+        return inferred
     if provider in AI_DEFAULT_MODELS:
         return provider
     return infer_ai_provider(business.get("ai_model"))
@@ -3113,6 +3335,23 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             maybe_link = unwrap_meta_redirect_url(media_url)
             if is_instagram_public_link(maybe_link):
                 post_permalink = maybe_link
+
+        # Some forwarded reels arrive with only public permalink and no direct media URL.
+        # Fetch OG preview as a stable fallback so dashboard can still render preview consistently.
+        if post_permalink and (not media_url or "ig_messaging_cdn" in normalize_id(media_url)):
+            try:
+                public_preview = fetch_instagram_public_preview(post_permalink) or {}
+                if public_preview.get("post_image_url") and not post_image_url:
+                    post_image_url = normalize_id(public_preview.get("post_image_url"))
+                if public_preview.get("post_media_type") and not post_media_type:
+                    post_media_type = normalize_id(public_preview.get("post_media_type")).lower()
+                candidate_media_url = normalize_id(public_preview.get("media_url"))
+                if candidate_media_url:
+                    media_url = candidate_media_url
+                    if media_type in (None, "", "file"):
+                        media_type = "video"
+            except Exception as e:
+                log("Could not fetch public Instagram preview", str(e))
 
         save_inbox_message(
             business=business,
@@ -4564,6 +4803,8 @@ async def get_conversations_v2(
         platform: str = "all",
         search: str = "",
         business_id: str = "",
+        include_raw: bool = False,
+        fast: bool = False,
         authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
@@ -4573,17 +4814,34 @@ async def get_conversations_v2(
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     try:
-        # Keep payload slim on hot path; this endpoint is polled frequently.
-        query = (
-            supabase.table("inbox_messages")
-            .select(
-                "business_id,platform,channel,customer_id,chat_id,customer_name,"
-                "content,created_at,direction,is_read,raw_payload"
-            )
-            .order("created_at", desc=True)
-            .limit(700)
-        )
         clean_business_id = normalize_id(business_id)
+        allowed_ids = access.get("business_ids") or []
+        cache_key = json.dumps(
+            {
+                "admin": bool(access.get("is_admin")),
+                "email": normalize_email(access.get("email", "")),
+                "allowed": sorted([normalize_id(x) for x in allowed_ids]),
+                "platform": normalize_id(platform).lower(),
+                "business_id": clean_business_id,
+                "search": normalize_id(search).strip().lower(),
+                "include_raw": bool(include_raw),
+                "fast": bool(fast),
+            },
+            sort_keys=True,
+        )
+        now_ts = time.time()
+        cached = _conversations_cache.get(cache_key)
+        if cached and (now_ts - cached[0]) <= CONVERSATIONS_CACHE_TTL_SECONDS:
+            return cached[1]
+
+        # Keep payload slim on hot path; this endpoint is polled frequently.
+        fields = (
+            "business_id,platform,channel,customer_id,chat_id,customer_name,"
+            "content,created_at,direction,is_read,external_message_id"
+        )
+        if include_raw:
+            fields = f"{fields},raw_payload"
+        query = supabase.table("inbox_messages").select(fields)
         if clean_business_id:
             if not can_access_business(access, clean_business_id):
                 return {"status": "ok", "count": 0, "data": []}
@@ -4597,6 +4855,14 @@ async def get_conversations_v2(
         if platform != "all":
             query = query.eq("platform", platform)
 
+        if fast:
+            recent_cutoff = (datetime.utcnow() - timedelta(days=120)).strftime("%Y-%m-%dT00:00:00Z")
+            query = query.gte("created_at", recent_cutoff).limit(80)
+        else:
+            query = query.limit(450)
+
+        query = query.order("created_at", desc=True)
+
         rows = query.execute().data or []
 
         conversations_map = {}
@@ -4607,7 +4873,7 @@ async def get_conversations_v2(
             customer_id = str(row.get("customer_id") or "").strip()
             chat_id = str(row.get("chat_id") or "").strip()
             scope = conversation_scope(platform_name, channel, customer_id, chat_id)
-            if platform_name == "instagram" and "comment" in channel:
+            if include_raw and platform_name == "instagram" and "comment" in channel:
                 post_id = extract_instagram_comment_post_id(row)
                 scope = encode_comment_scope(customer_id, post_id)
 
@@ -4631,7 +4897,11 @@ async def get_conversations_v2(
 
         conversations = []
         for key, conv_rows in conversations_map.items():
-            conv = transform_conversation_to_react(key, sorted(conv_rows, key=lambda x: x.get('created_at', '')))
+            conv = transform_conversation_to_react(
+                key,
+                sorted(conv_rows, key=lambda x: x.get('created_at', '')),
+                ai_lookup_enabled=(not fast),
+            )
             if conv:
                 conversations.append(conv)
 
@@ -4642,11 +4912,16 @@ async def get_conversations_v2(
                 if q in f"{c['name']} {c['handle']} {c['preview']}".lower()
             ]
 
-        return {
+        response = {
             'status': 'ok',
             'count': len(conversations),
             'data': conversations
         }
+        _conversations_cache[cache_key] = (time.time(), response)
+        if len(_conversations_cache) > 120:
+            for key in sorted(_conversations_cache, key=lambda item: _conversations_cache[item][0])[:40]:
+                _conversations_cache.pop(key, None)
+        return response
 
     except Exception as e:
         log("Error fetching conversations", str(e))
@@ -4660,8 +4935,9 @@ async def get_conversations_v2(
 async def get_conversation_messages_v2(
         conversation_id: str,
         background_tasks: BackgroundTasks,
-        limit: int = 250,
+        limit: int = 50,
         mark_read: bool = True,
+        include_raw: bool = False,
         authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
@@ -4688,10 +4964,10 @@ async def get_conversation_messages_v2(
         if platform == "instagram" and "comment" in channel:
             customer_id, post_id = decode_comment_scope(customer_scope)
 
-        limit = max(1, min(int(limit or 120), 300))
+        limit = max(1, min(int(limit or 50), 50))
         base_fields = (
             "id,direction,role,created_at,media_type,content,platform,channel,customer_id,"
-            "external_message_id,media_url,raw_payload"
+            "external_message_id,media_url,post_permalink,post_image_url,post_media_type,raw_payload"
         )
         select_fields = base_fields
 
@@ -4713,11 +4989,92 @@ async def get_conversation_messages_v2(
                 query = query.eq("customer_id", str(customer_id))
         else:
             query = query.eq("customer_id", str(customer_id))
-            if channel:
+            if platform == "instagram" and channel in ("dm", "instagram_dm", "instagram_private"):
+                query = query.in_("channel", ["dm", "instagram_dm", "instagram_private", ""])
+            elif channel:
                 query = query.eq("channel", channel)
 
-        result = query.order("created_at", desc=False).limit(limit).execute()
-        rows = result.data or []
+        result = query.order("created_at", desc=True).limit(limit).execute()
+        rows = list(reversed(result.data or []))
+
+        # Some legacy Instagram rows were saved with inconsistent channel values.
+        # If strict channel filtering returns no history, fall back to customer-wide DM lookup.
+        if not rows and platform == "instagram" and channel in ("dm", "instagram_dm", "instagram_private"):
+            fallback_query = (
+                supabase.table("inbox_messages")
+                .select(select_fields)
+                .eq("platform", platform)
+                .eq("business_id", business_id)
+                .eq("customer_id", str(customer_id))
+                .order("created_at", desc=True)
+                .limit(limit)
+            )
+            rows = list(reversed(fallback_query.execute().data or []))
+
+        # Backfill old forwarded Instagram messages that were saved without preview URLs.
+        # This keeps forwarded reels stable in UI (no random "NO PREVIEW" regressions).
+        if platform == "instagram" and rows:
+            update_rows = []
+            for row in rows:
+                media_type = normalize_id(row.get("media_type")).lower()
+                if media_type not in ("video", "file", "photo", "image"):
+                    continue
+                if normalize_id(row.get("media_url")):
+                    continue
+
+                post_permalink = normalize_id(
+                    row.get("post_permalink")
+                    or (row.get("raw_payload") or {}).get("post_permalink")
+                    or extract_instagram_permalink_from_payload(row.get("raw_payload") or {})
+                )
+                if not post_permalink:
+                    continue
+
+                preview = fetch_instagram_public_preview(post_permalink) or {}
+                preview_media_url = normalize_id(preview.get("media_url"))
+                preview_image_url = normalize_id(preview.get("post_image_url"))
+                preview_media_type = normalize_id(preview.get("post_media_type")).lower()
+
+                changed = False
+                if preview_media_url:
+                    row["media_url"] = preview_media_url
+                    changed = True
+                if preview_image_url and not normalize_id(row.get("post_image_url")):
+                    row["post_image_url"] = preview_image_url
+                    changed = True
+                if post_permalink and not normalize_id(row.get("post_permalink")):
+                    row["post_permalink"] = post_permalink
+                    changed = True
+                if preview_media_type and media_type in ("", "file"):
+                    row["media_type"] = "video" if "video" in preview_media_type else ("photo" if "image" in preview_media_type else media_type)
+                    changed = True
+
+                if changed and normalize_id(row.get("id")):
+                    update_rows.append({
+                        "id": normalize_id(row.get("id")),
+                        "media_url": normalize_id(row.get("media_url")),
+                        "post_image_url": normalize_id(row.get("post_image_url")),
+                        "post_permalink": normalize_id(row.get("post_permalink")),
+                        "post_media_type": normalize_id(preview_media_type or row.get("post_media_type")).lower(),
+                    })
+
+            if update_rows:
+                def persist_preview_backfill(rows_to_update: list[dict]):
+                    for item in rows_to_update:
+                        try:
+                            supabase.table("inbox_messages").update({
+                                "media_url": item.get("media_url") or None,
+                                "post_image_url": item.get("post_image_url") or None,
+                                "post_permalink": item.get("post_permalink") or None,
+                                "post_media_type": item.get("post_media_type") or None,
+                            }).eq("id", item.get("id")).execute()
+                        except Exception:
+                            pass
+
+                if background_tasks is not None:
+                    background_tasks.add_task(persist_preview_backfill, update_rows)
+                else:
+                    persist_preview_backfill(update_rows)
 
         messages = [transform_message_to_react(row) for row in rows]
 
@@ -5216,6 +5573,7 @@ async def update_workspace_state_v2(
         allowed_keys = {
             "lead_stages",
             "lead_prices",
+            "manual_clients",
             "operator_deals",
             "operator_admin_notes",
             "operator_tasks",
@@ -5300,7 +5658,7 @@ async def api_update_combined_settings(
         ]
 
     workspace_state = payload.get("workspace_state") or {}
-    allowed_workspace_keys = {"lead_stages", "lead_prices", "operator_deals", "operator_admin_notes", "operator_tasks"}
+    allowed_workspace_keys = {"lead_stages", "lead_prices", "manual_clients", "operator_deals", "operator_admin_notes", "operator_tasks"}
     if isinstance(workspace_state, dict) and workspace_state:
         updated_workspace = []
         for key, value in workspace_state.items():
