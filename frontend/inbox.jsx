@@ -2412,7 +2412,7 @@ function WorkspacePanel({
 }) {
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
   const isOperator = currentUser?.role === 'operator' && currentUser?.isAdmin !== true;
-  if (isOperator && !['leads', 'inbox', 'settings', 'profile'].includes(view)) return null;
+  if (isOperator && !['leads', 'inbox', 'clients', 'operators', 'settings', 'profile'].includes(view)) return null;
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId) || businesses[0] || {};
   const activeProviderId = aiProviderForBusiness(selectedBusiness);
   const activeProvider = AI_PROVIDERS.find(provider => provider.id === activeProviderId) || AI_PROVIDERS[0];
@@ -2826,7 +2826,7 @@ function Rail({ t, activeView, onView, currentUser, userProfile }) {
     { id: 'knowledge', icon: <I.Book />, label: t.knowledge },
     { id: 'prompts', icon: <I.Sparkle />, label: t.prompts || 'AI Prompts' },
     { id: 'accounts', icon: <I.Layers />, label: t.accounts },
-  ].filter(item => !isOperator || ['leads', 'inbox'].includes(item.id));
+  ].filter(item => !isOperator || ['leads', 'inbox', 'clients', 'operators'].includes(item.id));
   return (
     <aside className="rail">
       {items.map(it => (
@@ -4506,9 +4506,9 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   };
 
   const changeView = (view) => {
-    if (isOperator && !['leads', 'inbox', 'settings', 'profile'].includes(view)) {
-      setActiveView('leads');
-      showToast('Operator access is limited to Leads, Inbox, Settings, and Profile');
+    if (isOperator && !['leads', 'inbox', 'clients', 'operators', 'settings', 'profile'].includes(view)) {
+      setActiveView('inbox');
+      showToast('Operator access is limited to Leads, Inbox, Clients, Operators, Settings, and Profile');
       return;
     }
     if ((view === 'operators' || view === 'settings') && liveModeRef.current) {
