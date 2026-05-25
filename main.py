@@ -12,14 +12,14 @@ import subprocess
 import requests
 from urllib.parse import urlencode, urlparse, parse_qs, unquote
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 try:
     import bcrypt
 except Exception:
     bcrypt = None
 
 from pydantic import BaseModel
-from fastapi import FastAPI, Request, Header, BackgroundTasks
+from fastapi import FastAPI, Request, Header
 from fastapi.responses import PlainTextResponse, JSONResponse, RedirectResponse, Response, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -135,14 +135,6 @@ SUPER_ADMIN_EMAILS = {
     for item in os.getenv("SUPER_ADMIN_EMAILS", "").split(",")
     if str(item).strip()
 }
-
-# Fallback store used only when `dashboard_workspace_state` table is missing.
-# This keeps operator tasks usable until SQL migration is applied.
-WORKSPACE_STATE_FALLBACK: dict[str, dict] = {}
-STATS_CACHE_TTL_SECONDS = int(os.getenv("STATS_CACHE_TTL_SECONDS", "20"))
-STATS_CACHE: dict[str, dict] = {}
-INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS", str(60 * 60 * 6)))
-INSTAGRAM_PUBLIC_PREVIEW_CACHE: dict[str, tuple[float, dict]] = {}
 WHATSAPP_EMBEDDED_REDIRECT_URI = os.getenv(
     "WHATSAPP_EMBEDDED_REDIRECT_URI",
     f"{PUBLIC_BASE_URL.rstrip('/')}/auth/whatsapp/embedded/callback",
@@ -367,130 +359,6 @@ def is_instagram_public_link(value: str) -> bool:
     )
 
 
-def _extract_meta_content(html: str, *keys: str) -> str:
-    if not html:
-        return ""
-    for key in keys:
-        key_re = re.escape(key)
-        patterns = [
-            rf'<meta[^>]+property=["\']{key_re}["\'][^>]*content=["\']([^"\']+)["\']',
-            rf'<meta[^>]+name=["\']{key_re}["\'][^>]*content=["\']([^"\']+)["\']',
-            rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']{key_re}["\']',
-            rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']{key_re}["\']',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, html, flags=re.IGNORECASE)
-            if match:
-                value = normalize_id(match.group(1))
-                if value:
-                    return value
-    return ""
-
-
-def fetch_instagram_public_preview(permalink: str) -> dict:
-    """
-    Best-effort fallback for forwarded Instagram reels/posts that arrive without direct media URL.
-    Scrapes OG meta from public link and caches it.
-    """
-    permalink = normalize_id(unwrap_meta_redirect_url(permalink))
-    if not is_instagram_public_link(permalink):
-        return {}
-
-    now = time.time()
-    cached = INSTAGRAM_PUBLIC_PREVIEW_CACHE.get(permalink)
-    if cached and (now - cached[0]) < INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS:
-        return cached[1] or {}
-
-    user_agents = [
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-        "Twitterbot/1.0",
-    ]
-
-    try:
-        best_video = ""
-        best_image = ""
-        for user_agent in user_agents:
-            headers = {
-                "User-Agent": user_agent,
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-            res = requests.get(permalink, headers=headers, timeout=12, allow_redirects=True)
-            html = res.text if res.ok else ""
-            if not html:
-                continue
-            og_video = _extract_meta_content(
-                html,
-                "og:video:secure_url",
-                "og:video:url",
-                "og:video",
-                "twitter:player:stream",
-            )
-            og_image = _extract_meta_content(
-                html,
-                "og:image:secure_url",
-                "og:image:url",
-                "og:image",
-                "twitter:image",
-            )
-            if og_video and not best_video:
-                best_video = og_video
-            if og_image and not best_image:
-                best_image = og_image
-            if best_video or best_image:
-                break
-
-        media_type = "video" if best_video else ("image" if best_image else "")
-        payload = {
-            "media_url": best_video or "",
-            "post_image_url": best_image or "",
-            "post_media_type": media_type,
-            "post_permalink": permalink,
-        }
-        INSTAGRAM_PUBLIC_PREVIEW_CACHE[permalink] = (now, payload)
-        return payload
-    except Exception:
-        INSTAGRAM_PUBLIC_PREVIEW_CACHE[permalink] = (now, {})
-        return {}
-
-
-def extract_instagram_permalink_from_payload(raw_payload: dict) -> str:
-    raw_payload = raw_payload or {}
-    candidates = []
-
-    def collect_candidate(value):
-        value = normalize_id(value)
-        if not value:
-            return
-        value = unwrap_meta_redirect_url(value)
-        if is_instagram_public_link(value) and value not in candidates:
-            candidates.append(value)
-
-    for key in ("post_permalink", "permalink", "link", "url"):
-        collect_candidate(raw_payload.get(key))
-
-    msg = raw_payload.get("message") if isinstance(raw_payload.get("message"), dict) else {}
-    for key in ("permalink", "link", "url"):
-        collect_candidate(msg.get(key))
-
-    shares = msg.get("shares") if isinstance(msg.get("shares"), list) else []
-    for share in shares:
-        if not isinstance(share, dict):
-            continue
-        for key in ("permalink", "link", "url"):
-            collect_candidate(share.get(key))
-
-    attachments = msg.get("attachments") if isinstance(msg.get("attachments"), list) else []
-    for att in attachments:
-        if not isinstance(att, dict):
-            continue
-        payload = att.get("payload") if isinstance(att.get("payload"), dict) else {}
-        for key in ("permalink", "link", "url", "external_url"):
-            collect_candidate(payload.get(key))
-
-    return candidates[0] if candidates else ""
-
-
 def normalize_email(value) -> str:
     return str(value or "").strip().lower()
 
@@ -704,8 +572,6 @@ def verify_dashboard_password(password: str, password_hash: str) -> bool:
 
 
 AUTH_TOKEN_TTL_SECONDS = int(os.getenv("DASHBOARD_AUTH_TTL_SECONDS", str(60 * 60 * 24 * 30)))
-CONVERSATIONS_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATIONS_CACHE_TTL_SECONDS", "10"))
-_conversations_cache: dict[str, tuple[float, dict]] = {}
 
 
 def create_dashboard_auth_token(email: str, is_admin: bool = False, role: str = "") -> str:
@@ -794,21 +660,18 @@ def resolve_dashboard_access(authorization: str = "", x_dashboard_secret: str = 
     token = parse_auth_header(authorization)
     if token:
         payload = decode_dashboard_auth_token(token)
-        if payload:
-            email = normalize_email(payload.get("email"))
-            is_admin = bool(payload.get("is_admin"))
-            token_role = normalize_id(payload.get("role", "")).lower()
-            if is_admin:
-                role = token_role or ("super_admin" if is_super_admin_email(email) else "admin")
-                business_ids = []
-            else:
-                business_ids = list_user_business_ids(email)
-                role = token_role or get_user_business_role(email)
-            return {"email": email, "is_admin": is_admin, "business_ids": business_ids, "role": role or "operator"}
-        # Fallback path for stale/invalid browser token when dashboard secret is valid.
-        if not require_dashboard_secret(x_dashboard_secret):
-            return {"email": "system", "is_admin": True, "business_ids": [], "role": "admin"}
-        return None
+        if not payload:
+            return None
+        email = normalize_email(payload.get("email"))
+        is_admin = bool(payload.get("is_admin"))
+        token_role = normalize_id(payload.get("role", "")).lower()
+        if is_admin:
+            role = token_role or ("super_admin" if is_super_admin_email(email) else "admin")
+            business_ids = []
+        else:
+            business_ids = list_user_business_ids(email)
+            role = token_role or get_user_business_role(email)
+        return {"email": email, "is_admin": is_admin, "business_ids": business_ids, "role": role or "operator"}
 
     # Backward-compatible admin/system path
     if not require_dashboard_secret(x_dashboard_secret):
@@ -1062,11 +925,15 @@ def already_processed(cache: dict, event_id: str) -> bool:
 
 
 def require_dashboard_secret(x_dashboard_secret: str):
-    return bool(DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET)
+    if not DASHBOARD_SECRET:
+        return True
+    return x_dashboard_secret != DASHBOARD_SECRET
 
 
 def require_dashboard_media_secret(token: str = "", x_dashboard_secret: str = ""):
-    return bool(DASHBOARD_SECRET and token != DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET)
+    if not DASHBOARD_SECRET:
+        return True
+    return token != DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET
 
 
 # ============================================================================
@@ -1223,74 +1090,7 @@ def transform_message_to_react(row: dict) -> dict:
     return message
 
 
-def _looks_like_numeric_id(value: str) -> bool:
-    text = normalize_id(value)
-    return bool(text and re.fullmatch(r"\d{6,}", text))
-
-
-def _extract_username_candidates(raw_payload: dict) -> list[str]:
-    raw = raw_payload or {}
-    candidates = []
-    for key in ("username", "user_name", "from_username", "customer_username"):
-        value = normalize_id(raw.get(key))
-        if value:
-            candidates.append(value)
-
-    for obj_key in ("from", "sender", "user", "contact", "profile"):
-        obj = raw.get(obj_key)
-        if isinstance(obj, dict):
-            for key in ("username", "user_name", "name"):
-                value = normalize_id(obj.get(key))
-                if value:
-                    candidates.append(value)
-    return [item for item in candidates if item]
-
-
-def resolve_customer_label(rows: list, platform: str, fallback_scope: str) -> tuple[str, str]:
-    """
-    Returns (display_name, handle_value_without_at).
-    Prefers real usernames/names found in payloads and historical customer_name,
-    falls back to scoped ids only when nothing human-readable is available.
-    """
-    best_name = ""
-    best_username = ""
-
-    for row in reversed(rows or []):
-        customer_name = normalize_id(row.get("customer_name"))
-        if customer_name and not _looks_like_numeric_id(customer_name):
-            if not best_name:
-                best_name = customer_name
-            if platform == "instagram" and re.fullmatch(r"[A-Za-z0-9._]{2,64}", customer_name):
-                best_username = best_username or customer_name
-
-        raw = row.get("raw_payload") if isinstance(row, dict) else {}
-        for candidate in _extract_username_candidates(raw if isinstance(raw, dict) else {}):
-            if platform == "instagram":
-                if re.fullmatch(r"[A-Za-z0-9._]{2,64}", candidate):
-                    best_username = best_username or candidate
-                    if not best_name:
-                        best_name = candidate
-            elif not best_name:
-                best_name = candidate
-
-        if best_name and (best_username or platform != "instagram"):
-            break
-
-    if not best_name:
-        if platform == "instagram":
-            best_name = f"Instagram user {fallback_scope[-4:]}"
-        elif platform == "telegram":
-            best_name = f"Telegram user {fallback_scope[-4:]}"
-        elif platform == "whatsapp":
-            best_name = f"WhatsApp user {fallback_scope[-4:]}"
-        else:
-            best_name = f"Customer {fallback_scope[-4:]}"
-
-    handle_value = best_username or fallback_scope
-    return best_name, handle_value
-
-
-def transform_conversation_to_react(key: str, rows: list, business: dict = None, ai_lookup_enabled: bool = True) -> dict:
+def transform_conversation_to_react(key: str, rows: list, business: dict = None) -> dict:
     """Transform database rows to React conversation format"""
     if not rows:
         return None
@@ -1312,15 +1112,17 @@ def transform_conversation_to_react(key: str, rows: list, business: dict = None,
     else:
         effective_scope = comment_customer_id
 
-    customer_name, handle_value = resolve_customer_label(rows, platform, effective_scope)
+    customer_name = latest_row.get('customer_name') or (
+        f"Post {effective_scope[-6:]}" if platform == "instagram" and "comment" in normalize_id(channel).lower()
+        else f'Customer {effective_scope[-4:]}'
+    )
     ai_scope = encode_comment_scope("", comment_post_id) if (platform == "instagram" and "comment" in normalize_id(channel).lower() and comment_post_id) else effective_scope
-    # Fast conversation list path should avoid per-conversation DB lookups.
-    ai_enabled = is_chat_ai_enabled(platform, channel, ai_scope, business_id) if ai_lookup_enabled else True
+    ai_enabled = is_chat_ai_enabled(platform, channel, ai_scope, business_id)
 
     return {
         'id': key,
         'name': customer_name,
-        'handle': f'@{handle_value}',
+        'handle': f'@{effective_scope}',
         'platform': platform,
         'isCommentThread': platform == "instagram" and "comment" in normalize_id(channel).lower(),
         'postId': comment_post_id or extract_instagram_comment_post_id(latest_row),
@@ -1533,7 +1335,6 @@ ALLOWED_BUSINESS_SETTINGS = {
     "openai_api_key",
     "gemini_api_key",
     "anthropic_api_key",
-    "ai_provider",
 }
 
 
@@ -1555,19 +1356,10 @@ def clean_business_settings(settings: dict) -> dict:
                 continue
         elif key in {"bot_enabled", "auto_reply_dms", "auto_reply_comments"}:
             cleaned[key] = bool(value)
-        elif key == "ai_provider":
-            provider = str(value or "").strip().lower()
-            if provider in {"mistral", "openai", "gemini", "anthropic"}:
-                cleaned[key] = provider
         elif key.endswith("_api_key"):
             cleaned[key] = str(value or "").strip()
         else:
             cleaned[key] = str(value or "").strip()
-
-    if "ai_model" in cleaned and "ai_provider" not in cleaned:
-        inferred_provider = infer_ai_provider_strict(cleaned.get("ai_model"))
-        if inferred_provider:
-            cleaned["ai_provider"] = inferred_provider
 
     return cleaned
 
@@ -1692,7 +1484,6 @@ def mark_conversation_read_in_db(conversation_id: str):
         .eq("business_id", business_id)
         .eq("customer_id", str(customer_id))
         .eq("direction", "inbound")
-        .eq("is_read", False)
     )
 
     if channel:
@@ -1753,7 +1544,6 @@ def save_inbox_message(
             "post_permalink": post_permalink,
             "post_image_url": post_image_url,
             "post_media_type": post_media_type,
-            "created_at": datetime.utcnow().isoformat(),
         }
 
         try:
@@ -1805,15 +1595,10 @@ def get_workspace_state(business_id: str):
             key = normalize_id(row.get("state_key"))
             if key:
                 payload[key] = row.get("state_value")
-        # Merge runtime fallback (used only if DB table is unavailable).
-        fallback = WORKSPACE_STATE_FALLBACK.get(business_id) or {}
-        if isinstance(fallback, dict):
-            payload = {**payload, **fallback}
         return payload
     except Exception as e:
         log("Could not load workspace state", str(e))
-        fallback = WORKSPACE_STATE_FALLBACK.get(business_id) or {}
-        return fallback if isinstance(fallback, dict) else {}
+        return {}
 
 
 def upsert_workspace_state(business_id: str, state_key: str, state_value, updated_by: str = ""):
@@ -1827,17 +1612,10 @@ def upsert_workspace_state(business_id: str, state_key: str, state_value, update
         "state_value": state_value if isinstance(state_value, (dict, list, str, int, float, bool)) or state_value is None else {},
         "updated_by": normalize_email(updated_by),
     }
-    try:
-        supabase.table("dashboard_workspace_state").upsert(
-            data,
-            on_conflict="business_id,state_key",
-        ).execute()
-    except Exception as e:
-        # Temporary safety-net if DB migration wasn't applied yet.
-        log("Could not save workspace state", str(e))
-        if business_id not in WORKSPACE_STATE_FALLBACK:
-            WORKSPACE_STATE_FALLBACK[business_id] = {}
-        WORKSPACE_STATE_FALLBACK[business_id][state_key] = data.get("state_value")
+    supabase.table("dashboard_workspace_state").upsert(
+        data,
+        on_conflict="business_id,state_key",
+    ).execute()
 
 
 def list_business_operator_ids(business_id: str) -> list[str]:
@@ -1969,7 +1747,7 @@ DEFAULT_AI_PROMPT_SETTINGS = {
 You are a real human sales assistant for this business.
 Sound like a real Uzbek seller on Instagram, Telegram, or WhatsApp, not customer support software.
 Represent the company clearly, answer in the customer's language, and guide the customer toward the next useful buying step.
-Keep replies short, warm, practical, and human. Ask 2-3 short clarifying questions when intent is unclear.
+Keep replies short, warm, practical, and human. Ask one question at a time.
 Do not sound corporate, do not over-explain, and do not repeat the product name in every message.
 """.strip(),
     "instagram_prompt": """
@@ -1990,7 +1768,7 @@ Telegram rules:
 WhatsApp rules:
 - Be concise and direct.
 - Reply naturally in 1-3 short sentences.
-- Ask 2-3 short clarifying questions when customer intent is unclear.
+- Ask one follow-up question when it helps move the sale forward.
 """.strip(),
     "opening_message": """
 Assalomu alaykum 😊 Qanday yordam kerak?
@@ -1998,12 +1776,12 @@ Assalomu alaykum 😊 Qanday yordam kerak?
     "lead_collection_rules": """
 Do not ask for name, phone, address, or full details at the beginning.
 First answer naturally and understand what the customer wants.
-Ask 2-3 short follow-up questions when details are missing.
+Ask only one small follow-up question at a time.
 Ask for phone/address only after the customer is clearly ready to order.
 """.strip(),
     "sales_rules": """
 - Answer the exact question first.
-- Ask 2-3 short clarifying questions when needed.
+- Ask only one follow-up question at a time.
 - Keep replies short and comfortable: usually 1-3 short sentences.
 - For price questions ("narx", "nechpul", "qancha", "цена", "сколько"), answer price directly first if known.
 - Do not ask for phone number or address at the beginning.
@@ -2018,7 +1796,7 @@ Ask for phone/address only after the customer is clearly ready to order.
 - Focus on helping the customer choose and buy.
 """.strip(),
     "handoff_rules": """
-If an important buying detail is missing, ask 2-3 short clarifying questions instead of saying a manager will clarify.
+If an important buying detail is missing, ask one simple follow-up question instead of saying a manager will clarify.
 Only mention a manager when the customer asks for a human, is ready to order, or the exact detail really requires confirmation.
 Do not invent information.
 Escalate when the customer is frustrated, ready to buy, or asks for a human.
@@ -2114,7 +1892,7 @@ def fallback_prompt_suggestion(field: str, current_prompt: str = "", goal: str =
     suggested_prompt = "\n".join([
         f"{label.title()}:",
         "- Reply shortly, warmly, and naturally in the customer's language.",
-        "- First answer the customer's question, then ask 2-3 short clarifying questions when needed.",
+        "- First answer the customer's question, then ask only one simple follow-up question.",
         "- Do not ask for phone number or address at the beginning.",
         "- Ask for phone/address only when the customer is clearly ready to order.",
         f"- Do not repeat {product_hint!r} or any product name in every message.",
@@ -2336,7 +2114,7 @@ Safety rules:
 - Answer the exact question first.
 - Never invent prices, stock, delivery, discounts, addresses, or availability.
 - Use only the business facts above.
-- If information is missing, ask 2-3 short clarifying questions.
+- If information is missing, ask one short clarifying question first.
 - Only mention a manager when the customer asks for a human or is ready to order.
 - Never mention AI, database, API, prompt, automation, or internal system.
 - Do not use markdown, bold formatting, or long paragraphs.
@@ -2600,29 +2378,11 @@ def infer_ai_provider(model: str) -> str:
         return "gemini"
     if model.startswith("claude"):
         return "anthropic"
-    if model.startswith("mistral"):
-        return "mistral"
-    return "openai"
-
-
-def infer_ai_provider_strict(model: str) -> str:
-    model = str(model or "").lower()
-    if model.startswith(("gpt-", "o1", "o3", "o4")):
-        return "openai"
-    if model.startswith("gemini"):
-        return "gemini"
-    if model.startswith("claude"):
-        return "anthropic"
-    if model.startswith("mistral"):
-        return "mistral"
-    return ""
+    return "mistral"
 
 
 def get_ai_provider(business: dict) -> str:
     provider = str(business.get("ai_provider") or "").strip().lower()
-    inferred = infer_ai_provider_strict(business.get("ai_model"))
-    if inferred and inferred != provider:
-        return inferred
     if provider in AI_DEFAULT_MODELS:
         return provider
     return infer_ai_provider(business.get("ai_model"))
@@ -2851,30 +2611,26 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     text = complete_sentence_reply(text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
+    # Keep at most one question per reply to avoid interrogation loops.
+    question_count = text.count("?")
+    if question_count > 1:
+        first_q = text.find("?")
+        tail = text[first_q + 1:]
+        tail = tail.replace("?", ".")
+        text = text[:first_q + 1] + tail
+
     # If customer asked price but reply has no numeric price hint, force concise pricing follow-up.
     price_ask = any(k in user for k in ["narx", "nechpul", "qancha", "цена", "сколько", "price"])
     has_number = bool(re.search(r"\d", text))
     if price_ask and not has_number:
         if lang == "en":
-            text = (
-                "You can check the price in our catalog. "
-                "Which model do you need? What quantity do you want? Which color do you prefer?"
-            )
+            text = "You can view our catalog through the link. Which products are you interested in?"
         elif lang == "kk":
-            text = (
-                "Бағаны каталогтан көре аласыз. "
-                "Қай модель керек? Қанша дана аласыз? Қай түс ұнайды?"
-            )
+            text = "Біздің каталогты төмендегі сілтеме арқылы көре аласыз. Қай тауарлар сізді қызықтырады?"
         elif lang == "ru":
-            text = (
-                "Цену можно посмотреть в каталоге. "
-                "Какая модель нужна? Сколько штук нужно? Какой цвет предпочитаете?"
-            )
+            text = "Вы можете посмотреть наш каталог по ссылке. Какие товары вас интересуют?"
         else:
-            text = (
-                "Narxini Katalogdan ko'rib olishingiz mumkin. "
-                "Qaysi model kerak? Necha dona olmoqchisiz? Qaysi rang yoqdi?"
-            )
+            text = "Katalogimizga quyidagi havoladan kirishingiz mumkin. Qaysi mahsulotlar sizni qiziqtirmoqda?"
 
     # Strong language guard: if customer wrote in English but reply is not English, return safe English fallback.
     if lang == "en":
@@ -2883,10 +2639,7 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
         low = text.lower()
         if has_cyr or any(m in low for m in uz_markers):
             if price_ask:
-                text = (
-                    "You can check the price in our catalog. "
-                    "Which model do you need? What quantity do you want? Which color do you prefer?"
-                )
+                text = "You can view our catalog through the link. Which products are you interested in?"
             else:
                 text = "Hello! Of course. Which products are you interested in?"
 
@@ -3335,23 +3088,6 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             maybe_link = unwrap_meta_redirect_url(media_url)
             if is_instagram_public_link(maybe_link):
                 post_permalink = maybe_link
-
-        # Some forwarded reels arrive with only public permalink and no direct media URL.
-        # Fetch OG preview as a stable fallback so dashboard can still render preview consistently.
-        if post_permalink and (not media_url or "ig_messaging_cdn" in normalize_id(media_url)):
-            try:
-                public_preview = fetch_instagram_public_preview(post_permalink) or {}
-                if public_preview.get("post_image_url") and not post_image_url:
-                    post_image_url = normalize_id(public_preview.get("post_image_url"))
-                if public_preview.get("post_media_type") and not post_media_type:
-                    post_media_type = normalize_id(public_preview.get("post_media_type")).lower()
-                candidate_media_url = normalize_id(public_preview.get("media_url"))
-                if candidate_media_url:
-                    media_url = candidate_media_url
-                    if media_type in (None, "", "file"):
-                        media_type = "video"
-            except Exception as e:
-                log("Could not fetch public Instagram preview", str(e))
 
         save_inbox_message(
             business=business,
@@ -4395,6 +4131,7 @@ async def dashboard_login(payload: DashboardLoginRequest):
             return JSONResponse({"status": "error", "error": "Invalid email or password."}, status_code=401)
 
         businesses = []
+        links = []
         if is_super_admin_email(email):
             businesses = (supabase.table("businesses").select("*").order("created_at", desc=True).execute().data or [])
         else:
@@ -4419,7 +4156,18 @@ async def dashboard_login(payload: DashboardLoginRequest):
                 )
 
         is_admin = is_super_admin_email(email)
-        role = ("super_admin" if is_admin else get_user_business_role(email)) or ("admin" if is_admin else "operator")
+        role_from_user = normalize_id(user.get("role") or "").lower()
+        role_from_business = ""
+        if links:
+            for item in links:
+                candidate = normalize_id(item.get("role") or "").lower()
+                if candidate in {"owner", "admin", "operator"}:
+                    role_from_business = candidate
+                    break
+        if is_admin:
+            role = "super_admin"
+        else:
+            role = role_from_business or role_from_user or get_user_business_role(email) or "operator"
         token = create_dashboard_auth_token(email=email, is_admin=is_admin, role=role)
         return {
             "status": "ok",
@@ -4451,10 +4199,24 @@ async def dashboard_signup(payload: DashboardSignupRequest):
         return JSONResponse({"status": "error", "error": "Password must be at least 6 characters."}, status_code=400)
     if role not in {"owner", "admin", "operator"}:
         return JSONResponse({"status": "error", "error": "Role must be owner, admin or operator."}, status_code=400)
-    if role == "operator" and not business_id:
+    if role != "operator":
+        return JSONResponse({"status": "error", "error": "Owner/admin accounts must be created by an existing admin."}, status_code=403)
+    if not business_id:
         return JSONResponse({"status": "error", "error": "Operator sign-up requires business_id."}, status_code=400)
 
     try:
+        business_rows = (
+            supabase.table("businesses")
+            .select("id")
+            .eq("id", business_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if not business_rows:
+            return JSONResponse({"status": "error", "error": "Business not found."}, status_code=404)
+
         existing = (
             supabase.table("dashboard_users")
             .select("id,email")
@@ -4803,8 +4565,6 @@ async def get_conversations_v2(
         platform: str = "all",
         search: str = "",
         business_id: str = "",
-        include_raw: bool = False,
-        fast: bool = False,
         authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
@@ -4814,34 +4574,8 @@ async def get_conversations_v2(
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
 
     try:
+        query = supabase.table("inbox_messages").select("*").order("created_at", desc=True).limit(900)
         clean_business_id = normalize_id(business_id)
-        allowed_ids = access.get("business_ids") or []
-        cache_key = json.dumps(
-            {
-                "admin": bool(access.get("is_admin")),
-                "email": normalize_email(access.get("email", "")),
-                "allowed": sorted([normalize_id(x) for x in allowed_ids]),
-                "platform": normalize_id(platform).lower(),
-                "business_id": clean_business_id,
-                "search": normalize_id(search).strip().lower(),
-                "include_raw": bool(include_raw),
-                "fast": bool(fast),
-            },
-            sort_keys=True,
-        )
-        now_ts = time.time()
-        cached = _conversations_cache.get(cache_key)
-        if cached and (now_ts - cached[0]) <= CONVERSATIONS_CACHE_TTL_SECONDS:
-            return cached[1]
-
-        # Keep payload slim on hot path; this endpoint is polled frequently.
-        fields = (
-            "business_id,platform,channel,customer_id,chat_id,customer_name,"
-            "content,created_at,direction,is_read,external_message_id"
-        )
-        if include_raw:
-            fields = f"{fields},raw_payload"
-        query = supabase.table("inbox_messages").select(fields)
         if clean_business_id:
             if not can_access_business(access, clean_business_id):
                 return {"status": "ok", "count": 0, "data": []}
@@ -4855,15 +4589,8 @@ async def get_conversations_v2(
         if platform != "all":
             query = query.eq("platform", platform)
 
-        if fast:
-            recent_cutoff = (datetime.utcnow() - timedelta(days=120)).strftime("%Y-%m-%dT00:00:00Z")
-            query = query.gte("created_at", recent_cutoff).limit(80)
-        else:
-            query = query.limit(450)
-
-        query = query.order("created_at", desc=True)
-
-        rows = query.execute().data or []
+        result = query.execute()
+        rows = result.data or []
 
         conversations_map = {}
         for row in rows:
@@ -4873,7 +4600,7 @@ async def get_conversations_v2(
             customer_id = str(row.get("customer_id") or "").strip()
             chat_id = str(row.get("chat_id") or "").strip()
             scope = conversation_scope(platform_name, channel, customer_id, chat_id)
-            if include_raw and platform_name == "instagram" and "comment" in channel:
+            if platform_name == "instagram" and "comment" in channel:
                 post_id = extract_instagram_comment_post_id(row)
                 scope = encode_comment_scope(customer_id, post_id)
 
@@ -4897,11 +4624,7 @@ async def get_conversations_v2(
 
         conversations = []
         for key, conv_rows in conversations_map.items():
-            conv = transform_conversation_to_react(
-                key,
-                sorted(conv_rows, key=lambda x: x.get('created_at', '')),
-                ai_lookup_enabled=(not fast),
-            )
+            conv = transform_conversation_to_react(key, sorted(conv_rows, key=lambda x: x.get('created_at', '')))
             if conv:
                 conversations.append(conv)
 
@@ -4912,16 +4635,11 @@ async def get_conversations_v2(
                 if q in f"{c['name']} {c['handle']} {c['preview']}".lower()
             ]
 
-        response = {
+        return {
             'status': 'ok',
             'count': len(conversations),
             'data': conversations
         }
-        _conversations_cache[cache_key] = (time.time(), response)
-        if len(_conversations_cache) > 120:
-            for key in sorted(_conversations_cache, key=lambda item: _conversations_cache[item][0])[:40]:
-                _conversations_cache.pop(key, None)
-        return response
 
     except Exception as e:
         log("Error fetching conversations", str(e))
@@ -4934,10 +4652,7 @@ async def get_conversations_v2(
 @app.get("/api/v2/conversation/{conversation_id}/messages")
 async def get_conversation_messages_v2(
         conversation_id: str,
-        background_tasks: BackgroundTasks,
-        limit: int = 50,
-        mark_read: bool = True,
-        include_raw: bool = False,
+        limit: int = 250,
         authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
@@ -4964,16 +4679,9 @@ async def get_conversation_messages_v2(
         if platform == "instagram" and "comment" in channel:
             customer_id, post_id = decode_comment_scope(customer_scope)
 
-        limit = max(1, min(int(limit or 50), 50))
-        base_fields = (
-            "id,direction,role,created_at,media_type,content,platform,channel,customer_id,"
-            "external_message_id,media_url,post_permalink,post_image_url,post_media_type,raw_payload"
-        )
-        select_fields = base_fields
-
         query = (
             supabase.table("inbox_messages")
-            .select(select_fields)
+            .select("*")
             .eq("platform", platform)
             .eq("business_id", business_id)
         )
@@ -4989,127 +4697,38 @@ async def get_conversation_messages_v2(
                 query = query.eq("customer_id", str(customer_id))
         else:
             query = query.eq("customer_id", str(customer_id))
-            if platform == "instagram" and channel in ("dm", "instagram_dm", "instagram_private"):
-                query = query.in_("channel", ["dm", "instagram_dm", "instagram_private", ""])
-            elif channel:
+            if channel:
                 query = query.eq("channel", channel)
 
-        result = query.order("created_at", desc=True).limit(limit).execute()
-        rows = list(reversed(result.data or []))
-
-        # Some legacy Instagram rows were saved with inconsistent channel values.
-        # If strict channel filtering returns no history, fall back to customer-wide DM lookup.
-        if not rows and platform == "instagram" and channel in ("dm", "instagram_dm", "instagram_private"):
-            fallback_query = (
-                supabase.table("inbox_messages")
-                .select(select_fields)
-                .eq("platform", platform)
-                .eq("business_id", business_id)
-                .eq("customer_id", str(customer_id))
-                .order("created_at", desc=True)
-                .limit(limit)
-            )
-            rows = list(reversed(fallback_query.execute().data or []))
-
-        # Backfill old forwarded Instagram messages that were saved without preview URLs.
-        # This keeps forwarded reels stable in UI (no random "NO PREVIEW" regressions).
-        if platform == "instagram" and rows:
-            update_rows = []
-            for row in rows:
-                media_type = normalize_id(row.get("media_type")).lower()
-                if media_type not in ("video", "file", "photo", "image"):
-                    continue
-                if normalize_id(row.get("media_url")):
-                    continue
-
-                post_permalink = normalize_id(
-                    row.get("post_permalink")
-                    or (row.get("raw_payload") or {}).get("post_permalink")
-                    or extract_instagram_permalink_from_payload(row.get("raw_payload") or {})
-                )
-                if not post_permalink:
-                    continue
-
-                preview = fetch_instagram_public_preview(post_permalink) or {}
-                preview_media_url = normalize_id(preview.get("media_url"))
-                preview_image_url = normalize_id(preview.get("post_image_url"))
-                preview_media_type = normalize_id(preview.get("post_media_type")).lower()
-
-                changed = False
-                if preview_media_url:
-                    row["media_url"] = preview_media_url
-                    changed = True
-                if preview_image_url and not normalize_id(row.get("post_image_url")):
-                    row["post_image_url"] = preview_image_url
-                    changed = True
-                if post_permalink and not normalize_id(row.get("post_permalink")):
-                    row["post_permalink"] = post_permalink
-                    changed = True
-                if preview_media_type and media_type in ("", "file"):
-                    row["media_type"] = "video" if "video" in preview_media_type else ("photo" if "image" in preview_media_type else media_type)
-                    changed = True
-
-                if changed and normalize_id(row.get("id")):
-                    update_rows.append({
-                        "id": normalize_id(row.get("id")),
-                        "media_url": normalize_id(row.get("media_url")),
-                        "post_image_url": normalize_id(row.get("post_image_url")),
-                        "post_permalink": normalize_id(row.get("post_permalink")),
-                        "post_media_type": normalize_id(preview_media_type or row.get("post_media_type")).lower(),
-                    })
-
-            if update_rows:
-                def persist_preview_backfill(rows_to_update: list[dict]):
-                    for item in rows_to_update:
-                        try:
-                            supabase.table("inbox_messages").update({
-                                "media_url": item.get("media_url") or None,
-                                "post_image_url": item.get("post_image_url") or None,
-                                "post_permalink": item.get("post_permalink") or None,
-                                "post_media_type": item.get("post_media_type") or None,
-                            }).eq("id", item.get("id")).execute()
-                        except Exception:
-                            pass
-
-                if background_tasks is not None:
-                    background_tasks.add_task(persist_preview_backfill, update_rows)
-                else:
-                    persist_preview_backfill(update_rows)
+        result = query.order("created_at", desc=False).limit(limit).execute()
+        rows = result.data or []
 
         messages = [transform_message_to_react(row) for row in rows]
 
-        if mark_read:
-            def mark_read_task():
-                try:
-                    mark_query = (
-                        supabase.table("inbox_messages")
-                        .update({"is_read": True})
-                        .eq("platform", platform)
-                        .eq("business_id", business_id)
-                        .eq("direction", "inbound")
-                        .eq("is_read", False)
-                    )
-                    if platform == "telegram" and channel in ("telegram_bot_group", "telegram_bot_private"):
-                        mark_query = mark_query.or_(f"chat_id.eq.{customer_id},customer_id.eq.{customer_id}")
-                    elif platform == "instagram" and "comment" in channel:
-                        if channel:
-                            mark_query = mark_query.eq("channel", channel)
-                        if post_id:
-                            mark_query = mark_query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
-                        elif customer_id:
-                            mark_query = mark_query.eq("customer_id", str(customer_id))
-                    else:
-                        mark_query = mark_query.eq("customer_id", str(customer_id))
-                        if channel:
-                            mark_query = mark_query.eq("channel", channel)
-                    mark_query.execute()
-                except Exception:
-                    pass
-
-            if background_tasks is not None:
-                background_tasks.add_task(mark_read_task)
+        try:
+            mark_query = (
+                supabase.table("inbox_messages")
+                .update({"is_read": True})
+                .eq("platform", platform)
+                .eq("business_id", business_id)
+                .eq("direction", "inbound")
+            )
+            if platform == "telegram" and channel in ("telegram_bot_group", "telegram_bot_private"):
+                mark_query = mark_query.or_(f"chat_id.eq.{customer_id},customer_id.eq.{customer_id}")
+            elif platform == "instagram" and "comment" in channel:
+                if channel:
+                    mark_query = mark_query.eq("channel", channel)
+                if post_id:
+                    mark_query = mark_query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
+                elif customer_id:
+                    mark_query = mark_query.eq("customer_id", str(customer_id))
             else:
-                mark_read_task()
+                mark_query = mark_query.eq("customer_id", str(customer_id))
+                if channel:
+                    mark_query = mark_query.eq("channel", channel)
+            mark_query.execute()
+        except Exception:
+            pass
 
         return {
             'status': 'ok',
@@ -5485,44 +5104,34 @@ async def get_stats_v2(
 
     try:
         if access.get("is_admin"):
+            businesses = get_all_businesses()
             scoped_ids = []
-            cache_key = "admin"
         else:
             scoped_ids = access.get("business_ids") or []
-            cache_key = f"user:{','.join(sorted(scoped_ids))}"
-
-        now = time.time()
-        cached = STATS_CACHE.get(cache_key)
-        if cached and (now - float(cached.get("ts", 0))) < STATS_CACHE_TTL_SECONDS:
-            return {'status': 'ok', 'data': cached.get("data", {})}
-
-        if access.get("is_admin"):
-            businesses = get_all_businesses()
-        else:
             businesses = []
             if scoped_ids:
                 businesses = (
                     supabase.table("businesses")
-                    .select("id,bot_enabled")
+                    .select("*")
                     .in_("id", scoped_ids)
                     .order("created_at", desc=True)
                     .execute()
                     .data
                     or []
                 )
-
-        payload = {
-            'total_messages': get_message_count(business_ids=scoped_ids) if not access.get("is_admin") else get_message_count(),
-            'total_accounts': len(businesses),
-            'active_accounts': sum(1 for b in businesses if b.get("bot_enabled")),
-            'instagram_messages': get_message_count('instagram', scoped_ids) if not access.get("is_admin") else get_message_count('instagram'),
-            'telegram_messages': get_message_count('telegram', scoped_ids) if not access.get("is_admin") else get_message_count('telegram'),
-            'whatsapp_messages': get_message_count('whatsapp', scoped_ids) if not access.get("is_admin") else get_message_count('whatsapp'),
-            'active_conversations': 0,
-            'needing_human': 0,
+        return {
+            'status': 'ok',
+            'data': {
+                'total_messages': get_message_count(business_ids=scoped_ids) if not access.get("is_admin") else get_message_count(),
+                'total_accounts': len(businesses),
+                'active_accounts': sum(1 for b in businesses if b.get("bot_enabled")),
+                'instagram_messages': get_message_count('instagram', scoped_ids) if not access.get("is_admin") else get_message_count('instagram'),
+                'telegram_messages': get_message_count('telegram', scoped_ids) if not access.get("is_admin") else get_message_count('telegram'),
+                'whatsapp_messages': get_message_count('whatsapp', scoped_ids) if not access.get("is_admin") else get_message_count('whatsapp'),
+                'active_conversations': 0,
+                'needing_human': 0,
+            }
         }
-        STATS_CACHE[cache_key] = {"ts": now, "data": payload}
-        return {'status': 'ok', 'data': payload}
 
     except Exception as e:
         log("Error getting stats", str(e))
@@ -5573,7 +5182,7 @@ async def update_workspace_state_v2(
         allowed_keys = {
             "lead_stages",
             "lead_prices",
-            "manual_clients",
+            "client_owners",
             "operator_deals",
             "operator_admin_notes",
             "operator_tasks",
@@ -5658,7 +5267,14 @@ async def api_update_combined_settings(
         ]
 
     workspace_state = payload.get("workspace_state") or {}
-    allowed_workspace_keys = {"lead_stages", "lead_prices", "manual_clients", "operator_deals", "operator_admin_notes", "operator_tasks"}
+    allowed_workspace_keys = {
+        "lead_stages",
+        "lead_prices",
+        "client_owners",
+        "operator_deals",
+        "operator_admin_notes",
+        "operator_tasks",
+    }
     if isinstance(workspace_state, dict) and workspace_state:
         updated_workspace = []
         for key, value in workspace_state.items():
@@ -6243,16 +5859,10 @@ async def dashboard_send_telegram_user_message(
 @app.post("/dashboard/send-image-file")
 async def dashboard_send_image_file(
         payload: DashboardImageFile,
-        authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
+    if require_dashboard_secret(x_dashboard_secret):
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    clean_business_id = normalize_id(payload.business_id)
-    if clean_business_id and not can_access_business(access, clean_business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
     if not str(payload.mime_type or "").startswith("image/"):
         return JSONResponse({"status": "error", "message": "Only image files are supported right now"}, status_code=400)
@@ -6262,11 +5872,9 @@ async def dashboard_send_image_file(
     except ValueError as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
 
-    business = get_business_by_id(clean_business_id) if clean_business_id else get_active_business()
+    business = get_business_by_id(payload.business_id) if payload.business_id else get_active_business()
     if not business:
         return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-    if not can_access_business(access, normalize_id(business.get("id"))):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
     customer_id = normalize_id(payload.customer_id)
     chat_id = normalize_id(payload.chat_id or payload.customer_id)
@@ -6378,16 +5986,10 @@ async def dashboard_send_image_file(
 @app.post("/dashboard/send-voice-file")
 async def dashboard_send_voice_file(
         payload: DashboardVoiceFile,
-        authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
+    if require_dashboard_secret(x_dashboard_secret):
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    clean_business_id = normalize_id(payload.business_id)
-    if clean_business_id and not can_access_business(access, clean_business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
     if not str(payload.mime_type or "").startswith("audio/"):
         return JSONResponse({"status": "error", "message": "Only audio files are supported for voice notes"}, status_code=400)
@@ -6397,11 +5999,9 @@ async def dashboard_send_voice_file(
     except ValueError as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
 
-    business = get_business_by_id(clean_business_id) if clean_business_id else get_active_business()
+    business = get_business_by_id(payload.business_id) if payload.business_id else get_active_business()
     if not business:
         return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-    if not can_access_business(access, normalize_id(business.get("id"))):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
     customer_id = normalize_id(payload.customer_id)
     chat_id = normalize_id(payload.chat_id or payload.customer_id)
