@@ -860,18 +860,8 @@ function SignInPage({ lang, onSignedIn, onBack }) {
         role: payload.user?.role || '',
       });
     } catch (err) {
-      try {
-        window.sessionStorage.setItem('instaagent_dashboard_secret', cleanSecret);
-        window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, ownerEmail);
-        const data = await API.get('/api/businesses');
-        const rows = data.data || [];
-        if (!rows.length) throw err;
-        saveAuthSession(ownerEmail, { isAdmin: true, role: 'admin' });
-        onSignedIn({ ownerEmail, isAdmin: true, role: 'admin' });
-      } catch (fallbackErr) {
-        setError(fallbackErr.message || err.message || 'Sign in failed.');
-        clearAuthSession();
-      }
+      setError(err.message || 'Sign in failed.');
+      clearAuthSession();
     } finally {
       setLoading(false);
     }
@@ -2896,12 +2886,11 @@ function Row({ c, selected, onClick, t }) {
 }
 
 // ---------- List column ----------
-function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError, liveMode, onRefresh, onSaveSecret }) {
+function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError, liveMode, onRefresh }) {
   const [filter, setFilter] = useState('all');
   const [platforms, setPlatforms] = useState({ instagram: true, telegram: true, whatsapp: true });
   const [instagramChannels, setInstagramChannels] = useState({ dm: true, comments: true });
   const [search, setSearch] = useState('');
-  const [secretDraft, setSecretDraft] = useState(dashboardSecret());
   const showLoadingState = loading && conversations.length === 0;
 
   const counts = useMemo(() => ({
@@ -2941,17 +2930,6 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
           <button onClick={onRefresh} title={t.refresh}>{loading ? t.syncing : t.refresh}</button>
         </div>
         {apiError && <div className="api-error">{apiError}</div>}
-        {apiError.toLowerCase().includes('unauthorized') && (
-          <div className="secret-box">
-            <input
-              type="password"
-              placeholder={t.dashboardSecret}
-              value={secretDraft}
-              onChange={(e) => setSecretDraft(e.target.value)}
-            />
-            <button onClick={() => onSaveSecret(secretDraft)}>{t.connect}</button>
-          </div>
-        )}
         <div className="search">
           <I.Search />
           <input
@@ -3762,7 +3740,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "theme": "light"
 }/*EDITMODE-END*/;
 
-function App({ lang, setLang, onSignOut, currentUser }) {
+function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const t = window.STRINGS[lang];
   const isOperator = currentUser?.role === 'operator' && currentUser?.isAdmin !== true;
   const [booting, setBooting] = useState(true);
@@ -4118,16 +4096,11 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     }
   };
 
-  const saveSecretAndRefresh = (secret) => {
-    const clean = String(secret || '').trim();
-    if (clean) {
-      window.sessionStorage.setItem('instaagent_dashboard_secret', clean);
-    } else {
-      window.localStorage.removeItem('instaagent_dashboard_secret');
-      window.sessionStorage.removeItem('instaagent_dashboard_secret');
-    }
-    loadConversations();
-  };
+  useEffect(() => {
+    if (!apiError) return;
+    if (!/unauthorized/i.test(String(apiError))) return;
+    onAuthExpired?.();
+  }, [apiError, onAuthExpired]);
 
   const saveOwnerEmailScope = async (value) => {
     const clean = normalizeOwnerEmail(value);
@@ -4661,7 +4634,6 @@ function App({ lang, setLang, onSignOut, currentUser }) {
           apiError={apiError}
           liveMode={liveMode}
           onRefresh={refreshWorkspace}
-          onSaveSecret={saveSecretAndRefresh}
         />
         {activeView === 'inbox' ? (
           <ThreadColumn
@@ -4749,8 +4721,7 @@ function Root() {
   const [currentUser, setCurrentUser] = useState(() => readAuthSession() || null);
   const [signedIn, setSignedIn] = useState(() => {
     const auth = readAuthSession();
-    if (auth?.token) return true;
-    return !!dashboardSecret();
+    return !!auth?.token;
   });
 
   useEffect(() => {
@@ -4780,9 +4751,17 @@ function Root() {
     backToLanding();
   };
 
+  const authExpired = () => {
+    clearAuthSession();
+    setCurrentUser(null);
+    setSignedIn(false);
+    window.location.hash = DASHBOARD_HASH;
+    setShowDashboard(true);
+  };
+
   if (!showDashboard) return <LandingPage onOpenDashboard={openDashboard} lang={lang} setLang={setLang} />;
   if (!signedIn) return <SignInPage lang={lang} onSignedIn={(session) => { setCurrentUser(session || readAuthSession()); setSignedIn(true); }} onBack={backToLanding} />;
-  return <App lang={lang} setLang={setLang} onSignOut={signOut} currentUser={currentUser || readAuthSession()} />;
+  return <App lang={lang} setLang={setLang} onSignOut={signOut} onAuthExpired={authExpired} currentUser={currentUser || readAuthSession()} />;
 }
 
 createRoot(document.getElementById('root')).render(<Root />);
