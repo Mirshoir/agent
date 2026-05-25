@@ -118,7 +118,7 @@ function clearAuthSession() {
 }
 
 function resolveRoleScope(currentUser = {}, businesses = []) {
-  const rawRole = normalizeId(currentUser?.role || '').toLowerCase();
+  const rawRole = String(currentUser?.role || '').trim().toLowerCase();
   const adminRoles = new Set(['owner', 'admin', 'super_admin']);
   if (adminRoles.has(rawRole)) return { role: rawRole, isOperator: false };
   if (rawRole === 'operator') return { role: 'operator', isOperator: true };
