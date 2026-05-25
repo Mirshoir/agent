@@ -2253,16 +2253,39 @@ function AdminTaskDispatchCard({ adminNotes, onAdminNote, operatorAccounts = [],
   );
 }
 
+function operatorRecipientKeys(currentUser) {
+  const keys = new Set();
+  const pushKey = (value) => {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw) return;
+    keys.add(raw);
+    const username = raw.split('@')[0];
+    if (username) keys.add(username);
+  };
+  pushKey(currentUser?.ownerEmail);
+  pushKey(currentUser?.email);
+  pushKey(currentUser?.name);
+  pushKey(currentUser?.id);
+  return keys;
+}
+
+function isTaskForOperator(note, keys) {
+  const recipients = Array.isArray(note?.recipients)
+    ? note.recipients.map(item => String(item || '').trim().toLowerCase()).filter(Boolean)
+    : ['*'];
+  if (!recipients.length || recipients.includes('*')) return true;
+  return recipients.some(recipient => {
+    if (keys.has(recipient)) return true;
+    const username = recipient.split('@')[0];
+    return username ? keys.has(username) : false;
+  });
+}
+
 function OperatorTaskInboxCard({ adminNotes = [], currentUser, w }) {
-  const currentLogin = String(currentUser?.ownerEmail || currentUser?.email || '').trim().toLowerCase();
+  const keys = useMemo(() => operatorRecipientKeys(currentUser), [currentUser]);
   const tasks = useMemo(
-    () => (adminNotes || []).filter(note => {
-      const recipients = Array.isArray(note?.recipients) ? note.recipients.map(item => String(item || '').trim().toLowerCase()) : ['*'];
-      if (!recipients.length) return true;
-      if (recipients.includes('*')) return true;
-      return recipients.includes(currentLogin);
-    }),
-    [adminNotes, currentLogin],
+    () => (adminNotes || []).filter(note => isTaskForOperator(note, keys)),
+    [adminNotes, keys],
   );
 
   return (
@@ -2360,14 +2383,20 @@ function OperatorPanel(props) {
 }
 
 function OperatorsSection(props) {
-  const [mode, setMode] = useState('admin');
+  const isOperator = props.currentUser?.role === 'operator' && props.currentUser?.isAdmin !== true;
+  const [mode, setMode] = useState(isOperator ? 'operator' : 'admin');
   const w = props.w;
+  useEffect(() => {
+    if (isOperator && mode !== 'operator') setMode('operator');
+  }, [isOperator, mode]);
   return (
     <div className="operators-section">
-      <div className="operators-mode-switch" role="tablist" aria-label={w.operatorsTitle}>
-        <button className={mode === 'admin' ? 'active' : ''} onClick={() => setMode('admin')} role="tab" aria-selected={mode === 'admin'}>{w.adminPanel}</button>
-        <button className={mode === 'operator' ? 'active' : ''} onClick={() => setMode('operator')} role="tab" aria-selected={mode === 'operator'}>{w.operatorPanel}</button>
-      </div>
+      {!isOperator && (
+        <div className="operators-mode-switch" role="tablist" aria-label={w.operatorsTitle}>
+          <button className={mode === 'admin' ? 'active' : ''} onClick={() => setMode('admin')} role="tab" aria-selected={mode === 'admin'}>{w.adminPanel}</button>
+          <button className={mode === 'operator' ? 'active' : ''} onClick={() => setMode('operator')} role="tab" aria-selected={mode === 'operator'}>{w.operatorPanel}</button>
+        </div>
+      )}
       {mode === 'admin' ? <AdminPanel {...props} /> : <OperatorPanel {...props} />}
     </div>
   );
@@ -3785,6 +3814,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const businessesRef = useRef([]);
   const workspaceStateHydratedRef = useRef(false);
   const workspaceStateTimersRef = useRef({});
+  const seenOperatorTaskIdsRef = useRef(new Set());
   const conv = conversations.find(c => c.id === selectedId);
   const aiOn = conv ? conv.aiOn : false;
   const messages = threads[selectedId] || window.getThread(selectedId);
@@ -3809,6 +3839,24 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   useEffect(() => {
     deletedConversationsRef.current = deletedConversations;
   }, [deletedConversations]);
+
+  useEffect(() => {
+    if (!isOperator) return;
+    const keys = operatorRecipientKeys(currentUser);
+    const visibleTasks = (operatorAdminNotes || []).filter(note => isTaskForOperator(note, keys));
+    if (!visibleTasks.length) return;
+
+    const seen = seenOperatorTaskIdsRef.current;
+    if (!seen.size) {
+      visibleTasks.forEach(task => seen.add(String(task.id)));
+      return;
+    }
+
+    const fresh = visibleTasks.filter(task => !seen.has(String(task.id)));
+    if (!fresh.length) return;
+    fresh.forEach(task => seen.add(String(task.id)));
+    showToast(`New task from admin: ${fresh[0]?.text || ''}`.trim());
+  }, [isOperator, currentUser, operatorAdminNotes]);
 
   useEffect(() => {
     setUserProfile(readUserProfile(currentUser));
