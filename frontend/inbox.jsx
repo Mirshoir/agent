@@ -9,9 +9,8 @@ import './icons.jsx';
 
 const I = window.I;
 const IS_LOCALHOST = ['localhost', '127.0.0.1'].includes(window.location.hostname);
-const HARDCODED_DASHBOARD_SECRET = 'local-test-secret';
 
-const ENV_API_BASE = import.meta.env.VITE_API_URL || 'https://agent-1-xi6h.onrender.com';
+const ENV_API_BASE = import.meta.env.VITE_API_URL || '';
 const ENV_DASHBOARD_SECRET = import.meta.env.VITE_DASHBOARD_SECRET || '';
 
 const urlParams = new URLSearchParams(window.location.search);
@@ -24,15 +23,14 @@ if (urlParams.get('clear_auth')) {
 const API_BASE = (
   urlParams.get('api') ||
   window.localStorage.getItem('instaagent_api_base') ||
-  ENV_API_BASE ||
   window.INSTAAGENT_API_BASE ||
-  (IS_LOCALHOST ? 'http://localhost:8000' : '')
+  (IS_LOCALHOST ? 'http://127.0.0.1:8000' : '') ||
+  ENV_API_BASE ||
+  'https://agent-1-xi6h.onrender.com'
 ).replace(/\/$/, '');
 
 const DASHBOARD_SECRET =
   urlParams.get('secret') ||
-  HARDCODED_DASHBOARD_SECRET ||
-  (IS_LOCALHOST ? 'localdev' : '') ||
   ENV_DASHBOARD_SECRET ||
   window.localStorage.getItem('instaagent_dashboard_secret') ||
   window.INSTAAGENT_DASHBOARD_SECRET ||
@@ -114,6 +112,7 @@ function clearAuthSession({ preserveSecret = false, preserveOwner = false } = {}
 }
 
 function scopedPath(path) {
+  if (readAuthSession()?.token) return path;
   const ownerEmail = resolvedOwnerEmail();
   if (!ownerEmail) return path;
   const separator = path.includes('?') ? '&' : '?';
@@ -123,7 +122,7 @@ function scopedPath(path) {
 const API = {
   async fetchWithTimeout(url, options = {}, timeoutMs = 35000) {
     const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    const timer = window.setTimeout(() => controller.abort('timeout'), timeoutMs);
     try {
       return await fetch(url, { ...options, signal: controller.signal });
     } finally {
@@ -176,18 +175,23 @@ const API = {
   },
 };
 
-const THREAD_POLL_MS = 5000;
-const INBOX_POLL_MS = 12000;
+const THREAD_POLL_MS = 2000;
+const INBOX_POLL_MS = 2000;
 const STATS_POLL_MS = 60000;
 const TASKS_POLL_MS = 5000;
-const THREAD_LOAD_LIMIT = 80;
+const THREAD_LOAD_LIMIT = 25;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
 const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
 const LEAD_PRICES_STORAGE_KEY = 'instaagent_lead_prices';
 const OPERATOR_DEALS_STORAGE_KEY = 'instaagent_operator_deals';
 const OPERATOR_ADMIN_NOTES_STORAGE_KEY = 'instaagent_operator_admin_notes';
+const MANUAL_CLIENTS_STORAGE_KEY = 'instaagent_manual_clients';
 const USER_PROFILE_STORAGE_KEY = 'instaagent_user_profiles';
+const CONVERSATIONS_CACHE_STORAGE_KEY = 'instaagent_conversations_cache_v1';
+const CONVERSATIONS_CACHE_TTL_MS = 90 * 1000;
+const THREAD_CACHE_STORAGE_KEY = 'instaagent_thread_cache_v1';
+const THREAD_CACHE_TTL_MS = 10 * 60 * 1000;
 const DASHBOARD_HASH = '#dashboard';
 const UI_LANG_STORAGE_KEY = 'instaagent_ui_lang';
 
@@ -362,6 +366,78 @@ function writeStoredObject(key, value) {
   window.localStorage.setItem(key, JSON.stringify(value || {}));
 }
 
+function readConversationsCache(ownerEmail = '') {
+  try {
+    const payload = JSON.parse(window.localStorage.getItem(CONVERSATIONS_CACHE_STORAGE_KEY) || '{}');
+    if (!payload || typeof payload !== 'object') return [];
+    const sameOwner = normalizeOwnerEmail(payload.ownerEmail) === normalizeOwnerEmail(ownerEmail);
+    const ageMs = Date.now() - Number(payload.at || 0);
+    if (!sameOwner || !Array.isArray(payload.items) || ageMs > CONVERSATIONS_CACHE_TTL_MS) return [];
+    return payload.items;
+  } catch {
+    return [];
+  }
+}
+
+function writeConversationsCache(ownerEmail = '', items = []) {
+  window.localStorage.setItem(CONVERSATIONS_CACHE_STORAGE_KEY, JSON.stringify({
+    ownerEmail: normalizeOwnerEmail(ownerEmail),
+    at: Date.now(),
+    items: Array.isArray(items) ? items : [],
+  }));
+}
+
+function readThreadCache(conversationId = '') {
+  try {
+    const payload = JSON.parse(window.localStorage.getItem(THREAD_CACHE_STORAGE_KEY) || '{}');
+    if (!payload || typeof payload !== 'object') return [];
+    const ageMs = Date.now() - Number(payload.at || 0);
+    if (!payload.items || ageMs > THREAD_CACHE_TTL_MS) return [];
+    const rows = payload.items[String(conversationId)] || [];
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeThreadCache(conversationId = '', messages = []) {
+  if (!conversationId) return;
+  let payload = {};
+  try {
+    payload = JSON.parse(window.localStorage.getItem(THREAD_CACHE_STORAGE_KEY) || '{}') || {};
+  } catch {
+    payload = {};
+  }
+  const nextItems = { ...(payload.items || {}) };
+  nextItems[String(conversationId)] = Array.isArray(messages) ? messages : [];
+  const keys = Object.keys(nextItems);
+  if (keys.length > 80) {
+    keys.slice(0, keys.length - 80).forEach((key) => delete nextItems[key]);
+  }
+  window.localStorage.setItem(THREAD_CACHE_STORAGE_KEY, JSON.stringify({
+    at: Date.now(),
+    items: nextItems,
+  }));
+}
+
+function threadLikelyStaleForConversation(conversation, cachedMessages = []) {
+  if (!conversation || !cachedMessages.length) return false;
+  const preview = String(conversation.preview || '').trim().toLowerCase();
+  if (!preview) return false;
+  const latestCached = cachedMessages[cachedMessages.length - 1] || {};
+  const latestText = String(
+    latestCached.text ||
+    latestCached.mediaCaption ||
+    latestCached.label ||
+    ''
+  ).trim().toLowerCase();
+  if (!latestText) return true;
+  if (preview.includes('forwarded reel') || preview.includes('forwarded post')) {
+    return !latestText.includes('forwarded reel') && !latestText.includes('forwarded post');
+  }
+  return latestText !== preview;
+}
+
 function userIdentity(currentUser = {}) {
   return normalizeOwnerEmail(
     currentUser?.ownerEmail ||
@@ -433,14 +509,16 @@ function aiProviderForModel(model = '') {
   if (value.startsWith('gpt-') || value.startsWith('o1') || value.startsWith('o3') || value.startsWith('o4')) return 'openai';
   if (value.startsWith('gemini')) return 'gemini';
   if (value.startsWith('claude')) return 'anthropic';
-  return 'mistral';
+  if (value.startsWith('mistral')) return 'mistral';
+  return '';
 }
 
 function aiProviderForBusiness(business = {}) {
   const stored = String(business.ai_provider || '').toLowerCase();
-  return AI_PROVIDERS.some(provider => provider.id === stored)
-    ? stored
-    : aiProviderForModel(business.ai_model);
+  const inferred = aiProviderForModel(business.ai_model);
+  if (inferred) return inferred;
+  if (AI_PROVIDERS.some(provider => provider.id === stored)) return stored;
+  return 'openai';
 }
 
 function apiErrorMessage(data, status) {
@@ -464,6 +542,15 @@ function apiErrorMessage(data, status) {
   if (typeof message === 'string') return message;
   if (message) return JSON.stringify(message);
   return `Request failed: ${status}`;
+}
+
+function isAbortLike(error) {
+  const text = String(error?.message || error || '').toLowerCase();
+  return error?.name === 'AbortError'
+    || text.includes('aborterror')
+    || text.includes('signal is aborted')
+    || text.includes('aborted')
+    || text.includes('timeout');
 }
 
 function apiHeaders({ includeAuth = true } = {}) {
@@ -1161,6 +1248,9 @@ function normalizeMessage(row, index) {
     text,
     mediaKind: media || '',
     mediaUrl: withMediaToken(row.media_url || row.mediaUrl || telegramUserMediaUrl(row)),
+    postPermalink: row.post_permalink || row.postPermalink || '',
+    postImageUrl: row.post_image_url || row.postImageUrl || '',
+    postMediaType: row.post_media_type || row.postMediaType || '',
     forwardLink: resolveForwardedPostLink(row),
     mediaFileId: row.media_file_id || getWhatsAppMediaId(row),
     commentId: String(row.external_message_id || row.comment_id || row.raw_payload?.id || '').trim(),
@@ -1182,6 +1272,72 @@ function normalizeMessage(row, index) {
   }
 
   return message;
+}
+
+function mergeThreadMessages(existing = [], incoming = []) {
+  const byId = new Map();
+  const seed = Array.isArray(existing) ? existing : [];
+  const next = Array.isArray(incoming) ? incoming : [];
+  const preserveKeys = [
+    'mediaUrl',
+    'postPermalink',
+    'postImageUrl',
+    'postMediaType',
+    'mediaFileId',
+    'mediaKind',
+    'label',
+    'forwardLink',
+    'mediaCaption',
+    'text',
+  ];
+
+  const mergeMessage = (prevMsg = {}, nextMsg = {}) => {
+    const merged = { ...prevMsg, ...nextMsg };
+    for (const key of preserveKeys) {
+      const nextValue = nextMsg?.[key];
+      const prevValue = prevMsg?.[key];
+      const nextMissing = nextValue === undefined || nextValue === null || nextValue === '';
+      const prevPresent = !(prevValue === undefined || prevValue === null || prevValue === '');
+      if (nextMissing && prevPresent) {
+        merged[key] = prevValue;
+      }
+    }
+    if ((!nextMsg?.raw || typeof nextMsg.raw !== 'object') && prevMsg?.raw) {
+      merged.raw = prevMsg.raw;
+    }
+    return merged;
+  };
+
+  for (const msg of seed) {
+    if (!msg || !msg.id) continue;
+    byId.set(msg.id, msg);
+  }
+  for (const msg of next) {
+    if (!msg || !msg.id) continue;
+    byId.set(msg.id, mergeMessage(byId.get(msg.id) || {}, msg));
+  }
+
+  const merged = Array.from(byId.values());
+  merged.sort((a, b) => {
+    const ta = Date.parse(a?.raw?.created_at || a?.created_at || '') || 0;
+    const tb = Date.parse(b?.raw?.created_at || b?.created_at || '') || 0;
+    return ta - tb;
+  });
+  return merged;
+}
+
+function downloadNameForMessage(m) {
+  const extByKind = {
+    photo: 'jpg',
+    image: 'jpg',
+    video: 'mp4',
+    voice: 'ogg',
+    audio: 'mp3',
+    file: 'bin',
+  };
+  const kind = String(m?.mediaKind || m?.type || 'file').toLowerCase();
+  const ext = extByKind[kind] || 'bin';
+  return `instaagent-${kind}-${m?.id || Date.now()}.${ext}`;
 }
 
 function resolveCommentPostPreview(conv, messages = []) {
@@ -1360,8 +1516,9 @@ const WORKSPACE_TEXT = {
     leadNew: 'New', leadQualified: 'Qualified', leadNegotiation: 'Negotiation', leadWon: 'Won', leadLost: 'Lost',
     leadAmount: 'Potential value', leadSource: 'Source', leadUpdated: 'Updated', leadEmpty: 'No leads in this stage yet.',
     leadOpen: 'Open chat', leadPrice: 'Price', leadPricePlaceholder: 'Add price', leadPriceClear: 'Clear price',
-    clientsTitle: 'Clients table', clientsSubtitle: 'All customers with status, channel, price, and last message.', clientsEmpty: 'No clients yet.',
+    clientsTitle: 'Clients table', clientsSubtitle: 'Clients are added manually by admins and operators.', clientsEmpty: 'No clients added yet.',
     client: 'Client', lastMessage: 'Last message', status: 'Status', channel: 'Channel',
+    addClient: 'Add client', removeClient: 'Remove', clientSelectPlaceholder: 'Select chat to add',
     operatorsTitle: 'Operators panel', operatorsSubtitle: 'Operator workspace for tasks, client messages, and leads.',
     textToOperators: 'Text to operators', textToOperatorsPlaceholder: 'Write task for operators...', saveAdminNote: 'Send task',
     adminNotes: 'Tasks history', noAdminNotes: 'No tasks yet.', messagesFromClients: 'Messages from clients',
@@ -1401,8 +1558,9 @@ const WORKSPACE_TEXT = {
     leadNew: 'Yangi', leadQualified: 'Saralangan', leadNegotiation: 'Muzokara', leadWon: 'Yutilgan', leadLost: 'Yo‘qotilgan',
     leadAmount: 'Potensial qiymat', leadSource: 'Manba', leadUpdated: 'Yangilangan', leadEmpty: 'Bu bosqichda lid yo‘q.',
     leadOpen: 'Chatni ochish', leadPrice: 'Narx', leadPricePlaceholder: 'Narx kiriting', leadPriceClear: 'Narxni o‘chirish',
-    clientsTitle: 'Mijozlar jadvali', clientsSubtitle: 'Barcha mijozlar: status, kanal, narx va oxirgi xabar.', clientsEmpty: 'Hali mijoz yo‘q.',
+    clientsTitle: 'Mijozlar jadvali', clientsSubtitle: 'Mijozlar admin va operatorlar tomonidan qo‘lda qo‘shiladi.', clientsEmpty: 'Hali mijoz qo‘shilmagan.',
     client: 'Mijoz', lastMessage: 'Oxirgi xabar', status: 'Status', channel: 'Kanal',
+    addClient: 'Mijoz qo‘shish', removeClient: 'O‘chirish', clientSelectPlaceholder: 'Qo‘shish uchun chat tanlang',
     operatorsTitle: 'Operator paneli', operatorsSubtitle: 'Vazifalar, mijoz xabarlari va lidlar uchun operator ish maydoni.',
     textToOperators: 'Operatorlarga topshiriq', textToOperatorsPlaceholder: 'Operatorlar uchun vazifa yozing...', saveAdminNote: 'Vazifani yuborish',
     adminNotes: 'Vazifalar tarixi', noAdminNotes: 'Hali vazifa yo‘q.', messagesFromClients: 'Mijozlardan xabarlar',
@@ -1442,8 +1600,9 @@ const WORKSPACE_TEXT = {
     leadNew: 'Новые', leadQualified: 'Квалиф.', leadNegotiation: 'Переговоры', leadWon: 'Сделка', leadLost: 'Потеряно',
     leadAmount: 'Потенциал', leadSource: 'Источник', leadUpdated: 'Обновлено', leadEmpty: 'В этой стадии пока нет лидов.',
     leadOpen: 'Открыть чат', leadPrice: 'Цена', leadPricePlaceholder: 'Добавить цену', leadPriceClear: 'Удалить цену',
-    clientsTitle: 'Таблица клиентов', clientsSubtitle: 'Все клиенты со статусом, каналом, ценой и последним сообщением.', clientsEmpty: 'Клиентов пока нет.',
+    clientsTitle: 'Таблица клиентов', clientsSubtitle: 'Клиенты добавляются вручную админами и операторами.', clientsEmpty: 'Клиенты еще не добавлены.',
     client: 'Клиент', lastMessage: 'Последнее сообщение', status: 'Статус', channel: 'Канал',
+    addClient: 'Добавить клиента', removeClient: 'Удалить', clientSelectPlaceholder: 'Выберите чат',
     operatorsTitle: 'Панель оператора', operatorsSubtitle: 'Рабочая зона оператора: задачи, клиенты и лиды.',
     textToOperators: 'Задача операторам', textToOperatorsPlaceholder: 'Напишите задачу для операторов...', saveAdminNote: 'Отправить задачу',
     adminNotes: 'История задач', noAdminNotes: 'Задач пока нет.', messagesFromClients: 'Сообщения клиентов',
@@ -1795,12 +1954,40 @@ function LeadsBoard({ conversations, leadStages, leadPrices, setLeadStage, setLe
   );
 }
 
-function ClientsTable({ conversations, leadStages, leadPrices, onOpenConversation, w }) {
-  const rows = useMemo(() => (conversations || []).map(conv => ({
-    ...conv,
-    stage: leadStages[conv.id] || guessLeadStage(conv),
-    price: leadPrices[conv.id] || '',
-  })), [conversations, leadStages, leadPrices]);
+function snapshotClientFromConversation(conv = {}) {
+  return {
+    id: conv.id,
+    name: conv.name,
+    handle: conv.handle,
+    avatar: conv.avatar,
+    platform: conv.platform,
+    channelName: conv.channelName,
+    preview: conv.preview,
+    unread: conv.unread,
+  };
+}
+
+function ClientsTable({ conversations, manualClients = {}, leadStages, leadPrices, onAddClient, onRemoveClient, onOpenConversation, w }) {
+  const [selectedClientId, setSelectedClientId] = useState('');
+  const conversationMap = useMemo(() => {
+    const map = new Map();
+    (conversations || []).forEach(conv => map.set(conv.id, conv));
+    return map;
+  }, [conversations]);
+  const clientIds = useMemo(() => Object.keys(manualClients || {}), [manualClients]);
+  const rows = useMemo(() => clientIds.map(id => {
+    const saved = manualClients[id] || {};
+    const source = conversationMap.get(id) || saved.snapshot || {};
+    return {
+      ...source,
+      id,
+      stage: leadStages[id] || guessLeadStage(source),
+      price: leadPrices[id] || '',
+    };
+  }).filter(row => row.id && row.name), [clientIds, conversationMap, manualClients, leadStages, leadPrices]);
+  const addOptions = useMemo(() => (conversations || [])
+    .filter(conv => conv.id && !manualClients[conv.id])
+    .slice(0, 120), [conversations, manualClients]);
 
   const stageNames = {
     new: w.leadNew,
@@ -1818,6 +2005,25 @@ function ClientsTable({ conversations, leadStages, leadPrices, onOpenConversatio
           <p>{w.clientsSubtitle}</p>
         </div>
         <span>{rows.length}</span>
+      </div>
+      <div className="client-add-row">
+        <select value={selectedClientId} onChange={(e) => setSelectedClientId(e.target.value)}>
+          <option value="">{w.clientSelectPlaceholder}</option>
+          {addOptions.map(option => (
+            <option key={option.id} value={option.id}>{option.name} - {option.channelName || option.platform}</option>
+          ))}
+        </select>
+        <button
+          type="button"
+          disabled={!selectedClientId}
+          onClick={() => {
+            if (!selectedClientId) return;
+            onAddClient?.(selectedClientId);
+            setSelectedClientId('');
+          }}
+        >
+          {w.addClient}
+        </button>
       </div>
       <div className="clients-table-wrap">
         <table className="clients-table">
@@ -1854,7 +2060,12 @@ function ClientsTable({ conversations, leadStages, leadPrices, onOpenConversatio
                 <td>{row.price || '-'}</td>
                 <td className="client-preview">{row.preview}</td>
                 <td>{row.unread || 0}</td>
-                <td><button className="table-action" onClick={() => onOpenConversation(row.id)}>{w.leadOpen}</button></td>
+                <td>
+                  <div className="client-row-actions">
+                    <button className="table-action" onClick={() => onOpenConversation(row.id)}>{w.leadOpen}</button>
+                    <button className="table-action ghost" onClick={() => onRemoveClient?.(row.id)}>{w.removeClient}</button>
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -2392,12 +2603,15 @@ function WorkspacePanel({
   generatorState,
   leadStages,
   leadPrices,
+  manualClients,
   operatorDeals,
   adminNotes,
   operatorAccounts,
   onReloadOperatorAccounts,
   onLeadStageChange,
   onLeadPriceChange,
+  onAddClient,
+  onRemoveClient,
   onOperatorDealChange,
   onAdminNote,
   onOpenConversation,
@@ -2410,7 +2624,7 @@ function WorkspacePanel({
 }) {
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
   const isOperator = currentUser?.role === 'operator' && currentUser?.isAdmin !== true;
-  if (isOperator && !['leads', 'inbox', 'operators', 'settings', 'profile'].includes(view)) return null;
+  if (isOperator && !['leads', 'inbox', 'clients', 'operators', 'settings', 'profile'].includes(view)) return null;
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId) || businesses[0] || {};
   const activeProviderId = aiProviderForBusiness(selectedBusiness);
   const activeProvider = AI_PROVIDERS.find(provider => provider.id === activeProviderId) || AI_PROVIDERS[0];
@@ -2459,8 +2673,11 @@ function WorkspacePanel({
       {view === 'clients' && (
         <ClientsTable
           conversations={conversations}
+          manualClients={manualClients}
           leadStages={leadStages}
           leadPrices={leadPrices}
+          onAddClient={onAddClient}
+          onRemoveClient={onRemoveClient}
           onOpenConversation={onOpenConversation}
           w={w}
         />
@@ -2678,7 +2895,7 @@ function WorkspacePanel({
                   value={activeProvider.id}
                   onChange={(e) => {
                     const provider = AI_PROVIDERS.find(item => item.id === e.target.value) || AI_PROVIDERS[0];
-                    onBusinessSetting(selectedBusiness.id, { ai_model: provider.defaultModel }, true);
+                    onBusinessSetting(selectedBusiness.id, { ai_provider: provider.id, ai_model: provider.defaultModel }, true);
                   }}
                 >
                   {AI_PROVIDERS.map(provider => (
@@ -2692,7 +2909,7 @@ function WorkspacePanel({
                   value={modelSelectValue}
                   onChange={(e) => {
                     if (e.target.value === 'custom') return;
-                    onBusinessSetting(selectedBusiness.id, { ai_model: e.target.value }, true);
+                    onBusinessSetting(selectedBusiness.id, { ai_provider: activeProvider.id, ai_model: e.target.value }, true);
                   }}
                 >
                   {activeProvider.models.map(model => (
@@ -2706,8 +2923,16 @@ function WorkspacePanel({
               <span>{w.customModel}</span>
               <input
                 value={activeModel}
-                onChange={(e) => onBusinessSetting(selectedBusiness.id, { ai_model: e.target.value }, false)}
-                onBlur={(e) => onBusinessSetting(selectedBusiness.id, { ai_model: e.target.value.trim() || activeProvider.defaultModel }, true)}
+                onChange={(e) => {
+                  const typedModel = e.target.value;
+                  const inferredProvider = aiProviderForModel(typedModel) || activeProvider.id;
+                  onBusinessSetting(selectedBusiness.id, { ai_provider: inferredProvider, ai_model: typedModel }, false);
+                }}
+                onBlur={(e) => {
+                  const modelValue = e.target.value.trim() || activeProvider.defaultModel;
+                  const inferredProvider = aiProviderForModel(modelValue) || activeProvider.id;
+                  onBusinessSetting(selectedBusiness.id, { ai_provider: inferredProvider, ai_model: modelValue }, true);
+                }}
               />
             </label>
             <div className="model-grid">
@@ -2824,7 +3049,7 @@ function Rail({ t, activeView, onView, currentUser, userProfile }) {
     { id: 'knowledge', icon: <I.Book />, label: t.knowledge },
     { id: 'prompts', icon: <I.Sparkle />, label: t.prompts || 'AI Prompts' },
     { id: 'accounts', icon: <I.Layers />, label: t.accounts },
-  ].filter(item => !isOperator || ['leads', 'inbox', 'operators'].includes(item.id));
+  ].filter(item => !isOperator || ['leads', 'inbox', 'clients', 'operators'].includes(item.id));
   return (
     <aside className="rail">
       {items.map(it => (
@@ -2919,15 +3144,26 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
 
   const priority = filtered.filter(c => c.needsHuman || c.unread > 0);
   const rest = filtered.filter(c => !c.needsHuman && c.unread === 0);
+  const visibleApiError = apiError && !isAbortLike(apiError) ? apiError : '';
+  const showAnimatedLoading = showLoadingState || (loading && conversations.length > 0);
 
   return (
     <section className="list-col">
       <div className="list-head">
         <div className={`api-strip ${liveMode ? 'live' : 'mock'}`}>
-          <span>{liveMode || conversations.length > 0 ? t.liveBackend : (showLoadingState ? 'Loading... please wait' : 'Waiting for live data')}</span>
+          <span className={showAnimatedLoading ? 'loading-inline' : ''}>
+            {showAnimatedLoading && (
+              <i className="loading-dots" aria-hidden="true">
+                <b />
+                <b />
+                <b />
+              </i>
+            )}
+            {liveMode || conversations.length > 0 ? t.liveBackend : (showLoadingState ? 'Loading... please wait' : 'Waiting for live data')}
+          </span>
           <button onClick={onRefresh} title={t.refresh}>{loading ? t.syncing : t.refresh}</button>
         </div>
-        {apiError && <div className="api-error">{apiError}</div>}
+        {visibleApiError && <div className="api-error">{visibleApiError}</div>}
         <div className="search">
           <I.Search />
           <input
@@ -2989,7 +3225,11 @@ function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError,
         {filtered.length === 0 && (
           showLoadingState ? (
             <div className="loading-state" role="status" aria-live="polite">
-              <span className="spinner" aria-hidden="true" />
+              <span className="spinner" aria-hidden="true">
+                <i />
+                <i />
+                <i />
+              </span>
               <p>Loading... please wait</p>
             </div>
           ) : (
@@ -3015,7 +3255,7 @@ function VoiceWave({ count = 28 }) {
 }
 
 // ---------- Message bubble ----------
-function Message({ m, conv, t, onReplyComment }) {
+function Message({ m, conv, t, onReplyComment, onOpenMedia }) {
   if (m.side === 'system' && m.type === 'handoff') {
     return (
       <div className="handoff-banner">
@@ -3034,6 +3274,30 @@ function Message({ m, conv, t, onReplyComment }) {
     m.commentId &&
     typeof onReplyComment === 'function'
   );
+  const resolvedForwardLink = m.forwardLink || m.postPermalink || '';
+  const canPreviewVideoThumb = m.mediaKind === 'video' && m.postImageUrl && !isPlayableVideoUrl(m.mediaUrl);
+  const previewSrc = m.mediaUrl || m.postImageUrl || '';
+  const canPreviewInline = Boolean(
+    previewSrc && (
+      m.mediaKind === 'video' ||
+      m.mediaKind === 'photo' ||
+      isRenderableImageUrl(previewSrc) ||
+      isPlayableVideoUrl(previewSrc)
+    )
+  );
+  const openMedia = () => {
+    if (!onOpenMedia) return;
+    const src = m.mediaUrl || m.postImageUrl || resolvedForwardLink;
+    if (!src) return;
+    onOpenMedia({
+      src,
+      kind: m.mediaKind === 'video' ? 'video' : ((m.mediaKind === 'photo' || isRenderableImageUrl(m.mediaUrl || m.postImageUrl)) ? 'image' : 'file'),
+      caption: m.mediaCaption || m.label || '',
+      downloadName: downloadNameForMessage(m),
+      fallbackLink: resolvedForwardLink,
+      previewImage: m.postImageUrl || '',
+    });
+  };
   return (
     <div className={`msg-group ${m.side} ${fromAi ? 'from-ai' : ''}`}>
       {m.type === 'text' && (
@@ -3043,8 +3307,10 @@ function Message({ m, conv, t, onReplyComment }) {
         <div className="bubble media">
           {m.mediaKind === 'video' && isPlayableVideoUrl(m.mediaUrl) ? (
             <video className="media-video" src={m.mediaUrl} controls />
+          ) : canPreviewVideoThumb ? (
+            <img className="media-img media-clickable" src={m.postImageUrl} alt={m.label || 'video preview'} onClick={openMedia} />
           ) : m.mediaUrl && (m.mediaKind === 'photo' || isRenderableImageUrl(m.mediaUrl)) && !isInstagramPostLink(m.mediaUrl) ? (
-            <img className="media-img" src={m.mediaUrl} alt={m.label || 'attachment'} />
+            <img className="media-img media-clickable" src={m.mediaUrl} alt={m.label || 'attachment'} onClick={openMedia} />
           ) : m.mediaKind === 'file' && m.mediaUrl && !isInstagramPostLink(m.mediaUrl) ? (
             <a className="file-chip" href={m.mediaUrl} target="_blank" rel="noreferrer">
               <I.Paperclip />
@@ -3064,8 +3330,27 @@ function Message({ m, conv, t, onReplyComment }) {
             <span className="ph" data-label={m.label || 'photo'} />
           )}
           {m.mediaCaption && <div className="cap">{m.mediaCaption}</div>}
-          {m.forwardLink && conv?.platform === 'instagram' && (
-            <a className="open-post-link" href={m.forwardLink} target="_blank" rel="noreferrer">
+          <div className="media-actions">
+            {canPreviewInline && (
+              <button type="button" className="media-action-btn" onClick={openMedia}>Preview</button>
+            )}
+            {m.mediaUrl && (
+              <a
+                className="media-action-btn"
+                href={m.mediaUrl}
+                target="_blank"
+                rel="noreferrer"
+                download={downloadNameForMessage(m)}
+              >
+                Save
+              </a>
+            )}
+            {!canPreviewInline && !m.mediaUrl && resolvedForwardLink && (
+              <span className="media-mini-note">Preview unavailable from source.</span>
+            )}
+          </div>
+          {resolvedForwardLink && conv?.platform === 'instagram' && (
+            <a className="open-post-link" href={resolvedForwardLink} target="_blank" rel="noreferrer">
               Open on Instagram
             </a>
           )}
@@ -3165,6 +3450,7 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
   const [recordingStartedAt, setRecordingStartedAt] = useState(0);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [replyTarget, setReplyTarget] = useState(null);
+  const [mediaViewer, setMediaViewer] = useState(null);
   const voiceRecordingSupported = ['telegram', 'whatsapp'].includes(conv.platform);
 
   const sendDraft = async () => {
@@ -3307,6 +3593,15 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
   }, []);
 
   useEffect(() => {
+    if (!mediaViewer) return undefined;
+    const onEsc = (event) => {
+      if (event.key === 'Escape') setMediaViewer(null);
+    };
+    document.addEventListener('keydown', onEsc);
+    return () => document.removeEventListener('keydown', onEsc);
+  }, [mediaViewer]);
+
+  useEffect(() => {
     if (!emojiOpen) return undefined;
 
     const closeOnOutsideTouch = (event) => {
@@ -3391,7 +3686,7 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
           return (
             <React.Fragment key={m.id}>
               {dayChanged && <div className="day-sep">{m.day}</div>}
-              <Message m={m} conv={conv} t={t} onReplyComment={selectReplyTarget} />
+              <Message m={m} conv={conv} t={t} onReplyComment={selectReplyTarget} onOpenMedia={setMediaViewer} />
             </React.Fragment>
           );
         })}
@@ -3402,6 +3697,34 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
           </div>
         )}
       </div>
+      {mediaViewer && (
+        <div className="media-viewer-overlay" onClick={() => setMediaViewer(null)}>
+          <div className="media-viewer-card" onClick={(e) => e.stopPropagation()}>
+            <button type="button" className="media-viewer-close" onClick={() => setMediaViewer(null)} aria-label="Close preview">×</button>
+            {mediaViewer.kind === 'video' && isPlayableVideoUrl(mediaViewer.src) ? (
+              <video className="media-viewer-media" src={mediaViewer.src} controls autoPlay />
+            ) : mediaViewer.kind === 'video' && mediaViewer.previewImage ? (
+              <img className="media-viewer-media" src={mediaViewer.previewImage} alt="Video preview" />
+            ) : mediaViewer.kind === 'image' ? (
+              <img className="media-viewer-media" src={mediaViewer.src} alt={mediaViewer.caption || 'Preview'} />
+            ) : (
+              <a className="file-chip" href={mediaViewer.src} target="_blank" rel="noreferrer">Open file</a>
+            )}
+            <div className="media-viewer-actions">
+              {mediaViewer.src && (
+                <a className="media-action-btn" href={mediaViewer.src} target="_blank" rel="noreferrer" download={mediaViewer.downloadName || 'attachment'}>
+                  Save
+                </a>
+              )}
+              {mediaViewer.fallbackLink && (
+                <a className="media-action-btn" href={mediaViewer.fallbackLink} target="_blank" rel="noreferrer">
+                  Open on Instagram
+                </a>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Suggested replies */}
       {showSuggestions && conv.suggestions && conv.suggestions.length > 0 && (
@@ -3740,10 +4063,20 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 function App({ lang, setLang, onSignOut, currentUser }) {
   const t = window.STRINGS[lang];
   const isOperator = currentUser?.role === 'operator' && currentUser?.isAdmin !== true;
+  const cachedConversationSeed = useMemo(() => {
+    const deleted = readStoredObject(DELETED_CONVERSATIONS_STORAGE_KEY);
+    const aiLocal = readStoredObject(AI_OVERRIDE_STORAGE_KEY);
+    return readConversationsCache(resolvedOwnerEmail())
+      .map(normalizeConversation)
+      .filter(item => !deleted[item.id])
+      .map(item => Object.prototype.hasOwnProperty.call(aiLocal, item.id)
+        ? { ...item, aiOn: aiLocal[item.id] === true }
+        : item);
+  }, []);
   const [booting, setBooting] = useState(true);
 
-  const [conversations, setConversations] = useState([]);
-  const [selectedId, setSelectedId] = useState('');
+  const [conversations, setConversations] = useState(cachedConversationSeed);
+  const [selectedId, setSelectedId] = useState(cachedConversationSeed[0]?.id || '');
   const [threads, setThreads] = useState({});
   const [loading, setLoading] = useState(false);
   const [threadLoading, setThreadLoading] = useState(false);
@@ -3764,6 +4097,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   const [operatorAccounts, setOperatorAccounts] = useState([]);
   const [leadStages, setLeadStages] = useState(() => readStoredObject(LEAD_STAGES_STORAGE_KEY));
   const [leadPrices, setLeadPrices] = useState(() => readStoredObject(LEAD_PRICES_STORAGE_KEY));
+  const [manualClients, setManualClients] = useState(() => readStoredObject(MANUAL_CLIENTS_STORAGE_KEY));
   const [operatorDeals, setOperatorDeals] = useState(() => readStoredObject(OPERATOR_DEALS_STORAGE_KEY));
   const [operatorAdminNotes, setOperatorAdminNotes] = useState(() => {
     const stored = readStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY);
@@ -3780,7 +4114,10 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   const inboxPollBusy = useRef(false);
   const statsPollBusy = useRef(false);
   const tasksPollBusy = useRef(false);
+  const threadRequestSeqRef = useRef(0);
+  const threadRequestByConversationRef = useRef({});
   const businessesRef = useRef([]);
+  const conversationsRef = useRef([]);
   const workspaceStateHydratedRef = useRef(false);
   const workspaceStateTimersRef = useRef({});
   const conv = conversations.find(c => c.id === selectedId);
@@ -3847,6 +4184,10 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       if (state.lead_prices && typeof state.lead_prices === 'object') {
         setLeadPrices(state.lead_prices);
         writeStoredObject(LEAD_PRICES_STORAGE_KEY, state.lead_prices);
+      }
+      if (state.manual_clients && typeof state.manual_clients === 'object') {
+        setManualClients(state.manual_clients);
+        writeStoredObject(MANUAL_CLIENTS_STORAGE_KEY, state.manual_clients);
       }
       if (state.operator_deals && typeof state.operator_deals === 'object') {
         setOperatorDeals(state.operator_deals);
@@ -4067,19 +4408,38 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   };
 
   const loadConversations = async ({ sideLoad = true, silent = false, ownerEmailOverride = '' } = {}) => {
+    const ownerScoped = normalizeOwnerEmail(ownerEmailOverride || ownerEmail);
+    const hasAuthToken = Boolean(readAuthSession()?.token);
+    const warmCache = readConversationsCache(ownerScoped || resolvedOwnerEmail()).map(normalizeConversation);
+    if (warmCache.length) {
+      setConversations(prev => prev.length ? prev : warmCache);
+      setSelectedId(current => warmCache.some(c => c.id === current) ? current : (warmCache[0]?.id || ''));
+      setLiveMode(true);
+    }
     if (!silent) setLoading(true);
     try {
+      let scopedBusinessId = String(selectedBusinessId || '').trim();
+      let loadedBusinesses = null;
       if (sideLoad || !businessesRef.current.length) {
-        await loadBusinesses({ silent: true, ownerEmailOverride });
+        loadedBusinesses = await loadBusinesses({ silent: true, ownerEmailOverride });
       }
-      const data = await API.get('/api/v2/conversations');
+      if (!scopedBusinessId) {
+        const source = Array.isArray(loadedBusinesses) && loadedBusinesses.length
+          ? loadedBusinesses
+          : businessesRef.current;
+        scopedBusinessId = String(source?.[0]?.id || '').trim();
+      }
+      const qs = new URLSearchParams({ include_raw: '0', fast: '1' });
+      if (scopedBusinessId) qs.set('business_id', scopedBusinessId);
+      const data = await API.get(`/api/v2/conversations?${qs.toString()}`, { timeoutMs: 25000 });
       const selectedCurrent = selectedIdRef.current;
-      const ownerScoped = normalizeOwnerEmail(ownerEmailOverride || ownerEmail);
+      const previousSelected = (conversationsRef.current || []).find(item => item.id === selectedCurrent);
       const allowedBusinessIds = new Set((businessesRef.current || []).map(row => row.id).filter(Boolean));
       const next = (data.data || [])
         .map(normalizeConversation)
         .filter(item => {
           if (allowedBusinessIds.size && item.businessId) return allowedBusinessIds.has(item.businessId);
+          if (hasAuthToken) return true;
           if (!ownerScoped) return true;
           return conversationOwnerEmail(item) === ownerScoped;
         })
@@ -4089,16 +4449,30 @@ function App({ lang, setLang, onSignOut, currentUser }) {
           : item)
         .map(item => item.id === selectedCurrent ? clearConversationUnread(item) : item);
       setConversations(next);
+      writeConversationsCache(ownerScoped || resolvedOwnerEmail(), next);
       setSelectedId(current => next.some(c => c.id === current) ? current : (next[0]?.id || ''));
+      const nextSelected = next.find(item => item.id === selectedCurrent);
+      const selectedChanged = Boolean(
+        nextSelected && (
+          !previousSelected ||
+          nextSelected.preview !== previousSelected.preview ||
+          nextSelected.unread !== previousSelected.unread ||
+          nextSelected.lastTime !== previousSelected.lastTime
+        )
+      );
+      if (selectedChanged) {
+        window.setTimeout(() => {
+          loadThread(selectedCurrent, { silent: true, markRead: false });
+        }, 0);
+      }
       setLiveMode(true);
       setApiError('');
       if (sideLoad) {
         loadStats();
-        loadBusinesses({ silent: true });
       }
       return true;
     } catch (e) {
-      const isAbort = /aborted|aborterror|signal is aborted/i.test(String(e?.message || ''));
+      const isAbort = isAbortLike(e);
       const unauthorized = /unauthorized|401/i.test(String(e?.message || ''));
       if (unauthorized) {
         showToast('Session expired. Please sign in again.');
@@ -4107,6 +4481,13 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       }
       if (silent) {
         if (!isAbort) setApiError(`Live sync delayed: ${e.message}`);
+        return false;
+      }
+      const cached = readConversationsCache(ownerScoped || resolvedOwnerEmail()).map(normalizeConversation);
+      if (cached.length) {
+        setConversations(cached);
+        setSelectedId(current => cached.some(c => c.id === current) ? current : (cached[0]?.id || ''));
+        setApiError(isAbort ? '' : `Live sync delayed: ${e.message}`);
         return false;
       }
       setLiveMode(false);
@@ -4134,26 +4515,63 @@ function App({ lang, setLang, onSignOut, currentUser }) {
     showToast(clean ? `Owner scoped to ${clean}` : 'Owner scope cleared');
   };
 
-  const loadThread = async (conversationId, { silent = false, markRead = !silent } = {}) => {
+  const loadThread = async (conversationId, { silent = false, markRead = false, forceFresh = false } = {}) => {
     if (!conversationId || !liveMode) return;
-    if (!silent) setThreadLoading(true);
+    const requestId = ++threadRequestSeqRef.current;
+    threadRequestByConversationRef.current[conversationId] = requestId;
+    const isLatestRequest = () => threadRequestByConversationRef.current[conversationId] === requestId;
+    const conv = (conversationsRef.current || []).find(item => item.id === conversationId);
+    const cached = forceFresh ? [] : readThreadCache(conversationId);
+    const staleCached = threadLikelyStaleForConversation(conv, cached);
+    if (cached.length) {
+      if (!staleCached) {
+        setThreads(prev => ({ ...prev, [conversationId]: cached }));
+      }
+    } else {
+      if (conv?.preview) {
+        const fallbackMessage = normalizeMessage({
+          id: `fallback-${conversationId}`,
+          created_at: new Date().toISOString(),
+          direction: 'inbound',
+          content: conv.preview,
+          type: 'text',
+        }, 0);
+        setThreads(prev => ({ ...prev, [conversationId]: [fallbackMessage] }));
+      }
+    }
+    let loadingTimer = null;
+    if (!silent && (cached.length === 0 || staleCached)) {
+      loadingTimer = window.setTimeout(() => {
+        if (isLatestRequest()) setThreadLoading(true);
+      }, 350);
+    }
     try {
       const data = await API.get(
-        `/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?limit=${THREAD_LOAD_LIMIT}&mark_read=${markRead ? '1' : '0'}`,
-        { timeoutMs: 12000 },
+        `/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?limit=${forceFresh ? 100 : THREAD_LOAD_LIMIT}&mark_read=${markRead ? '1' : '0'}&include_raw=0`,
+        { timeoutMs: 20000 },
       );
+      if (!isLatestRequest()) return false;
+      const nextMessages = (data.data || []).map(normalizeMessage);
+      let mergedMessages = nextMessages;
       setThreads(prev => ({
-        ...prev,
-        [conversationId]: (data.data || []).map(normalizeMessage),
+        ...(mergedMessages = mergeThreadMessages(prev[conversationId] || [], nextMessages), prev),
+        [conversationId]: mergedMessages,
       }));
+      writeThreadCache(conversationId, mergedMessages);
       setConversations(rows => rows.map(item => item.id === conversationId ? clearConversationUnread(item) : item));
       setApiError('');
       return true;
     } catch (e) {
+      if (!isLatestRequest()) return false;
+      if (isAbortLike(e)) {
+        if (!silent) setApiError('');
+        return false;
+      }
       setApiError(`${e.message} Showing cached messages.`);
       return false;
     } finally {
-      if (!silent) setThreadLoading(false);
+      if (loadingTimer) window.clearTimeout(loadingTimer);
+      if (!silent && isLatestRequest()) setThreadLoading(false);
     }
   };
 
@@ -4252,7 +4670,7 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       return;
     }
     setBusinesses(rows => rows.map(b => b.id === businessId ? { ...b, ...settings } : b));
-    if (!persist || !liveMode) return;
+    if (!persist) return;
     try {
       await API.postJson('/api/business-settings', { business_id: businessId, settings });
       showToast('Business settings saved');
@@ -4297,21 +4715,32 @@ function App({ lang, setLang, onSignOut, currentUser }) {
 
   useEffect(() => {
     let cancelled = false;
+    const bootTimer = window.setTimeout(() => {
+      if (!cancelled) setBooting(false);
+    }, 1200);
+
     (async () => {
       try {
         await loadConversations();
       } finally {
+        window.clearTimeout(bootTimer);
         if (!cancelled) setBooting(false);
       }
     })();
+
     return () => {
       cancelled = true;
+      window.clearTimeout(bootTimer);
     };
   }, []);
 
   useEffect(() => {
     businessesRef.current = businesses;
   }, [businesses]);
+
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
 
   useEffect(() => {
     if (selectedBusinessId) loadPromptSettings(selectedBusinessId, { silent: true });
@@ -4546,9 +4975,9 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   };
 
   const changeView = (view) => {
-    if (isOperator && !['leads', 'inbox', 'operators', 'settings', 'profile'].includes(view)) {
+    if (isOperator && !['leads', 'inbox', 'clients', 'operators', 'settings', 'profile'].includes(view)) {
       setActiveView('leads');
-      showToast('Operator access is limited to Leads, Inbox, Operators, Settings, and Profile');
+      showToast('Operator access is limited to Leads, Inbox, Clients, Operators, Settings, and Profile');
       return;
     }
     if ((view === 'operators' || view === 'settings') && liveModeRef.current) {
@@ -4591,6 +5020,37 @@ function App({ lang, setLang, onSignOut, currentUser }) {
       queueWorkspaceStateSave({ lead_prices: next });
       return next;
     });
+  };
+
+  const addManualClient = (conversationId) => {
+    const conversation = conversations.find(item => item.id === conversationId);
+    if (!conversation) return;
+    setManualClients(prev => {
+      const next = {
+        ...prev,
+        [conversationId]: {
+          id: conversationId,
+          added_at: new Date().toISOString(),
+          added_by: userIdentity(currentUser),
+          snapshot: snapshotClientFromConversation(conversation),
+        },
+      };
+      writeStoredObject(MANUAL_CLIENTS_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ manual_clients: next });
+      return next;
+    });
+    showToast('Client added');
+  };
+
+  const removeManualClient = (conversationId) => {
+    setManualClients(prev => {
+      const next = { ...prev };
+      delete next[conversationId];
+      writeStoredObject(MANUAL_CLIENTS_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ manual_clients: next });
+      return next;
+    });
+    showToast('Client removed');
   };
 
   const setOperatorDealCount = (operatorId, value) => {
@@ -4643,6 +5103,9 @@ function App({ lang, setLang, onSignOut, currentUser }) {
   };
 
   const selectConversation = (conversationId) => {
+    if (selectedIdRef.current === conversationId) {
+      loadThread(conversationId, { silent: false, markRead: false, forceFresh: true });
+    }
     setSelectedId(conversationId);
     setActiveView('inbox');
     setMoreOpen(false);
@@ -4733,12 +5196,15 @@ function App({ lang, setLang, onSignOut, currentUser }) {
             generatorState={promptGeneratorState}
             leadStages={leadStages}
             leadPrices={leadPrices}
+            manualClients={manualClients}
             operatorDeals={operatorDeals}
             adminNotes={operatorAdminNotes}
             operatorAccounts={operatorAccounts}
             onReloadOperatorAccounts={() => loadOperatorAccounts(selectedBusinessId)}
             onLeadStageChange={setLeadStage}
             onLeadPriceChange={setLeadPrice}
+            onAddClient={addManualClient}
+            onRemoveClient={removeManualClient}
             onOperatorDealChange={setOperatorDealCount}
             onAdminNote={addOperatorAdminNote}
             onOpenConversation={selectConversation}
