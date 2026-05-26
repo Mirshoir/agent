@@ -19,7 +19,7 @@ telegram_router = APIRouter()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME", "").lower().replace("@", "")
-TELEGRAM_GROUP_REPLY_MODE = os.getenv("TELEGRAM_GROUP_REPLY_MODE", "mention_or_reply").strip().lower()
+TELEGRAM_GROUP_REPLY_MODE = os.getenv("TELEGRAM_GROUP_REPLY_MODE", "all").strip().lower()
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "")
 
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID", "")
@@ -49,7 +49,6 @@ PROCESSED_BOT_MESSAGES = {}
 PROCESSED_USER_MESSAGES = {}
 TELEGRAM_USER_CLIENT = None
 TELEGRAM_BOT_ID = None
-TELEGRAM_CHAT_ADMINS_CACHE = {}
 
 OPTIONAL_INBOX_COLUMNS = [
     "customer_name",
@@ -73,218 +72,15 @@ def normalize_text(value):
     return str(value or "").strip()
 
 
-def get_business_channels(business_id: str, aliases: list[str]):
-    business_id = normalize_text(business_id)
-    aliases = [normalize_text(a).lower() for a in (aliases or []) if normalize_text(a)]
-    if not business_id or not aliases:
-        return []
-    try:
-        rows = (
-            supabase.table("business_channels")
-            .select("*")
-            .eq("business_id", business_id)
-            .in_("platform", aliases)
-            .eq("is_active", True)
-            .order("created_at", desc=True)
-            .execute()
-            .data
-            or []
-        )
-        return rows
-    except Exception:
-        return []
-
-
-def get_telegram_bot_token_for_business(business: dict = None):
-    business_id = normalize_text((business or {}).get("id"))
-    if business_id:
-        rows = get_business_channels(business_id, ["telegram", "telegram_bot"])
-        for row in rows:
-            cfg = dict(row.get("config") or {})
-            token = normalize_text(cfg.get("bot_token") or cfg.get("telegram_bot_token") or cfg.get("access_token"))
-            if token:
-                return token
-    return TELEGRAM_BOT_TOKEN
-
-
-def wants_catalog(text: str) -> bool:
-    text = normalize_text(text).lower()
-    keywords = [
-        "catalog", "katalog", "каталог", "price", "prices", "narx", "narxlari",
-        "narhi", "qancha", "qanchadan", "necha pul", "nechpul", "nechi pul",
-        "цена", "цены", "стоимость", "сколько", "сколько стоит", "прайс",
-        "model", "models", "modellari", "модель", "модели",
-        "collection", "kolleksiya", "коллекция", "photo", "photos", "rasm", "rasmlar",
-        "фото", "mahsulot", "mahsulotlar", "товар", "товары",
-    ]
-    return any(k in text for k in keywords)
-
-
-def mentions_catalog(text: str) -> bool:
-    text = normalize_text(text).lower()
-    markers = ["catalog", "katalog", "каталог", "katalo", "катало", "products", "товар", "mahsulot"]
-    return any(m in text for m in markers)
-
-
-def is_greeting_only(text: str) -> bool:
-    s = normalize_text(text).lower()
-    s = re.sub(r"[^\w\s'’`-]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    if not s:
-        return False
-    greetings = {
-        "hi", "hello", "hey",
-        "salom", "assalomu alaykum", "assalomu", "alaykum",
-        "привет", "здравствуйте", "сәлем", "салем",
-    }
-    return s in greetings or (len(s.split()) <= 2 and s in {"salom", "hello", "hi", "hey", "привет", "сәлем"})
-
-
-def is_low_signal_message(text: str) -> bool:
-    s = normalize_text(text)
-    if not s:
-        return False
-
-    compact = re.sub(r"\s+", "", s)
-    emoji_only_re = re.compile(r"^[\u2600-\u27BF\U0001F300-\U0001FAFF\U0001F1E6-\U0001F1FF\u200d\ufe0f]+$")
-    if compact and emoji_only_re.fullmatch(compact):
-        return True
-
-    if compact.lower() in {"+", "++", "ok", "okk"}:
-        return True
-
-    return False
-
-
-def looks_like_sales_question(text: str) -> bool:
-    s = normalize_text(text).lower()
-    if not s:
-        return False
-    keywords = [
-        "price", "prices", "catalog", "delivery", "shipping", "order", "buy", "purchase",
-        "narx", "narxlari", "qancha", "katalog", "yetkazib", "buyurtma", "zakaz", "buyurtma bermoqchiman",
-        "zakaz qilmoqchiman", "olmoqchiman", "olaman", "mahsulot", "model", "rang",
-        "цена", "цены", "каталог", "доставка", "заказ", "купить", "товар", "оформить",
-        "баға", "каталог", "жеткізу", "тапсырыс", "тауар", "сатып алу",
-    ]
-    if any(k in s for k in keywords):
-        return True
-
-    # Quantity/wholesale intent patterns like "2 kilo", "5 dona", "10 kg".
-    if re.search(r"\b\d+\s*(kg|kilo|кг|dona|donaa|ta|pcs|piece|qop|мешок)\b", s):
-        return True
-
-    return False
-
-
-def wants_deal_handoff(text: str) -> bool:
-    s = normalize_text(text).lower()
-    if not s:
-        return False
-    keywords = [
-        "deal", "make a deal", "let's deal", "order", "buy", "purchase", "ready to buy",
-        "заказ", "оформить", "оформим", "куплю", "покупка", "сделка",
-        "zakaz", "zakaz qilmoqchiman", "buyurtma", "buyurtma bermoqchiman", "olaman", "olmoqchiman", "kelishuv",
-        "тапсырыс", "сатып аламын", "келісім",
-    ]
-    return any(k in s for k in keywords)
-
-
-def deal_handoff_text(lang: str) -> str:
-    if lang == "en":
-        return "Great. To finalize the deal, please contact our admin on Telegram: @milana_admin25."
-    if lang == "ru":
-        return "Отлично. Чтобы оформить сделку, пожалуйста, свяжитесь с нашим админом в Telegram: @milana_admin25."
-    if lang == "kk":
-        return "Керемет. Мәмілені рәсімдеу үшін Telegram-дағы әкімшіге жазыңыз: @milana_admin25."
-    return "Zo'r. Kelishuvni yakunlash uchun Telegramdagi adminimizga yozing: @milana_admin25."
-
-
-def detect_customer_language(text: str) -> str:
-    lower = normalize_text(text).lower()
-    if not lower:
-        return ""
-
-    english_words = {
-        "hi", "hello", "hey", "can", "could", "would", "make", "purchase", "buy", "order",
-        "price", "how", "much", "where", "shipping", "delivery", "catalog", "available",
-        "need", "want", "please", "thanks", "thank", "size", "color", "model",
-    }
-    uzbek_latin_markers = {
-        "salom", "assalomu", "alaykum", "narx", "qancha", "qayer", "kerak", "olmoq",
-        "sotib", "mahsulot", "katalog", "manzil", "rahmat", "bormi", "necha",
-    }
-    kazakh_markers = {
-        "сәлем", "салем", "қалай", "баға", "бағасы", "қанша", "қажет", "жеткізу",
-        "тапсырыс", "каталог", "тауар", "бар", "мен", "сіз", "үшін",
-    }
-    russian_words = {
-        "здравствуйте", "привет", "цена", "сколько", "купить", "заказ", "доставка",
-        "каталог", "размер", "цвет", "модель", "есть", "можно",
-    }
-
-    words = set(re.findall(r"[a-zA-Z']+|[А-Яа-яЁё]+", lower))
-    if any(m in lower for m in kazakh_markers):
-        return "kk"
-    if words & russian_words:
-        return "ru"
-    if words & english_words and not (words & uzbek_latin_markers):
-        return "en"
-    if re.search(r"[А-Яа-яЁё]", lower):
-        return "ru"
-    if words & uzbek_latin_markers:
-        return "uz"
-    return ""
-
-
-def language_instruction_for(text: str) -> str:
-    lang = detect_customer_language(text)
-    if lang == "en":
-        return "The latest customer message is in English. Reply only in English. Do not use Uzbek, Russian, or Kazakh words."
-    if lang == "ru":
-        return "Последнее сообщение клиента на русском. Отвечай только на русском языке."
-    if lang == "kk":
-        return "Клиенттің соңғы хабары қазақ тілінде. Тек қазақ тілінде жауап бер."
-    if lang == "uz":
-        return "Mijozning oxirgi xabari o'zbek tilida. Faqat o'zbek tilida javob ber."
-    return ""
-
-
-def get_catalog_link(business: dict) -> str:
-    link = (business or {}).get("catalog_link") or (business or {}).get("catalog") or (business or {}).get("website") or ""
-    link = normalize_text(link)
-    if link and not link.startswith(("http://", "https://")):
-        link = f"https://{link}"
-    return link
-
-
-def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
-    catalog_link = get_catalog_link(business)
-    if catalog_link and catalog_link in (reply_text or ""):
-        reply_text = (reply_text or "").replace(catalog_link, "")
-    return re.sub(r"\s+", " ", normalize_text(reply_text)).strip()
-
-
-def complete_sentence_reply(text: str, limit: int = 700) -> str:
-    text = normalize_text(text)
-    text = re.sub(r"(?:joylashuv xaritasini\s*)?(?:ko['‘’`]?rish|ochish)\s+uchun\s*[:：]?\s*$", "", text, flags=re.IGNORECASE).strip()
-    text = re.sub(r"(?:link|havola|ссылка)\s*[:：]\s*$", "", text, flags=re.IGNORECASE).strip()
-    if not text:
-        return ""
-    if len(text) > limit:
-        text = text[:limit].rsplit(" ", 1)[0].strip()
-    if not re.search(r"[.!?…]$", text):
-        text += "."
-    return text
-
-
 def should_reply_in_group(message):
     """
     Group reply modes:
     - all: reply to all user messages in groups/supergroups
     - mention_or_reply: reply only when mentioned/replied to
     """
-    mode = TELEGRAM_GROUP_REPLY_MODE or "mention_or_reply"
+    mode = TELEGRAM_GROUP_REPLY_MODE or "all"
+    if mode == "all":
+        return True
 
     text = normalize_text(message.get("text")).lower()
     mention = f"@{TELEGRAM_BOT_USERNAME}" if TELEGRAM_BOT_USERNAME else ""
@@ -292,24 +88,8 @@ def should_reply_in_group(message):
 
     reply_from = (message.get("reply_to_message") or {}).get("from") or {}
     replied_to_bot = is_own_or_any_bot_user(reply_from)
-    is_reply_chain = bool(message.get("reply_to_message"))
 
-    # Never join user-to-user reply chains unless they explicitly address the bot.
-    if is_reply_chain and not replied_to_bot and not has_mention:
-        return False
-
-    if mode == "all":
-        return True
-
-    # Mention/reply mode: answer if directly addressed,
-    # OR if message is standalone and clearly a sales question.
-    if has_mention or replied_to_bot:
-        return True
-
-    if not is_reply_chain and looks_like_sales_question(text):
-        return True
-
-    return False
+    return has_mention or replied_to_bot
 
 
 def already_processed(cache, event_id, ttl=3600):
@@ -338,19 +118,18 @@ def safe_json(response):
         return {"text": getattr(response, "text", "")}
 
 
-def get_telegram_bot_id(business: dict = None):
+def get_telegram_bot_id():
     global TELEGRAM_BOT_ID
 
     if TELEGRAM_BOT_ID:
         return TELEGRAM_BOT_ID
 
-    token = get_telegram_bot_token_for_business(business)
-    if not token:
+    if not TELEGRAM_BOT_TOKEN:
         return None
 
     try:
         response = requests.get(
-            f"https://api.telegram.org/bot{token}/getMe",
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe",
             timeout=15,
         )
         data = safe_json(response)
@@ -363,52 +142,13 @@ def get_telegram_bot_id(business: dict = None):
     return None
 
 
-def get_group_admin_ids(chat_id, ttl_seconds=300, business: dict = None):
-    chat_id = str(chat_id or "")
-    token = get_telegram_bot_token_for_business(business)
-    if not chat_id or not token:
-        return set()
-
-    now = time.time()
-    cached = TELEGRAM_CHAT_ADMINS_CACHE.get(chat_id)
-    if cached and now - float(cached.get("ts", 0)) < ttl_seconds:
-        return set(cached.get("ids", []))
-
-    try:
-        response = requests.get(
-            f"https://api.telegram.org/bot{token}/getChatAdministrators",
-            params={"chat_id": chat_id},
-            timeout=20,
-        )
-        data = safe_json(response)
-        ids = set()
-        if response.ok and data.get("ok"):
-            for item in data.get("result", []) or []:
-                user = item.get("user") or {}
-                uid = str(user.get("id") or "")
-                if uid:
-                    ids.add(uid)
-        TELEGRAM_CHAT_ADMINS_CACHE[chat_id] = {"ts": now, "ids": list(ids)}
-        return ids
-    except Exception as exc:
-        log("Could not fetch Telegram group admins", {"chat_id": chat_id, "error": str(exc)})
-        return set()
-
-
-def is_group_admin(chat_id, user_id, business: dict = None):
-    uid = str(user_id or "")
-    if not uid:
-        return False
-    return uid in get_group_admin_ids(chat_id, business=business)
-
-
-def is_own_or_any_bot_user(user, business: dict = None):
+def is_own_or_any_bot_user(user):
     if not user:
         return False
 
     user_id = str(user.get("id") or "")
     username = normalize_text(user.get("username")).lower().replace("@", "")
-    bot_id = get_telegram_bot_id(business)
+    bot_id = get_telegram_bot_id()
 
     return (
         bool(user.get("is_bot"))
@@ -417,14 +157,14 @@ def is_own_or_any_bot_user(user, business: dict = None):
     )
 
 
-def is_telegram_bot_authored_message(message, business: dict = None):
+def is_telegram_bot_authored_message(message):
     if not message:
         return True
 
-    if is_own_or_any_bot_user(message.get("from") or {}, business):
+    if is_own_or_any_bot_user(message.get("from") or {}):
         return True
 
-    if is_own_or_any_bot_user(message.get("via_bot") or {}, business):
+    if is_own_or_any_bot_user(message.get("via_bot") or {}):
         return True
 
     # Posts from channels/anonymous admins do not represent a customer DM.
@@ -546,8 +286,7 @@ DEFAULT_AI_PROMPT_SETTINGS = {
         "- Sound like a natural Telegram sales manager.\n"
         "- In groups, answer only when mentioned or replied to.\n"
         "- Avoid long lists unless the customer asks for a list.\n"
-        "- Share Telegram catalog/group links only when relevant.\n"
-        "- If customer is ready to make a deal/order, direct them to @milana_admin25."
+        "- Share Telegram catalog/group links only when relevant."
     ),
     "opening_message": "Assalomu alaykum 😊 Qanday yordam kerak?",
     "lead_collection_rules": (
@@ -647,7 +386,7 @@ Knowledge:
 """
 
 
-def get_recent_chat_history(customer_id, platform="telegram", channel=None, limit=10):
+def get_recent_chat_history(customer_id, platform="telegram", channel=None, limit=10, business_id=None):
     try:
         query = (
             supabase.table("inbox_messages")
@@ -655,6 +394,9 @@ def get_recent_chat_history(customer_id, platform="telegram", channel=None, limi
             .eq("customer_id", str(customer_id))
             .eq("platform", platform)
         )
+
+        if business_id:
+            query = query.eq("business_id", str(business_id))
 
         if channel:
             query = query.eq("channel", channel)
@@ -683,7 +425,7 @@ def infer_ai_provider(model: str) -> str:
         return "gemini"
     if model.startswith("claude"):
         return "anthropic"
-    return "mistral"
+    return "openai"
 
 
 def get_ai_provider(business: dict) -> str:
@@ -855,10 +597,6 @@ def call_ai_chat(messages, business, log_label):
 
 def clean_sales_reply(reply_text, user_text=""):
     user = normalize_text(user_text).lower()
-    lang = detect_customer_language(user_text)
-
-    if wants_deal_handoff(user_text):
-        return deal_handoff_text(lang)
 
     if any(phrase in user for phrase in [
         "meni haqimda hamma ma'lumotni unut",
@@ -896,12 +634,6 @@ def clean_sales_reply(reply_text, user_text=""):
 
     text = normalize_text(reply_text)
     if not text:
-        if lang == "en":
-            return "Hello! How can I help you?"
-        if lang == "ru":
-            return "Здравствуйте! Чем могу помочь?"
-        if lang == "kk":
-            return "Сәлеметсіз бе! Қалай көмектесе аламын?"
         return "Assalomu alaykum 😊 Qanday yordam kerak?"
 
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
@@ -943,45 +675,12 @@ def clean_sales_reply(reply_text, user_text=""):
     price_ask = any(k in user for k in ["narx", "nechpul", "qancha", "цена", "сколько", "price"])
     has_number = bool(re.search(r"\d", text))
     if price_ask and not has_number:
-        if lang == "en":
-            text = "You can view our catalog through the link. Which products are you interested in?"
-        elif lang == "ru":
-            text = "Вы можете посмотреть наш каталог по ссылке. Какие товары вас интересуют?"
-        elif lang == "kk":
-            text = "Біздің каталогты төмендегі сілтеме арқылы көре аласыз. Қай тауарлар сізді қызықтырады?"
-        else:
-            text = "Katalogimizga quyidagi havoladan kirishingiz mumkin. Qaysi mahsulotlar sizni qiziqtirmoqda?"
+        text = "Narxni aniq aytishim uchun model yoki variantni yozing 😊"
 
-    if lang == "en":
-        has_cyr = bool(re.search(r"[А-Яа-яЁё]", text))
-        uz_markers = ("salom", "assalomu", "alaykum", "qaysi", "mahsulot", "katalog")
-        low = text.lower()
-        if has_cyr or any(m in low for m in uz_markers):
-            if price_ask:
-                text = "You can view our catalog through the link. Which products are you interested in?"
-            else:
-                text = "Hello! Of course. Which products are you interested in?"
+    if len(text) > 500:
+        text = text[:500].rsplit(" ", 1)[0].strip()
 
-    if is_greeting_only(user_text) and mentions_catalog(text):
-        if lang == "en":
-            text = "Hello! How can I help you today?"
-        elif lang == "ru":
-            text = "Здравствуйте! Чем могу помочь?"
-        elif lang == "kk":
-            text = "Сәлеметсіз бе! Қалай көмектесе аламын?"
-        else:
-            text = "Assalomu alaykum 😊 Qanday yordam kerak?"
-
-    text = complete_sentence_reply(text, limit=900)
-    if text:
-        return text
-    if lang == "en":
-        return "Understood."
-    if lang == "ru":
-        return "Понял."
-    if lang == "kk":
-        return "Түсіндім."
-    return "Tushunarli 👍"
+    return text or "Tushunarli 👍"
 
 def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private"):
     history = get_recent_chat_history(
@@ -989,6 +688,7 @@ def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private
         platform="telegram",
         channel=channel,
         limit=8,
+        business_id=business.get("id"),
     )
 
     messages = [{"role": "system", "content": build_telegram_system_prompt(business)}]
@@ -1000,33 +700,14 @@ def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private
             messages.append({"role": role, "content": content})
 
     messages.append({"role": "user", "content": user_text})
-    language_instruction = language_instruction_for(user_text)
-    if language_instruction:
-        messages.insert(1, {"role": "system", "content": language_instruction})
 
     try:
         reply = call_ai_chat(messages, business, "Telegram AI response")
-        if reply:
-            return clean_sales_reply(reply[:1500], user_text)
-        lang = detect_customer_language(user_text)
-        if lang == "en":
-            return "Your message has been received."
-        if lang == "ru":
-            return "Ваше сообщение получено."
-        if lang == "kk":
-            return "Хабарыңыз қабылданды."
-        return "Xabaringiz qabul qilindi 😊"
+        return clean_sales_reply(reply[:1500], user_text) if reply else "Assalomu alaykum 😊 Qanday yordam kerak?"
 
     except Exception as exc:
         log("Telegram AI error", str(exc))
-        lang = detect_customer_language(user_text)
-        if lang == "en":
-            return "Your message has been received."
-        if lang == "ru":
-            return "Ваше сообщение получено."
-        if lang == "kk":
-            return "Хабарыңыз қабылданды."
-        return "Xabaringiz qabul qilindi 😊"
+        return "Xabaringiz qabul qilindi 😊 Qanday yordam kerak?"
 
 
 def save_telegram_message(
@@ -1070,10 +751,9 @@ def save_telegram_message(
         log("Could not save Telegram message", str(exc))
 
 
-def send_telegram_bot_message(chat_id, text, reply_to_message_id=None, business: dict = None):
-    token = get_telegram_bot_token_for_business(business)
-    if not token:
-        log("Missing Telegram bot token")
+def send_telegram_bot_message(chat_id, text, reply_to_message_id=None):
+    if not TELEGRAM_BOT_TOKEN:
+        log("Missing TELEGRAM_BOT_TOKEN")
         return None
 
     payload = {
@@ -1086,7 +766,7 @@ def send_telegram_bot_message(chat_id, text, reply_to_message_id=None, business:
         payload["reply_to_message_id"] = reply_to_message_id
 
     response = requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         json=payload,
         timeout=30,
     )
@@ -1095,44 +775,8 @@ def send_telegram_bot_message(chat_id, text, reply_to_message_id=None, business:
     return response
 
 
-def send_telegram_catalog_button(chat_id, business, text="", reply_to_message_id=None):
-    token = get_telegram_bot_token_for_business(business)
-    if not token:
-        return None
-
-    catalog_link = get_catalog_link(business)
-    if not catalog_link:
-        return None
-
-    body_text = clean_ai_reply_for_catalog(text, business) or "Katalogimizga quyidagi havoladan kirishingiz mumkin. Qaysi mahsulotlar sizni qiziqtirmoqda?"
-    payload = {
-        "chat_id": chat_id,
-        "text": body_text[:4096],
-        "disable_web_page_preview": False,
-        "reply_markup": {
-            "inline_keyboard": [
-                [
-                    {"text": "Katalogni ko'rish", "url": catalog_link}
-                ]
-            ]
-        },
-    }
-
-    if reply_to_message_id:
-        payload["reply_to_message_id"] = reply_to_message_id
-
-    response = requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        json=payload,
-        timeout=30,
-    )
-    log("Telegram catalog button send result", {"status": response.status_code, "body": response.text})
-    return response
-
-
-def send_telegram_photo(chat_id, photo_file_id, caption="", reply_to_message_id=None, business: dict = None):
-    token = get_telegram_bot_token_for_business(business)
-    if not token:
+def send_telegram_photo(chat_id, photo_file_id, caption="", reply_to_message_id=None):
+    if not TELEGRAM_BOT_TOKEN:
         return None
 
     payload = {
@@ -1147,7 +791,7 @@ def send_telegram_photo(chat_id, photo_file_id, caption="", reply_to_message_id=
         payload["reply_to_message_id"] = reply_to_message_id
 
     response = requests.post(
-        f"https://api.telegram.org/bot{token}/sendPhoto",
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
         json=payload,
         timeout=30,
     )
@@ -1155,9 +799,8 @@ def send_telegram_photo(chat_id, photo_file_id, caption="", reply_to_message_id=
     return response
 
 
-def send_telegram_video(chat_id, video_file_id, caption="", reply_to_message_id=None, business: dict = None):
-    token = get_telegram_bot_token_for_business(business)
-    if not token:
+def send_telegram_video(chat_id, video_file_id, caption="", reply_to_message_id=None):
+    if not TELEGRAM_BOT_TOKEN:
         return None
 
     payload = {
@@ -1172,7 +815,7 @@ def send_telegram_video(chat_id, video_file_id, caption="", reply_to_message_id=
         payload["reply_to_message_id"] = reply_to_message_id
 
     response = requests.post(
-        f"https://api.telegram.org/bot{token}/sendVideo",
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVideo",
         json=payload,
         timeout=30,
     )
@@ -1180,9 +823,8 @@ def send_telegram_video(chat_id, video_file_id, caption="", reply_to_message_id=
     return response
 
 
-def send_telegram_voice(chat_id, voice_file_id, reply_to_message_id=None, business: dict = None):
-    token = get_telegram_bot_token_for_business(business)
-    if not token:
+def send_telegram_voice(chat_id, voice_file_id, reply_to_message_id=None):
+    if not TELEGRAM_BOT_TOKEN:
         return None
 
     payload = {
@@ -1194,7 +836,7 @@ def send_telegram_voice(chat_id, voice_file_id, reply_to_message_id=None, busine
         payload["reply_to_message_id"] = reply_to_message_id
 
     response = requests.post(
-        f"https://api.telegram.org/bot{token}/sendVoice",
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendVoice",
         json=payload,
         timeout=30,
     )
@@ -1202,14 +844,13 @@ def send_telegram_voice(chat_id, voice_file_id, reply_to_message_id=None, busine
     return response
 
 
-def get_file_url(file_id, business: dict = None):
-    token = get_telegram_bot_token_for_business(business)
-    if not token or not file_id:
+def get_file_url(file_id):
+    if not TELEGRAM_BOT_TOKEN or not file_id:
         return None
 
     try:
         response = requests.get(
-            f"https://api.telegram.org/bot{token}/getFile",
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
             params={"file_id": file_id},
             timeout=30,
         )
@@ -1217,7 +858,7 @@ def get_file_url(file_id, business: dict = None):
         if response.ok:
             file_path = response.json().get("result", {}).get("file_path")
             if file_path:
-                return f"https://api.telegram.org/file/bot{token}/{file_path}"
+                return f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
 
     except Exception as exc:
         log("Could not get Telegram file URL", str(exc))
@@ -1402,6 +1043,9 @@ async def telegram_webhook(request: Request):
         if not message:
             return JSONResponse({"status": "ignored"})
 
+        if is_telegram_bot_authored_message(message):
+            return JSONResponse({"status": "ignored_bot"})
+
         chat = message.get("chat", {})
         user = message.get("from", {})
 
@@ -1421,8 +1065,6 @@ async def telegram_webhook(request: Request):
         business = get_active_business()
         if not business:
             return JSONResponse({"status": "no_business"})
-        if is_telegram_bot_authored_message(message, business):
-            return JSONResponse({"status": "ignored_bot"})
 
         if is_group_chat and not should_reply_in_group(message):
                 return JSONResponse({"status": "ignored_group_message"})
@@ -1455,25 +1097,8 @@ async def telegram_webhook(request: Request):
                 chat_id=chat_id,
             )
 
-            # Never auto-reply to group admins.
-            if is_group_chat and is_group_admin(chat_id, sender_id, business):
-                return JSONResponse({"status": "ignored_group_admin_message"})
-
-            # If this message is in an admin-handled reply context, skip bot reply.
-            if is_group_chat:
-                reply_to = message.get("reply_to_message") or {}
-                reply_from = reply_to.get("from") or {}
-                reply_from_id = reply_from.get("id")
-                if reply_to.get("sender_chat"):
-                    return JSONResponse({"status": "ignored_admin_thread"})
-                if reply_from_id and is_group_admin(chat_id, reply_from_id, business):
-                    return JSONResponse({"status": "ignored_admin_thread"})
-
             if not is_chat_ai_enabled("telegram", channel, customer_id, business.get("id")):
                 return JSONResponse({"status": "ai_disabled"})
-
-            if is_low_signal_message(combined_text):
-                return JSONResponse({"status": "ignored_low_signal"})
 
             reply = get_ai_reply(
                 user_text=combined_text,
@@ -1482,29 +1107,16 @@ async def telegram_webhook(request: Request):
                 channel=channel,
             )
 
-            should_send_catalog = bool(get_catalog_link(business)) and wants_catalog(combined_text) and not is_greeting_only(combined_text)
-
-            if should_send_catalog:
-                send_result = send_telegram_catalog_button(
-                    chat_id=chat_id,
-                    business=business,
-                    text=reply,
-                    reply_to_message_id=message_id if chat_type in ["group", "supergroup"] else None,
-                )
-                saved_reply_text = clean_ai_reply_for_catalog(reply, business) + "\n[Catalog button sent]"
-            else:
-                send_result = send_telegram_bot_message(
-                    chat_id=chat_id,
-                    text=reply,
-                    reply_to_message_id=message_id if chat_type in ["group", "supergroup"] else None,
-                    business=business,
-                )
-                saved_reply_text = reply
+            send_result = send_telegram_bot_message(
+                chat_id=chat_id,
+                text=reply,
+                reply_to_message_id=message_id if chat_type in ["group", "supergroup"] else None,
+            )
 
             save_telegram_message(
                 business=business,
                 customer_id=customer_id,
-                text=saved_reply_text,
+                text=reply,
                 direction="outbound",
                 message_id=safe_json(send_result).get("result", {}).get("message_id", ""),
                 raw_payload=safe_json(send_result),
@@ -1530,7 +1142,7 @@ async def telegram_webhook(request: Request):
                 customer_name=customer_name,
                 chat_id=chat_id,
                 media_type="photo",
-                media_url=get_file_url(file_id, business),
+                media_url=get_file_url(file_id),
                 media_file_id=file_id,
             )
 
@@ -1550,7 +1162,7 @@ async def telegram_webhook(request: Request):
                 customer_name=customer_name,
                 chat_id=chat_id,
                 media_type="video",
-                media_url=get_file_url(file_id, business),
+                media_url=get_file_url(file_id),
                 media_file_id=file_id,
             )
 
@@ -1570,7 +1182,7 @@ async def telegram_webhook(request: Request):
                 customer_name=customer_name,
                 chat_id=chat_id,
                 media_type="voice",
-                media_url=get_file_url(file_id, business),
+                media_url=get_file_url(file_id),
                 media_file_id=file_id,
             )
 
@@ -1590,7 +1202,7 @@ async def telegram_webhook(request: Request):
                 customer_name=customer_name,
                 chat_id=chat_id,
                 media_type="file",
-                media_url=get_file_url(file_id, business),
+                media_url=get_file_url(file_id),
                 media_file_id=file_id,
             )
 
@@ -1718,9 +1330,6 @@ async def process_telegram_user_event(event):
             if not is_chat_ai_enabled("telegram", "telegram_user_private", sender_id, business.get("id")):
                 return
 
-            if is_low_signal_message(combined_text):
-                return
-
             reply = get_ai_reply(
                 user_text=combined_text,
                 business=business,
@@ -1728,21 +1337,12 @@ async def process_telegram_user_event(event):
                 channel="telegram_user_private",
             )
 
-            should_send_catalog = bool(get_catalog_link(business)) and wants_catalog(combined_text) and not is_greeting_only(combined_text)
-            outbound_text = reply
-            if should_send_catalog:
-                outbound_text = (
-                    clean_ai_reply_for_catalog(reply, business)
-                    + f"\nKatalogni ko'rish: {get_catalog_link(business)}"
-                ).strip()
-                outbound_text += "\n[Catalog button sent]"
-
-            sent = await event.respond(outbound_text)
+            sent = await event.respond(reply)
 
             save_telegram_message(
                 business=business,
                 customer_id=sender_id,
-                text=outbound_text,
+                text=reply,
                 direction="outbound",
                 message_id=getattr(sent, "id", ""),
                 raw_payload={
@@ -1785,6 +1385,43 @@ async def send_telegram_user_message(customer_id, text):
             "customer_name": sender_name or str(customer_id),
         }
 
+    except Exception as exc:
+        return False, {"error": str(exc)}
+
+
+async def edit_telegram_user_message(customer_id, message_id, text):
+    global TELEGRAM_USER_CLIENT
+
+    if not TELEGRAM_USER_CLIENT:
+        return False, {"error": "Telegram private user client is not running"}
+
+    try:
+        entity = await TELEGRAM_USER_CLIENT.get_entity(int(customer_id))
+        edited = await TELEGRAM_USER_CLIENT.edit_message(entity, int(message_id), text[:4096])
+        return True, {
+            "message_id": getattr(edited, "id", message_id),
+            "customer_id": str(customer_id),
+            "chat_id": str(customer_id),
+        }
+    except Exception as exc:
+        return False, {"error": str(exc)}
+
+
+async def delete_telegram_user_message(customer_id, message_id):
+    global TELEGRAM_USER_CLIENT
+
+    if not TELEGRAM_USER_CLIENT:
+        return False, {"error": "Telegram private user client is not running"}
+
+    try:
+        entity = await TELEGRAM_USER_CLIENT.get_entity(int(customer_id))
+        deleted = await TELEGRAM_USER_CLIENT.delete_messages(entity, [int(message_id)])
+        return True, {
+            "message_id": str(message_id),
+            "customer_id": str(customer_id),
+            "chat_id": str(customer_id),
+            "deleted": deleted,
+        }
     except Exception as exc:
         return False, {"error": str(exc)}
 
