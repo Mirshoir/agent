@@ -161,7 +161,7 @@ WHATSAPP_EMBEDDED_REDIRECT_URI = os.getenv(
 WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
 WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
 WHATSAPP_BUSINESS_ACCOUNT_ID = os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID", "")
-WHATSAPP_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
+WHATSAPP_FALLBACK_MODEL = os.getenv("OPENAI_MODEL", os.getenv("MISTRAL_MODEL", "gpt-4o-mini"))
 WHATSAPP_CATALOG_LINK = os.getenv("CATALOG_LINK", "Catalog link will be shared soon.")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
@@ -4140,7 +4140,7 @@ def get_whatsapp_ai_reply(phone: str, user_text: str, business: dict) -> str:
 
     try:
         business_with_fallback_model = dict(business or {})
-        business_with_fallback_model.setdefault("ai_model", WHATSAPP_MISTRAL_MODEL)
+        business_with_fallback_model.setdefault("ai_model", WHATSAPP_FALLBACK_MODEL)
         reply = call_ai_chat(messages, business_with_fallback_model, "WhatsApp AI response")
         if reply:
             return clean_sales_reply(reply[:1500], user_text)
@@ -5113,6 +5113,7 @@ async def get_conversations_v2(
         business_id: str = "",
         include_raw: bool = False,
         fast: bool = False,
+        no_cache: bool = False,
         authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
@@ -5139,7 +5140,7 @@ async def get_conversations_v2(
         )
         now_ts = time.time()
         cached = _conversations_cache.get(cache_key)
-        if cached and (now_ts - cached[0]) <= CONVERSATIONS_CACHE_TTL_SECONDS:
+        if (not no_cache) and cached and (now_ts - cached[0]) <= CONVERSATIONS_CACHE_TTL_SECONDS:
             return cached[1]
 
         # Keep payload slim on hot path; this endpoint is polled frequently.
@@ -5225,10 +5226,11 @@ async def get_conversations_v2(
             'count': len(conversations),
             'data': conversations
         }
-        _conversations_cache[cache_key] = (time.time(), response)
-        if len(_conversations_cache) > 120:
-            for key in sorted(_conversations_cache, key=lambda item: _conversations_cache[item][0])[:40]:
-                _conversations_cache.pop(key, None)
+        if not no_cache:
+            _conversations_cache[cache_key] = (time.time(), response)
+            if len(_conversations_cache) > 120:
+                for key in sorted(_conversations_cache, key=lambda item: _conversations_cache[item][0])[:40]:
+                    _conversations_cache.pop(key, None)
         return response
 
     except Exception as e:
@@ -5246,6 +5248,7 @@ async def get_conversation_messages_v2(
         limit: int = 200,
         mark_read: bool = True,
         include_raw: bool = False,
+        no_cache: bool = False,
         authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
@@ -5283,7 +5286,7 @@ async def get_conversation_messages_v2(
         )
         now_ts = time.time()
         cached = _conversation_messages_cache.get(cache_key)
-        if cached and (now_ts - cached[0]) <= CONVERSATION_MESSAGES_CACHE_TTL_SECONDS:
+        if (not no_cache) and cached and (now_ts - cached[0]) <= CONVERSATION_MESSAGES_CACHE_TTL_SECONDS:
             if mark_read:
                 def mark_read_cached_task():
                     try:
@@ -5469,10 +5472,11 @@ async def get_conversation_messages_v2(
             'count': len(messages),
             'data': messages
         }
-        _conversation_messages_cache[cache_key] = (time.time(), response_payload)
-        if len(_conversation_messages_cache) > 500:
-            for stale_key in sorted(_conversation_messages_cache, key=lambda item: _conversation_messages_cache[item][0])[:150]:
-                _conversation_messages_cache.pop(stale_key, None)
+        if not no_cache:
+            _conversation_messages_cache[cache_key] = (time.time(), response_payload)
+            if len(_conversation_messages_cache) > 500:
+                for stale_key in sorted(_conversation_messages_cache, key=lambda item: _conversation_messages_cache[item][0])[:150]:
+                    _conversation_messages_cache.pop(stale_key, None)
         return response_payload
 
     except Exception as e:
