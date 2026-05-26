@@ -4386,14 +4386,14 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     showToast(clean ? `Owner scoped to ${clean}` : 'Owner scope cleared');
   };
 
-  const loadThread = async (conversationId, { silent = false, markRead = true } = {}) => {
+  const loadThread = async (conversationId, { silent = false, markRead = true, limit = 200 } = {}) => {
     if (!conversationId || !liveMode) return;
     const inFlight = threadLoadPromisesRef.current[conversationId];
     if (inFlight) return inFlight;
     if (!silent) setThreadLoading(true);
     const request = (async () => {
       try {
-        const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?mark_read=${markRead ? '1' : '0'}`);
+        const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?mark_read=${markRead ? '1' : '0'}&limit=${Math.max(1, Number(limit || 200))}`);
         const normalized = (data.data || []).map(normalizeMessage);
         setThreads(prev => ({
           ...prev,
@@ -4427,7 +4427,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       const currentMessages = getThreadMessages(threads[conversationId]);
       if (!conversationId || currentMessages.length > 0) continue;
       threadWarmupRunningRef.current += 1;
-      loadThread(conversationId, { silent: true, markRead: false })
+      loadThread(conversationId, { silent: true, markRead: false, limit: 120 })
         .catch(() => false)
         .finally(() => {
           threadWarmupRunningRef.current = Math.max(0, threadWarmupRunningRef.current - 1);
@@ -4640,7 +4640,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
 
   useEffect(() => {
     const cached = getThreadMessages(threads[selectedId]);
-    loadThread(selectedId, { silent: cached.length > 0 });
+    loadThread(selectedId, { silent: cached.length > 0, limit: 300 });
   }, [selectedId, liveMode]);
 
   useEffect(() => {
