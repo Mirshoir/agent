@@ -197,6 +197,8 @@ const MANUAL_CLIENTS_STORAGE_KEY = 'instaagent_manual_clients';
 const OPERATOR_DEALS_STORAGE_KEY = 'instaagent_operator_deals';
 const OPERATOR_ADMIN_NOTES_STORAGE_KEY = 'instaagent_operator_admin_notes';
 const USER_PROFILE_STORAGE_KEY = 'instaagent_user_profiles';
+const CACHED_CONVERSATIONS_STORAGE_KEY = 'instaagent_cached_conversations_v1';
+const CACHED_THREADS_STORAGE_KEY = 'instaagent_cached_threads_v1';
 const DASHBOARD_HASH = '#dashboard';
 const UI_LANG_STORAGE_KEY = 'instaagent_ui_lang';
 
@@ -369,6 +371,34 @@ function readStoredObject(key) {
 
 function writeStoredObject(key, value) {
   window.localStorage.setItem(key, JSON.stringify(value || {}));
+}
+
+function loadCachedConversations() {
+  const payload = readStoredObject(CACHED_CONVERSATIONS_STORAGE_KEY);
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const selectedId = String(payload.selectedId || '');
+  return { items, selectedId };
+}
+
+function loadCachedThreads() {
+  const payload = readStoredObject(CACHED_THREADS_STORAGE_KEY);
+  const items = payload.items && typeof payload.items === 'object' ? payload.items : {};
+  return items;
+}
+
+function trimThreadCache(items = {}) {
+  const entries = Object.entries(items || {});
+  if (!entries.length) return {};
+  const sorted = entries.sort((a, b) => Number(b[1]?.updatedAt || 0) - Number(a[1]?.updatedAt || 0));
+  const next = {};
+  sorted.slice(0, 120).forEach(([id, row]) => {
+    const messages = Array.isArray(row?.messages) ? row.messages.slice(-80) : [];
+    next[id] = {
+      updatedAt: Number(row?.updatedAt || Date.now()),
+      messages,
+    };
+  });
+  return next;
 }
 
 function userIdentity(currentUser = {}) {
@@ -1509,10 +1539,10 @@ function buildLeads(conversations, leadStages, leadPrices = {}) {
 
 function localPromptSuggestion(field, currentPrompt = '', goal = '') {
   const intro = {
-    global_prompt: 'You are a natural sales assistant for this business across Instagram, Telegram, and WhatsApp.',
-    instagram_prompt: 'Instagram DM rules:',
-    telegram_prompt: 'Telegram rules:',
-    whatsapp_prompt: 'WhatsApp rules:',
+    global_prompt: 'You are Milana Premium factory sales operator.',
+    instagram_prompt: 'Instagram comment+DM rules:',
+    telegram_prompt: 'Telegram sales rules:',
+    whatsapp_prompt: 'WhatsApp sales rules:',
     opening_message: 'Assalomu alaykum 😊 Qanday yordam kerak?',
     lead_collection_rules: 'Lead collection rules:',
     sales_rules: 'Sales reply rules:',
@@ -1533,16 +1563,19 @@ function localPromptSuggestion(field, currentPrompt = '', goal = '') {
     suggested_prompt: [
       intro,
       `- Reply shortly, warmly, and naturally in the customer's language.`,
-      `- First answer the customer's question, then ask only one simple follow-up question.`,
-      `- Do not ask for phone number or address at the beginning.`,
-      `- Ask for phone/address only when the customer is clearly ready to order.`,
+      `- Use first-touch identity line for new chats.`,
+      `- For price/catalog details, handoff to manager when exact terms are needed.`,
+      `- For Instagram price/catalog comments, use: "Direktdan yozdik, iloji bo'lsa raqamingizni qoldiring."`,
+      `- Collect name/city/phone naturally when qualification starts.`,
+      `- Only answer Milana Premium sales topics: products, catalog, price/order flow, wholesale, delivery, payment, address, warranty, and manager handoff.`,
+      `- Never answer unrelated topics. Refuse briefly and redirect to catalog or manager help.`,
+      `- For price questions, do not invent exact prices; one qop/meshok is usually around 400-500 USD and exact terms go to manager.`,
+      `- Never promise reservation and never invent price/stock/delivery details.`,
+      `- Use +998501551010 for manager handoff when required.`,
       `- Do not repeat "${productHint}" or any product name in every message.`,
-      `- Never invent price, stock, delivery time, discounts, or availability.`,
-      `- Avoid corporate phrases like "manager will contact you" unless the customer asks for a human or is ready to order.`,
-      `- If the customer is annoyed, reply calmly and briefly before continuing.`,
       goal ? `- Main improvement goal: ${goal}.` : '',
     ].filter(Boolean).join('\n'),
-    explanation: 'Made it shorter, clearer, safer for sales replies, and aligned with Instaagent standards.',
+    explanation: 'Aligned with Milana Premium sales-agent Q&A style and handoff policy.',
   };
 }
 
@@ -3876,11 +3909,14 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 
 function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const t = window.STRINGS[lang];
-  const [booting, setBooting] = useState(true);
+  const cachedConversationsRef = useRef(loadCachedConversations());
+  const cachedThreadsRef = useRef(loadCachedThreads());
+  const hasCachedInbox = cachedConversationsRef.current.items.length > 0;
+  const [booting, setBooting] = useState(!hasCachedInbox);
 
-  const [conversations, setConversations] = useState([]);
-  const [selectedId, setSelectedId] = useState('');
-  const [threads, setThreads] = useState({});
+  const [conversations, setConversations] = useState(() => cachedConversationsRef.current.items);
+  const [selectedId, setSelectedId] = useState(() => cachedConversationsRef.current.selectedId || cachedConversationsRef.current.items[0]?.id || '');
+  const [threads, setThreads] = useState(() => cachedThreadsRef.current);
   const [loading, setLoading] = useState(false);
   const [threadLoading, setThreadLoading] = useState(false);
   const [sending, setSending] = useState(false);
@@ -3926,7 +3962,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const seenOperatorTaskIdsRef = useRef(new Set());
   const conv = conversations.find(c => c.id === selectedId);
   const aiOn = conv ? conv.aiOn : false;
-  const messages = threads[selectedId] || window.getThread(selectedId);
+  const messages = (threads[selectedId]?.messages || threads[selectedId]) || window.getThread(selectedId);
   const roleScope = resolveRoleScope(currentUser, businesses);
   const isOperator = roleScope.isOperator;
 
@@ -3938,6 +3974,21 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
+
+  useEffect(() => {
+    writeStoredObject(CACHED_CONVERSATIONS_STORAGE_KEY, {
+      items: conversations,
+      selectedId: selectedId || conversations[0]?.id || '',
+      updatedAt: Date.now(),
+    });
+  }, [conversations, selectedId]);
+
+  useEffect(() => {
+    writeStoredObject(CACHED_THREADS_STORAGE_KEY, {
+      items: trimThreadCache(threads),
+      updatedAt: Date.now(),
+    });
+  }, [threads]);
 
   useEffect(() => {
     liveModeRef.current = liveMode;
@@ -4265,6 +4316,15 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       setSelectedId(current => next.some(c => c.id === current) ? current : next[0].id);
       setLiveMode(true);
       setApiError('');
+      // Warm top threads in background so first open does not block on network.
+      window.setTimeout(() => {
+        next.slice(0, 8).forEach(item => {
+          const cached = threads[item.id]?.messages || threads[item.id];
+          if (!Array.isArray(cached) || !cached.length) {
+            loadThread(item.id, { silent: true, markRead: false });
+          }
+        });
+      }, 0);
       if (sideLoad) {
         loadStats();
         loadBusinesses({ silent: true });
@@ -4278,9 +4338,11 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       }
       setLiveMode(false);
       setApiError(isAbort ? 'Loading... please wait' : `Loading... please wait (${e.message})`);
-      setConversations([]);
-      setThreads({});
-      setSelectedId('');
+      // Keep cached conversations visible when live sync is slow/failing.
+      if (!conversations.length) {
+        setConversations([]);
+        setSelectedId('');
+      }
       return false;
     } finally {
       if (!silent) setLoading(false);
@@ -4307,14 +4369,18 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     showToast(clean ? `Owner scoped to ${clean}` : 'Owner scope cleared');
   };
 
-  const loadThread = async (conversationId, { silent = false } = {}) => {
+  const loadThread = async (conversationId, { silent = false, markRead = true } = {}) => {
     if (!conversationId || !liveMode) return;
     if (!silent) setThreadLoading(true);
     try {
-      const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages`);
+      const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?mark_read=${markRead ? '1' : '0'}`);
+      const normalized = (data.data || []).map(normalizeMessage);
       setThreads(prev => ({
         ...prev,
-        [conversationId]: (data.data || []).map(normalizeMessage),
+        [conversationId]: {
+          updatedAt: Date.now(),
+          messages: normalized,
+        },
       }));
       setConversations(rows => rows.map(item => item.id === conversationId ? clearConversationUnread(item) : item));
       setApiError('');
@@ -4445,7 +4511,16 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         text,
       };
-      setThreads(prev => ({ ...prev, [conv.id]: [...(prev[conv.id] || []), localMessage] }));
+      setThreads(prev => {
+        const existing = prev[conv.id]?.messages || prev[conv.id] || [];
+        return {
+          ...prev,
+          [conv.id]: {
+            updatedAt: Date.now(),
+            messages: [...existing, localMessage],
+          },
+        };
+      });
       return true;
     }
 
