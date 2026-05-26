@@ -3,6 +3,7 @@ import hmac
 import html
 import hashlib
 import base64
+import json
 import requests
 import streamlit as st
 from dotenv import load_dotenv
@@ -212,6 +213,65 @@ def safe_float(value, default=0.0):
         return float(value)
     except Exception:
         return default
+
+
+def parse_json_or_empty(raw_text):
+    text = str(raw_text or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def parse_csv_items(raw_text):
+    text = str(raw_text or "").strip()
+    if not text:
+        return []
+    return [item.strip() for item in text.split(",") if item.strip()]
+
+
+CREATOR_TABLES = [
+    "businesses",
+    "business_users",
+    "dashboard_users",
+    "business_channels",
+    "inbox_messages",
+    "chat_ai_settings",
+    "ai_prompt_settings",
+    "dashboard_workspace_state",
+    "operator_accounts",
+    "operator_tasks",
+]
+
+
+def creator_db_fetch(table_name, select_fields="*", limit=200, order_by="created_at", desc=True, filters=None):
+    query = supabase.table(table_name).select(select_fields)
+    filters = filters or {}
+    for key, value in filters.items():
+        clean_value = str(value).strip()
+        if clean_value:
+            query = query.eq(key, clean_value)
+
+    if order_by:
+        query = query.order(order_by, desc=bool(desc))
+
+    query = query.limit(max(1, min(int(limit or 200), 2000)))
+    return query.execute().data or []
+
+
+def creator_db_insert(table_name, payload):
+    return supabase.table(table_name).insert(payload).execute()
+
+
+def creator_db_update_by_id(table_name, row_id, patch):
+    return supabase.table(table_name).update(patch).eq("id", row_id).execute()
+
+
+def creator_db_delete_by_id(table_name, row_id):
+    return supabase.table(table_name).delete().eq("id", row_id).execute()
 
 
 def login_user(email, password):
@@ -1580,6 +1640,142 @@ def render_admin_users_page(businesses):
                                     st.error(f"Remove failed: {e}")
 
 
+def render_creator_db_control():
+    st.subheader("Creator DB Control")
+    st.caption("Admin-only control center for direct Supabase table operations.")
+
+    table_name = st.selectbox("Table", CREATOR_TABLES)
+    c1, c2, c3, c4 = st.columns([1.3, 1.3, 1, 1])
+    with c1:
+        select_fields = st.text_input("Select fields", value="*")
+    with c2:
+        order_by = st.text_input("Order by", value="created_at")
+    with c3:
+        desc = st.toggle("Desc", value=True)
+    with c4:
+        limit = st.number_input("Limit", min_value=1, max_value=2000, value=200, step=50)
+
+    st.markdown("#### Optional filters (`column = value`)")
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        fk1 = st.text_input("Filter column 1")
+        fv1 = st.text_input("Filter value 1")
+    with f2:
+        fk2 = st.text_input("Filter column 2")
+        fv2 = st.text_input("Filter value 2")
+    with f3:
+        fk3 = st.text_input("Filter column 3")
+        fv3 = st.text_input("Filter value 3")
+
+    filters = {
+        fk1.strip(): fv1,
+        fk2.strip(): fv2,
+        fk3.strip(): fv3,
+    }
+    filters = {k: v for k, v in filters.items() if k}
+
+    refresh_clicked = st.button("Load table rows", type="primary")
+
+    rows_cache_key = f"creator_rows_{table_name}"
+    if refresh_clicked or rows_cache_key not in st.session_state:
+        try:
+            rows = creator_db_fetch(
+                table_name=table_name,
+                select_fields=select_fields.strip() or "*",
+                limit=int(limit),
+                order_by=order_by.strip() or None,
+                desc=desc,
+                filters=filters,
+            )
+            st.session_state[rows_cache_key] = rows
+            st.success(f"Loaded {len(rows)} rows.")
+        except Exception as e:
+            st.error(f"Read failed: {e}")
+
+    rows = st.session_state.get(rows_cache_key, [])
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("### Insert row")
+    insert_json = st.text_area(
+        "Insert payload (JSON object)",
+        height=180,
+        placeholder='{"business_id":"...","platform":"instagram"}',
+        key=f"insert_json_{table_name}",
+    )
+    if st.button("Insert row", key=f"insert_btn_{table_name}"):
+        payload = parse_json_or_empty(insert_json)
+        if not payload:
+            st.warning("Insert payload must be a valid JSON object.")
+        else:
+            try:
+                creator_db_insert(table_name, payload)
+                st.success("Row inserted.")
+            except Exception as e:
+                st.error(f"Insert failed: {e}")
+
+    st.divider()
+    st.markdown("### Update row by `id`")
+    update_id = st.text_input("Row id", key=f"update_id_{table_name}")
+    update_json = st.text_area(
+        "Update patch (JSON object)",
+        height=160,
+        placeholder='{"bot_enabled":true}',
+        key=f"update_json_{table_name}",
+    )
+    if st.button("Update row", key=f"update_btn_{table_name}"):
+        patch = parse_json_or_empty(update_json)
+        if not update_id.strip():
+            st.warning("Row id is required.")
+        elif not patch:
+            st.warning("Update patch must be a valid JSON object.")
+        else:
+            try:
+                creator_db_update_by_id(table_name, update_id.strip(), patch)
+                st.success("Row updated.")
+            except Exception as e:
+                st.error(f"Update failed: {e}")
+
+    st.divider()
+    st.markdown("### Delete row by `id`")
+    delete_id = st.text_input("Row id to delete", key=f"delete_id_{table_name}")
+    if st.button("Delete row", key=f"delete_btn_{table_name}"):
+        if not delete_id.strip():
+            st.warning("Row id is required.")
+        else:
+            try:
+                creator_db_delete_by_id(table_name, delete_id.strip())
+                st.success("Row deleted.")
+            except Exception as e:
+                st.error(f"Delete failed: {e}")
+
+    st.divider()
+    st.markdown("### Bulk delete by ids")
+    bulk_ids = st.text_area(
+        "Comma-separated ids",
+        height=100,
+        placeholder="id1,id2,id3",
+        key=f"bulk_delete_{table_name}",
+    )
+    if st.button("Bulk delete", key=f"bulk_delete_btn_{table_name}"):
+        ids = parse_csv_items(bulk_ids)
+        if not ids:
+            st.warning("Provide at least one id.")
+        else:
+            deleted = 0
+            errors = []
+            for row_id in ids:
+                try:
+                    creator_db_delete_by_id(table_name, row_id)
+                    deleted += 1
+                except Exception as e:
+                    errors.append(f"{row_id}: {e}")
+            if deleted:
+                st.success(f"Deleted {deleted} rows.")
+            if errors:
+                st.error("Some rows failed:\n" + "\n".join(errors[:8]))
+
+
 def login_screen():
     st.markdown('<div class="login-card">', unsafe_allow_html=True)
     st.title("InsaAgent Login")
@@ -1622,6 +1818,7 @@ with st.sidebar:
     menu_items = ["Overview", "Social Sales Chat", "Business Settings", "Account Connections", "Webhook Info"]
     if is_admin:
         menu_items.insert(3, "User Management")
+        menu_items.insert(4, "Creator DB Control")
     page = st.radio("Menu", menu_items)
 
 if is_admin:
@@ -1662,6 +1859,12 @@ elif page == "User Management":
         st.error("Only admin can access user management.")
     else:
         render_admin_users_page(get_all_businesses())
+
+elif page == "Creator DB Control":
+    if not is_admin:
+        st.error("Only admin can access Creator DB Control.")
+    else:
+        render_creator_db_control()
 
 elif page == "Webhook Info":
     st.subheader("Webhook URLs")
