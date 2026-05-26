@@ -10,7 +10,6 @@ import tempfile
 import shutil
 import subprocess
 import requests
-import telegram_bot as telegram_bot_module
 from urllib.parse import urlencode, urlparse, parse_qs, unquote
 from typing import Optional
 from datetime import datetime, timedelta
@@ -154,8 +153,6 @@ STATS_CACHE_TTL_SECONDS = int(os.getenv("STATS_CACHE_TTL_SECONDS", "20"))
 STATS_CACHE: dict[str, dict] = {}
 INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS", str(60 * 60 * 6)))
 INSTAGRAM_PUBLIC_PREVIEW_CACHE: dict[str, tuple[float, dict]] = {}
-INSTAGRAM_CUSTOMER_PROFILE_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_CUSTOMER_PROFILE_CACHE_TTL_SECONDS", str(60 * 60 * 24)))
-INSTAGRAM_CUSTOMER_PROFILE_CACHE: dict[str, tuple[float, dict]] = {}
 WHATSAPP_EMBEDDED_REDIRECT_URI = os.getenv(
     "WHATSAPP_EMBEDDED_REDIRECT_URI",
     f"{PUBLIC_BASE_URL.rstrip('/')}/auth/whatsapp/embedded/callback",
@@ -1017,125 +1014,6 @@ def send_failure_response(result: dict, default_message: str = "Failed to send m
     )
 
 
-def unsupported_message_mutation_response(platform: str, action: str):
-    platform_label = (platform or "this platform").title()
-    return JSONResponse(
-        {
-            "status": "error",
-            "message": f"{platform_label} does not support dashboard {action} for already-delivered messages through the connected API.",
-        },
-        status_code=400,
-    )
-
-
-def telegram_bot_request(business: dict, method: str, payload: dict):
-    token = get_telegram_bot_token(business)
-    if not token:
-        return None
-    return requests.post(
-        f"https://api.telegram.org/bot{token}/{method}",
-        json=payload,
-        timeout=30,
-    )
-
-
-def edit_telegram_bot_message(chat_id: str, message_id: str, text: str, business: dict):
-    return telegram_bot_request(
-        business,
-        "editMessageText",
-        {"chat_id": chat_id, "message_id": int(message_id), "text": text[:4096]},
-    )
-
-
-def delete_telegram_bot_message(chat_id: str, message_id: str, business: dict):
-    return telegram_bot_request(
-        business,
-        "deleteMessage",
-        {"chat_id": chat_id, "message_id": int(message_id)},
-    )
-
-
-async def edit_telegram_user_message_safe(customer_id: str, message_id: str, text: str):
-    handler = getattr(telegram_bot_module, "edit_telegram_user_message", None)
-    if not handler:
-        return False, {"error": "Telegram user-account edit support is not deployed yet. Deploy the updated telegram_bot.py too."}
-    return await handler(customer_id, message_id, text)
-
-
-async def delete_telegram_user_message_safe(customer_id: str, message_id: str):
-    handler = getattr(telegram_bot_module, "delete_telegram_user_message", None)
-    if not handler:
-        return False, {"error": "Telegram user-account delete support is not deployed yet. Deploy the updated telegram_bot.py too."}
-    return await handler(customer_id, message_id)
-
-
-def get_inbox_message_for_dashboard(message_id: str, access: dict):
-    message_id = normalize_id(message_id)
-    if not message_id:
-        return None, JSONResponse({"error": "Missing message_id"}, status_code=400)
-
-    rows = (
-        supabase.table("inbox_messages")
-        .select("*")
-        .eq("id", message_id)
-        .limit(1)
-        .execute()
-        .data
-        or []
-    )
-    if not rows:
-        return None, JSONResponse({"error": "Message not found"}, status_code=404)
-
-    row = rows[0]
-    if not can_access_business(access, normalize_id(row.get("business_id"))):
-        return None, JSONResponse({"error": "Forbidden"}, status_code=403)
-
-    if normalize_id(row.get("direction")).lower() != "outbound":
-        return None, JSONResponse({"error": "Only outbound dashboard messages can be changed"}, status_code=400)
-
-    return row, None
-
-
-def message_target_chat_id(row: dict):
-    payload = row.get("raw_payload") or {}
-    if not isinstance(payload, dict):
-        payload = {}
-    return normalize_id(
-        row.get("chat_id")
-        or payload.get("chat_id")
-        or payload.get("customer_id")
-        or row.get("customer_id")
-    )
-
-
-async def mutate_delivered_telegram_message(row: dict, business: dict, action: str, text: str = ""):
-    channel = standard_channel("telegram", row.get("channel"))
-    target_id = message_target_chat_id(row)
-    message_id = normalize_id(row.get("external_message_id"))
-
-    if not target_id or not message_id:
-        return False, {"error": "Telegram message id is missing. This older row cannot be changed remotely."}
-
-    try:
-        if channel == "telegram_user_private":
-            if action == "edit":
-                return await edit_telegram_user_message_safe(target_id, message_id, text)
-            return await delete_telegram_user_message_safe(target_id, message_id)
-
-        if action == "edit":
-            res = edit_telegram_bot_message(target_id, message_id, text, business)
-        else:
-            res = delete_telegram_bot_message(target_id, message_id, business)
-
-        if not res:
-            return False, {"error": "Telegram bot token is not configured"}
-
-        data = safe_json(res)
-        return bool(res.ok and data.get("ok", True)), data
-    except Exception as exc:
-        return False, {"error": str(exc)}
-
-
 def decode_upload_data(file_data: str, max_bytes: int = 10 * 1024 * 1024):
     raw = str(file_data or "")
 
@@ -1416,16 +1294,6 @@ def _looks_like_numeric_id(value: str) -> bool:
     return bool(text and re.fullmatch(r"\d{6,}", text))
 
 
-def _looks_like_generated_instagram_name(value: str) -> bool:
-    text = normalize_id(value).lower()
-    return bool(
-        not text
-        or _looks_like_numeric_id(text)
-        or re.fullmatch(r"instagram (user|client|ig user)\s+\d{2,}", text)
-        or re.fullmatch(r"ig user\s+\d{2,}", text)
-    )
-
-
 def _extract_username_candidates(raw_payload: dict) -> list[str]:
     raw = raw_payload or {}
     candidates = []
@@ -1488,69 +1356,6 @@ def resolve_customer_label(rows: list, platform: str, fallback_scope: str) -> tu
     return best_name, handle_value
 
 
-def fetch_instagram_customer_profile(access_token: str, customer_id: str) -> dict:
-    access_token = normalize_id(access_token)
-    customer_id = normalize_id(customer_id)
-    if not access_token or not customer_id:
-        return {}
-
-    cache_key = f"{customer_id}:{hashlib.sha1(access_token.encode()).hexdigest()[:10]}"
-    now = time.time()
-    cached = INSTAGRAM_CUSTOMER_PROFILE_CACHE.get(cache_key)
-    if cached and (now - cached[0]) < INSTAGRAM_CUSTOMER_PROFILE_CACHE_TTL_SECONDS:
-        return cached[1] or {}
-
-    profile = {}
-    for base_url in (GRAPH_FACEBOOK, GRAPH_INSTAGRAM):
-        try:
-            res = requests.get(
-                f"{base_url}/{customer_id}",
-                params={"fields": "id,name,username,profile_pic", "access_token": access_token},
-                timeout=8,
-            )
-            body = safe_json(res)
-            if res.ok and isinstance(body, dict):
-                profile = {
-                    "id": normalize_id(body.get("id") or customer_id),
-                    "name": normalize_id(body.get("name")),
-                    "username": normalize_id(body.get("username")),
-                    "profile_pic": normalize_id(body.get("profile_pic")),
-                }
-                if profile.get("name") or profile.get("username"):
-                    break
-        except Exception:
-            continue
-
-    INSTAGRAM_CUSTOMER_PROFILE_CACHE[cache_key] = (now, profile)
-    if len(INSTAGRAM_CUSTOMER_PROFILE_CACHE) > 1000:
-        for key in sorted(INSTAGRAM_CUSTOMER_PROFILE_CACHE, key=lambda item: INSTAGRAM_CUSTOMER_PROFILE_CACHE[item][0])[:250]:
-            INSTAGRAM_CUSTOMER_PROFILE_CACHE.pop(key, None)
-    return profile
-
-
-def display_name_from_instagram_profile(profile: dict, fallback: str = "") -> str:
-    if not isinstance(profile, dict):
-        return fallback
-    username = normalize_id(profile.get("username"))
-    name = normalize_id(profile.get("name"))
-    if username:
-        return username
-    if name and not _looks_like_numeric_id(name):
-        return name
-    return fallback
-
-
-def backfill_instagram_customer_name(business_id: str, customer_id: str, profile_name: str):
-    profile_name = normalize_id(profile_name)
-    if not business_id or not customer_id or not profile_name:
-        return
-    try:
-        supabase.table("inbox_messages").update({"customer_name": profile_name}).eq("business_id", business_id).eq("platform", "instagram").eq("customer_id", str(customer_id)).execute()
-        clear_inbox_caches()
-    except Exception:
-        pass
-
-
 def transform_conversation_to_react(key: str, rows: list, business: dict = None, ai_lookup_enabled: bool = True) -> dict:
     """Transform database rows to React conversation format"""
     if not rows:
@@ -1574,18 +1379,6 @@ def transform_conversation_to_react(key: str, rows: list, business: dict = None,
         effective_scope = comment_customer_id
 
     customer_name, handle_value = resolve_customer_label(rows, platform, effective_scope)
-    if (
-        platform == "instagram"
-        and "comment" not in normalize_id(channel).lower()
-        and business
-        and _looks_like_generated_instagram_name(customer_name)
-    ):
-        profile = fetch_instagram_customer_profile(get_business_access_token(business), effective_scope)
-        profile_name = display_name_from_instagram_profile(profile)
-        if profile_name:
-            customer_name = profile_name
-            handle_value = normalize_id(profile.get("username")) or handle_value
-            backfill_instagram_customer_name(business_id, effective_scope, profile_name)
     ai_scope = encode_comment_scope("", comment_post_id) if (platform == "instagram" and "comment" in normalize_id(channel).lower() and comment_post_id) else effective_scope
     # Fast conversation list path should avoid per-conversation DB lookups.
     ai_enabled = is_chat_ai_enabled(platform, channel, ai_scope, business_id) if ai_lookup_enabled else True
@@ -3823,13 +3616,6 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             return
 
         access_token = get_business_access_token(business)
-        sender_profile = fetch_instagram_customer_profile(access_token, sender_id) if access_token else {}
-        customer_display_name = display_name_from_instagram_profile(sender_profile, "")
-        if sender_profile:
-            messaging = {
-                **messaging,
-                "sender_profile": sender_profile,
-            }
         if share_asset_id and access_token:
             try:
                 share_media_info = fetch_instagram_media_info(access_token, share_asset_id, business) or {}
@@ -3883,7 +3669,6 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             direction="inbound",
             platform_message_id=message_id,
             raw_payload=messaging,
-            customer_name=customer_display_name,
             is_read=False,
             media_type=media_type,
             media_url=media_url,
@@ -5420,16 +5205,10 @@ async def get_conversations_v2(
             conversations_map[key].append(row)
 
         conversations = []
-        business_lookup = {}
         for key, conv_rows in conversations_map.items():
-            key_parts = key.split("::")
-            row_business_id = key_parts[1] if len(key_parts) > 1 else ""
-            if row_business_id and row_business_id not in business_lookup:
-                business_lookup[row_business_id] = get_business_by_id(row_business_id)
             conv = transform_conversation_to_react(
                 key,
                 sorted(conv_rows, key=lambda x: x.get('created_at', '')),
-                business=business_lookup.get(row_business_id) or {},
                 ai_lookup_enabled=(not fast),
             )
             if conv:
@@ -5851,92 +5630,6 @@ async def send_message_v2(
             {"status": "error", "message": str(e)},
             status_code=500
         )
-
-
-@app.post("/api/v2/message/edit")
-async def edit_message_v2(
-        request: Request,
-        authorization: str = Header(default=""),
-        x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    try:
-        payload = await request.json()
-        message_id = payload.get("message_id")
-        text = str(payload.get("text") or "").strip()
-        if not text:
-            return JSONResponse({"error": "Message text is required"}, status_code=400)
-
-        row, error = get_inbox_message_for_dashboard(message_id, access)
-        if error:
-            return error
-
-        platform = normalize_id(row.get("platform")).lower()
-        if platform != "telegram":
-            return unsupported_message_mutation_response(platform, "editing")
-
-        if row.get("media_type"):
-            return JSONResponse({"error": "Only text messages can be edited"}, status_code=400)
-
-        business = get_business_by_id(row.get("business_id"))
-        ok, result = await mutate_delivered_telegram_message(row, business, "edit", text=text)
-        if not ok:
-            return send_failure_response(result, "Could not edit message on Telegram")
-
-        existing_payload = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
-        supabase.table("inbox_messages").update({
-            "content": text,
-            "raw_payload": {
-                **existing_payload,
-                "dashboard_edited": True,
-                "dashboard_edited_at": datetime.utcnow().isoformat(),
-            },
-        }).eq("id", row.get("id")).execute()
-        clear_inbox_caches()
-
-        return {"status": "ok", "data": result}
-
-    except Exception as e:
-        log("Error editing dashboard message", str(e))
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-
-
-@app.post("/api/v2/message/delete")
-async def delete_message_v2(
-        request: Request,
-        authorization: str = Header(default=""),
-        x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    try:
-        payload = await request.json()
-        row, error = get_inbox_message_for_dashboard(payload.get("message_id"), access)
-        if error:
-            return error
-
-        platform = normalize_id(row.get("platform")).lower()
-        if platform != "telegram":
-            return unsupported_message_mutation_response(platform, "deletion")
-
-        business = get_business_by_id(row.get("business_id"))
-        ok, result = await mutate_delivered_telegram_message(row, business, "delete")
-        if not ok:
-            return send_failure_response(result, "Could not delete message on Telegram")
-
-        supabase.table("inbox_messages").delete().eq("id", row.get("id")).execute()
-        clear_inbox_caches()
-
-        return {"status": "ok", "data": result}
-
-    except Exception as e:
-        log("Error deleting dashboard message", str(e))
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
 
 
 @app.post("/api/v2/conversation/{conversation_id}/ai-toggle")
