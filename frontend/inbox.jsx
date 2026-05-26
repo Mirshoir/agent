@@ -188,6 +188,7 @@ const API = {
 const THREAD_POLL_MS = 2500;
 const INBOX_POLL_MS = 6000;
 const STATS_POLL_MS = 20000;
+const THREAD_WARMUP_CONCURRENCY = 6;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
 const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
@@ -399,6 +400,13 @@ function trimThreadCache(items = {}) {
     };
   });
   return next;
+}
+
+function getThreadMessages(entry) {
+  if (!entry) return [];
+  if (Array.isArray(entry)) return entry;
+  if (Array.isArray(entry.messages)) return entry.messages;
+  return [];
 }
 
 function userIdentity(currentUser = {}) {
@@ -3528,7 +3536,7 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
   return (
     <section className="thread-col">
       <div className="messages" ref={scrollRef}>
-        {threadLoading && <div className="empty">Loading conversation…</div>}
+        {threadLoading && (!messages || messages.length === 0) && <div className="empty">Loading conversation…</div>}
         {conv.isCommentThread && (commentPost.postImageUrl || commentPost.postPermalink || commentPost.postId) && (
           <div className="post-preview-card">
             {commentPost.postImageUrl && isVideoPostPreview(commentPost) ? (
@@ -3956,13 +3964,29 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const threadPollBusy = useRef(false);
   const inboxPollBusy = useRef(false);
   const statsPollBusy = useRef(false);
+  const threadWarmupRunningRef = useRef(0);
+  const threadWarmupQueueRef = useRef([]);
+  const threadWarmupSeenRef = useRef(new Set());
+  const threadLoadPromisesRef = useRef({});
   const businessesRef = useRef([]);
   const workspaceStateHydratedRef = useRef(false);
   const workspaceStateTimersRef = useRef({});
   const seenOperatorTaskIdsRef = useRef(new Set());
   const conv = conversations.find(c => c.id === selectedId);
   const aiOn = conv ? conv.aiOn : false;
-  const messages = (threads[selectedId]?.messages || threads[selectedId]) || window.getThread(selectedId);
+  const cachedSelectedMessages = getThreadMessages(threads[selectedId]);
+  const messages = cachedSelectedMessages.length
+    ? cachedSelectedMessages
+    : (conv?.preview
+      ? [{
+        id: `preview-${selectedId || 'thread'}`,
+        side: 'inbound',
+        type: 'text',
+        time: conv?.lastTime || '',
+        text: conv?.preview || '',
+        isPreview: true,
+      }]
+      : window.getThread(selectedId));
   const roleScope = resolveRoleScope(currentUser, businesses);
   const isOperator = roleScope.isOperator;
 
@@ -4316,15 +4340,8 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       setSelectedId(current => next.some(c => c.id === current) ? current : next[0].id);
       setLiveMode(true);
       setApiError('');
-      // Warm top threads in background so first open does not block on network.
-      window.setTimeout(() => {
-        next.slice(0, 8).forEach(item => {
-          const cached = threads[item.id]?.messages || threads[item.id];
-          if (!Array.isArray(cached) || !cached.length) {
-            loadThread(item.id, { silent: true, markRead: false });
-          }
-        });
-      }, 0);
+      // Warm all threads in background so chat switches feel instant.
+      window.setTimeout(() => warmupConversationThreads(next, selectedCurrent), 0);
       if (sideLoad) {
         loadStats();
         loadBusinesses({ silent: true });
@@ -4371,26 +4388,70 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
 
   const loadThread = async (conversationId, { silent = false, markRead = true } = {}) => {
     if (!conversationId || !liveMode) return;
+    const inFlight = threadLoadPromisesRef.current[conversationId];
+    if (inFlight) return inFlight;
     if (!silent) setThreadLoading(true);
-    try {
-      const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?mark_read=${markRead ? '1' : '0'}`);
-      const normalized = (data.data || []).map(normalizeMessage);
-      setThreads(prev => ({
-        ...prev,
-        [conversationId]: {
-          updatedAt: Date.now(),
-          messages: normalized,
-        },
-      }));
-      setConversations(rows => rows.map(item => item.id === conversationId ? clearConversationUnread(item) : item));
-      setApiError('');
-      return true;
-    } catch (e) {
-      setApiError(`${e.message} Showing cached messages.`);
-      return false;
-    } finally {
-      if (!silent) setThreadLoading(false);
+    const request = (async () => {
+      try {
+        const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?mark_read=${markRead ? '1' : '0'}`);
+        const normalized = (data.data || []).map(normalizeMessage);
+        setThreads(prev => ({
+          ...prev,
+          [conversationId]: {
+            updatedAt: Date.now(),
+            messages: normalized,
+          },
+        }));
+        setConversations(rows => rows.map(item => item.id === conversationId ? clearConversationUnread(item) : item));
+        setApiError('');
+        return true;
+      } catch (e) {
+        setApiError(`${e.message} Showing cached messages.`);
+        return false;
+      } finally {
+        delete threadLoadPromisesRef.current[conversationId];
+        if (!silent) setThreadLoading(false);
+      }
+    })();
+    threadLoadPromisesRef.current[conversationId] = request;
+    return request;
+  };
+
+  const pumpThreadWarmupQueue = () => {
+    if (!liveModeRef.current) return;
+    while (
+      threadWarmupRunningRef.current < THREAD_WARMUP_CONCURRENCY &&
+      threadWarmupQueueRef.current.length > 0
+    ) {
+      const conversationId = threadWarmupQueueRef.current.shift();
+      const currentMessages = getThreadMessages(threads[conversationId]);
+      if (!conversationId || currentMessages.length > 0) continue;
+      threadWarmupRunningRef.current += 1;
+      loadThread(conversationId, { silent: true, markRead: false })
+        .catch(() => false)
+        .finally(() => {
+          threadWarmupRunningRef.current = Math.max(0, threadWarmupRunningRef.current - 1);
+          pumpThreadWarmupQueue();
+        });
     }
+  };
+
+  const warmupConversationThreads = (rows = [], priorityId = '') => {
+    const queue = [];
+    if (priorityId) queue.push(priorityId);
+    for (const row of rows || []) {
+      if (row?.id) queue.push(row.id);
+    }
+    for (const conversationId of queue) {
+      if (!conversationId) continue;
+      const currentMessages = getThreadMessages(threads[conversationId]);
+      if (currentMessages.length > 0) continue;
+      const seen = threadWarmupSeenRef.current;
+      if (seen.has(conversationId)) continue;
+      seen.add(conversationId);
+      threadWarmupQueueRef.current.push(conversationId);
+    }
+    pumpThreadWarmupQueue();
   };
 
   const sendLiveMessage = async (conversation, text, options = {}) => {
@@ -4578,7 +4639,8 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   }, [selectedBusinessId, liveMode, isOperator]);
 
   useEffect(() => {
-    loadThread(selectedId);
+    const cached = getThreadMessages(threads[selectedId]);
+    loadThread(selectedId, { silent: cached.length > 0 });
   }, [selectedId, liveMode]);
 
   useEffect(() => {
@@ -4910,6 +4972,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     setSelectedId(conversationId);
     setActiveView('inbox');
     setMoreOpen(false);
+    warmupConversationThreads(conversations, conversationId);
   };
 
   // Mark selected unread as read
