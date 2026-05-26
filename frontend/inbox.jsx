@@ -193,6 +193,7 @@ const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
 const LEAD_PRICES_STORAGE_KEY = 'instaagent_lead_prices';
 const CLIENT_OWNERS_STORAGE_KEY = 'instaagent_client_owners';
+const MANUAL_CLIENTS_STORAGE_KEY = 'instaagent_manual_clients';
 const OPERATOR_DEALS_STORAGE_KEY = 'instaagent_operator_deals';
 const OPERATOR_ADMIN_NOTES_STORAGE_KEY = 'instaagent_operator_admin_notes';
 const USER_PROFILE_STORAGE_KEY = 'instaagent_user_profiles';
@@ -1810,15 +1811,42 @@ function LeadsBoard({ conversations, leadStages, leadPrices, setLeadStage, setLe
   );
 }
 
-function ClientsTable({ conversations, leadStages, leadPrices, onOpenConversation, clientOwners = {}, currentUser = null, onPickClient = () => {}, w }) {
+function ClientsTable({
+  conversations,
+  leadStages,
+  leadPrices,
+  onOpenConversation,
+  clientOwners = {},
+  manualClients = [],
+  onAddManualClient = () => {},
+  onRemoveManualClient = () => {},
+  currentUser = null,
+  onPickClient = () => {},
+  w,
+}) {
   const currentOwnerLabel = userOwnerLabel(currentUser);
   const currentOwnerKeys = useMemo(() => userOwnerKeys(currentUser), [currentUser]);
-  const rows = useMemo(() => (conversations || []).map(conv => ({
-    ...conv,
-    stage: leadStages[conv.id] || guessLeadStage(conv),
-    price: leadPrices[conv.id] || '',
-    owner: String(clientOwners?.[conv.id] || '').trim(),
-  })), [conversations, leadStages, leadPrices]);
+  const [candidateId, setCandidateId] = useState('');
+  const conversationMap = useMemo(
+    () => new Map((conversations || []).map(conv => [conv.id, conv])),
+    [conversations],
+  );
+  const rows = useMemo(
+    () => (manualClients || [])
+      .map(id => conversationMap.get(id))
+      .filter(Boolean)
+      .map(conv => ({
+        ...conv,
+        stage: leadStages[conv.id] || guessLeadStage(conv),
+        price: leadPrices[conv.id] || '',
+        owner: String(clientOwners?.[conv.id] || '').trim(),
+      })),
+    [manualClients, conversationMap, leadStages, leadPrices, clientOwners],
+  );
+  const availableCandidates = useMemo(
+    () => (conversations || []).filter(conv => !(manualClients || []).includes(conv.id)),
+    [conversations, manualClients],
+  );
 
   const stageNames = {
     new: w.leadNew,
@@ -1833,9 +1861,27 @@ function ClientsTable({ conversations, leadStages, leadPrices, onOpenConversatio
       <div className="section-card-head">
         <div>
           <h3>{w.clientsTitle}</h3>
-          <p>{w.clientsSubtitle}</p>
+          <p>Important clients added manually by admin/operators.</p>
         </div>
         <span>{rows.length}</span>
+      </div>
+      <div className="panel-actions" style={{ marginBottom: 12 }}>
+        <select value={candidateId} onChange={(e) => setCandidateId(e.target.value)}>
+          <option value="">Select conversation...</option>
+          {availableCandidates.map(conv => (
+            <option key={conv.id} value={conv.id}>{conv.name} ({conv.handle})</option>
+          ))}
+        </select>
+        <button
+          onClick={() => {
+            if (!candidateId) return;
+            onAddManualClient(candidateId);
+            setCandidateId('');
+          }}
+          disabled={!candidateId}
+        >
+          Add client
+        </button>
       </div>
       <div className="clients-table-wrap">
         <table className="clients-table">
@@ -1887,6 +1933,7 @@ function ClientsTable({ conversations, leadStages, leadPrices, onOpenConversatio
                   ) : (
                     <button className="table-action" onClick={() => onPickClient(row.id, currentOwnerLabel)}>{w.pickClient || 'Pick me'}</button>
                   )}
+                  <button className="table-action" onClick={() => onRemoveManualClient(row.id)}>Remove</button>
                 </td>
               </tr>
             ))}
@@ -2439,22 +2486,8 @@ function OperatorPanel(props) {
 function OperatorsSection(props) {
   const roleScope = resolveRoleScope(props.currentUser, props.businesses || []);
   const isOperator = roleScope.isOperator;
-  const [mode, setMode] = useState(isOperator ? 'operator' : 'admin');
-  const w = props.w;
-  useEffect(() => {
-    if (isOperator && mode !== 'operator') setMode('operator');
-  }, [isOperator, mode]);
-  return (
-    <div className="operators-section">
-      {!isOperator && (
-        <div className="operators-mode-switch" role="tablist" aria-label={w.operatorsTitle}>
-          <button className={mode === 'admin' ? 'active' : ''} onClick={() => setMode('admin')} role="tab" aria-selected={mode === 'admin'}>{w.adminPanel}</button>
-          <button className={mode === 'operator' ? 'active' : ''} onClick={() => setMode('operator')} role="tab" aria-selected={mode === 'operator'}>{w.operatorPanel}</button>
-        </div>
-      )}
-      {mode === 'admin' ? <AdminPanel {...props} /> : <OperatorPanel {...props} />}
-    </div>
-  );
+  if (isOperator) return <OperatorPanel {...props} />;
+  return <AdminPanel {...props} />;
 }
 
 function WorkspacePanel({
@@ -2479,6 +2512,7 @@ function WorkspacePanel({
   leadStages,
   leadPrices,
   clientOwners,
+  manualClients,
   operatorDeals,
   adminNotes,
   operatorAccounts,
@@ -2486,6 +2520,8 @@ function WorkspacePanel({
   onLeadStageChange,
   onLeadPriceChange,
   onPickClient,
+  onAddManualClient,
+  onRemoveManualClient,
   onOperatorDealChange,
   onAdminNote,
   onOpenConversation,
@@ -2553,6 +2589,9 @@ function WorkspacePanel({
           leadStages={leadStages}
           leadPrices={leadPrices}
           clientOwners={clientOwners}
+          manualClients={manualClients}
+          onAddManualClient={onAddManualClient}
+          onRemoveManualClient={onRemoveManualClient}
           currentUser={currentUser}
           onPickClient={onPickClient}
           onOpenConversation={onOpenConversation}
@@ -2575,6 +2614,8 @@ function WorkspacePanel({
           setLeadStage={onLeadStageChange}
           setLeadPrice={onLeadPriceChange}
           onOpenConversation={onOpenConversation}
+          currentUser={currentUser}
+          businesses={businesses}
           w={w}
         />
       )}
@@ -3860,6 +3901,10 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const [leadStages, setLeadStages] = useState(() => readStoredObject(LEAD_STAGES_STORAGE_KEY));
   const [leadPrices, setLeadPrices] = useState(() => readStoredObject(LEAD_PRICES_STORAGE_KEY));
   const [clientOwners, setClientOwners] = useState(() => readStoredObject(CLIENT_OWNERS_STORAGE_KEY));
+  const [manualClients, setManualClients] = useState(() => {
+    const stored = readStoredObject(MANUAL_CLIENTS_STORAGE_KEY);
+    return Array.isArray(stored.items) ? stored.items : [];
+  });
   const [operatorDeals, setOperatorDeals] = useState(() => readStoredObject(OPERATOR_DEALS_STORAGE_KEY));
   const [operatorAdminNotes, setOperatorAdminNotes] = useState(() => {
     const stored = readStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY);
@@ -3968,6 +4013,11 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
         setClientOwners(state.client_owners);
         writeStoredObject(CLIENT_OWNERS_STORAGE_KEY, state.client_owners);
       }
+      if (state.manual_clients && typeof state.manual_clients === 'object') {
+        const clientIds = Array.isArray(state.manual_clients.items) ? state.manual_clients.items.map(String).filter(Boolean) : [];
+        setManualClients(clientIds);
+        writeStoredObject(MANUAL_CLIENTS_STORAGE_KEY, { items: clientIds });
+      }
       if (state.operator_deals && typeof state.operator_deals === 'object') {
         setOperatorDeals(state.operator_deals);
         writeStoredObject(OPERATOR_DEALS_STORAGE_KEY, state.operator_deals);
@@ -3979,6 +4029,21 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       }
     } catch (e) {
       workspaceStateHydratedRef.current = true;
+    }
+  };
+
+  const loadOperatorTasks = async (businessId = selectedBusinessId, { forMe = true, silent = true } = {}) => {
+    const business = String(businessId || '').trim();
+    if (!business || !liveModeRef.current) return [];
+    try {
+      const data = await API.get(`/api/v2/operator-tasks?business_id=${encodeURIComponent(business)}&for_me=${forMe ? '1' : '0'}`);
+      const rows = Array.isArray(data?.data) ? data.data : [];
+      setOperatorAdminNotes(rows);
+      writeStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY, { items: rows });
+      return rows;
+    } catch (e) {
+      if (!silent) showToast(e.message || 'Could not load tasks');
+      return [];
     }
   };
 
@@ -4132,7 +4197,15 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   };
 
   const refreshWorkspace = async () => {
-    await Promise.all([loadConversations({ sideLoad: false }), loadStats(), loadBusinesses(), loadPromptSettings(selectedBusinessId, { silent: true }), loadOperatorAccounts(selectedBusinessId)]);
+    await Promise.all([
+      loadConversations({ sideLoad: false }),
+      loadStats(),
+      loadBusinesses(),
+      loadPromptSettings(selectedBusinessId, { silent: true }),
+      loadOperatorAccounts(selectedBusinessId),
+      loadWorkspaceState(selectedBusinessId),
+      loadOperatorTasks(selectedBusinessId, { forMe: isOperator, silent: true }),
+    ]);
     showToast('Workspace refreshed');
   };
 
@@ -4425,6 +4498,11 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   }, [selectedBusinessId, liveMode]);
 
   useEffect(() => {
+    if (!selectedBusinessId || !liveMode) return;
+    loadOperatorTasks(selectedBusinessId, { forMe: isOperator, silent: true });
+  }, [selectedBusinessId, liveMode, isOperator]);
+
+  useEffect(() => {
     loadThread(selectedId);
   }, [selectedId, liveMode]);
 
@@ -4693,20 +4771,64 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     showToast(owner ? `Client picked by ${owner}` : 'Client unpicked');
   };
 
-  const addOperatorAdminNote = (text, recipients = ['*'], mode = 'all') => {
-    setOperatorAdminNotes(prev => {
-      const next = [{
-        id: `${Date.now()}`,
-        text,
-        recipients,
-        mode,
-        createdAt: new Date().toISOString(),
-      }, ...prev].slice(0, 50);
-      writeStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY, { items: next });
-      queueWorkspaceStateSave({ operator_admin_notes: { items: next } });
+  const addManualClient = (conversationId) => {
+    setManualClients(prev => {
+      if (prev.includes(conversationId)) return prev;
+      const next = [...prev, conversationId];
+      writeStoredObject(MANUAL_CLIENTS_STORAGE_KEY, { items: next });
+      queueWorkspaceStateSave({ manual_clients: { items: next } });
       return next;
     });
-    showToast('Task sent to operators');
+    showToast('Client added to important list');
+  };
+
+  const removeManualClient = (conversationId) => {
+    setManualClients(prev => {
+      const next = prev.filter(id => id !== conversationId);
+      writeStoredObject(MANUAL_CLIENTS_STORAGE_KEY, { items: next });
+      queueWorkspaceStateSave({ manual_clients: { items: next } });
+      return next;
+    });
+    showToast('Client removed from important list');
+  };
+
+  const addOperatorAdminNote = async (text, recipients = ['*'], mode = 'all') => {
+    const business = String(selectedBusinessId || '').trim();
+    const clean = String(text || '').trim();
+    if (!clean || !business) {
+      showToast('Select business and task text');
+      return;
+    }
+
+    if (!liveModeRef.current) {
+      setOperatorAdminNotes(prev => {
+        const next = [{
+          id: `${Date.now()}`,
+          text: clean,
+          recipients,
+          assign_mode: mode,
+          created_at: new Date().toISOString(),
+        }, ...prev].slice(0, 50);
+        writeStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY, { items: next });
+        queueWorkspaceStateSave({ operator_admin_notes: { items: next } });
+        return next;
+      });
+      showToast('Task saved locally');
+      return;
+    }
+
+    try {
+      await API.postJson('/api/v2/operator-tasks', {
+        business_id: business,
+        text: clean,
+        recipients,
+        assign_mode: mode,
+      });
+      await loadOperatorTasks(business, { forMe: isOperator, silent: true });
+      showToast('Task sent to operators');
+    } catch (e) {
+      showToast(e.message || 'Could not send task');
+    }
   };
 
   const selectConversation = (conversationId) => {
@@ -4801,6 +4923,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
             leadStages={leadStages}
             leadPrices={leadPrices}
             clientOwners={clientOwners}
+            manualClients={manualClients}
             operatorDeals={operatorDeals}
             adminNotes={operatorAdminNotes}
             operatorAccounts={operatorAccounts}
@@ -4808,6 +4931,8 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
             onLeadStageChange={setLeadStage}
             onLeadPriceChange={setLeadPrice}
             onPickClient={setClientOwner}
+            onAddManualClient={addManualClient}
+            onRemoveManualClient={removeManualClient}
             onOperatorDealChange={setOperatorDealCount}
             onAdminNote={addOperatorAdminNote}
             onOpenConversation={selectConversation}
