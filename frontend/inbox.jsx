@@ -3197,7 +3197,7 @@ function VoiceWave({ count = 28 }) {
 }
 
 // ---------- Message bubble ----------
-function Message({ m, conv, t, onReplyComment }) {
+function Message({ m, conv, t, onReplyComment, onEditMessage, onDeleteMessage }) {
   if (m.side === 'system' && m.type === 'handoff') {
     return (
       <div className="handoff-banner">
@@ -3215,6 +3215,12 @@ function Message({ m, conv, t, onReplyComment }) {
     m.side === 'inbound' &&
     m.commentId &&
     typeof onReplyComment === 'function'
+  );
+  const canManageOutbound = Boolean(
+    m.side === 'outbound' &&
+    !m.pending &&
+    m.id &&
+    !String(m.id).startsWith('optimistic-')
   );
   return (
     <div className={`msg-group ${m.side} ${fromAi ? 'from-ai' : ''}`}>
@@ -3271,6 +3277,14 @@ function Message({ m, conv, t, onReplyComment }) {
         {fromAi && <span className="ai-mark">auto</span>}
         <span>{m.time}</span>
         {m.side === 'outbound' && <span className="check"><I.DoubleCheck /></span>}
+        {canManageOutbound && (
+          <span className="msg-actions">
+            {m.type === 'text' && (
+              <button type="button" onClick={() => onEditMessage?.(m)}>Edit</button>
+            )}
+            <button type="button" className="danger" onClick={() => onDeleteMessage?.(m)}>Delete</button>
+          </span>
+        )}
       </div>
       {canReplyToComment && (
         <button
