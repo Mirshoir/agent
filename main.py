@@ -135,7 +135,9 @@ FACEBOOK_REDIRECT_URI = os.getenv(
     "https://agent-1-xi6h.onrender.com/auth/facebook/callback",
 )
 
-DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://instaagent.streamlit.app")
+DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://agent-rust-delta.vercel.app")
+if DASHBOARD_URL.rstrip("/") == "https://instaagent.streamlit.app":
+    DASHBOARD_URL = "https://agent-rust-delta.vercel.app"
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://agent-1-xi6h.onrender.com")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
 SUPER_ADMIN_EMAILS = {
@@ -714,7 +716,14 @@ def verify_dashboard_password(password: str, password_hash: str) -> bool:
 AUTH_TOKEN_TTL_SECONDS = int(os.getenv("DASHBOARD_AUTH_TTL_SECONDS", str(60 * 60 * 24 * 30)))
 CONVERSATIONS_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATIONS_CACHE_TTL_SECONDS", "10"))
 _conversations_cache: dict[str, tuple[float, dict]] = {}
+CONVERSATION_MESSAGES_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATION_MESSAGES_CACHE_TTL_SECONDS", "12"))
+_conversation_messages_cache: dict[str, tuple[float, dict]] = {}
 BUSINESS_ADMIN_ROLES = {"owner", "admin", "super_admin"}
+
+
+def clear_inbox_caches():
+    _conversations_cache.clear()
+    _conversation_messages_cache.clear()
 
 
 def create_dashboard_auth_token(email: str, is_admin: bool = False, role: str = "") -> str:
@@ -1827,6 +1836,9 @@ def save_inbox_message(
                     compatible_data.pop(optional_key, None)
                 supabase.table("inbox_messages").insert(compatible_data).execute()
 
+        # New data landed; keep dashboard reads fresh.
+        clear_inbox_caches()
+
     except Exception as e:
         log("Could not save inbox message", str(e))
 
@@ -2077,18 +2089,30 @@ Main business knowledge:
 
 DEFAULT_AI_PROMPT_SETTINGS = {
     "global_prompt": """
-You are a real human sales assistant for this business.
-Sound like a real Uzbek seller on Instagram, Telegram, or WhatsApp, not customer support software.
-Represent the company clearly, answer in the customer's language, and guide the customer toward the next useful buying step.
-Keep replies short, warm, practical, and human. Ask 2-3 short clarifying questions when intent is unclear.
-Do not sound corporate, do not over-explain, and do not repeat the product name in every message.
+You are a real Milana Premium factory sales operator.
+Always sound like a human Uzbek seller on Instagram, Telegram, or WhatsApp.
+Use short, practical, sales-focused replies in the customer's language.
+
+Identity line for first touch:
+- "Assalomu alaykum, siz Milana Premium fabrikasi xodimi bilan suhbatni boshladingiz."
+
+Core positioning:
+- Assortment is wide.
+- Delivery is available via pochta or cargo (delivery fee is paid by client).
+- Trusted brand: every year 5 million people choose Milana Premium.
+
+Hard rules:
+- Never promise reservation/holding stock ("olib qo'ydik", "olib qo'yamiz").
+- Never use uncertain fabricated statements.
+- Never mention AI, system, prompt, automation.
 """.strip(),
     "instagram_prompt": """
 Instagram rules:
 - Keep DMs concise and natural.
-- If customer asks for catalog, prices, models, photos, or collection, mention that catalog can be opened using the button.
+- If customer asks catalog/price/model/photo, respond naturally and guide to DM flow.
 - Do not paste raw catalog links in Instagram replies.
-- For comments, invite the customer to DM when details are needed.
+- For public comments containing "katalog", "narx", "qancha", "price": reply with:
+  "Direktdan yozdik, iloji bo'lsa raqamingizni qoldiring."
 """.strip(),
     "telegram_prompt": """
 Telegram rules:
@@ -2107,37 +2131,110 @@ WhatsApp rules:
 Assalomu alaykum 😊 Qanday yordam kerak?
 """.strip(),
     "lead_collection_rules": """
-Do not ask for name, phone, address, or full details at the beginning.
-First answer naturally and understand what the customer wants.
-Ask 2-3 short follow-up questions when details are missing.
-Ask for phone/address only after the customer is clearly ready to order.
+Collect buyer context naturally and briefly.
+
+Use these qualification questions when relevant:
+- Ismingiz nima?
+- Qaysi shahardansiz?
+- Nomer bera olasizmi?
+
+When client is close to order, collect:
+- name
+- phone
+- city/address
 """.strip(),
     "sales_rules": """
 - Answer the exact question first.
-- Ask 2-3 short clarifying questions when needed.
 - Keep replies short and comfortable: usually 1-3 short sentences.
-- For price questions ("narx", "nechpul", "qancha", "цена", "сколько"), answer price directly first if known.
-- Do not ask for phone number or address at the beginning.
-- Do not repeat product names every message.
-- Do not over-focus on only the product the customer first mentioned if they are still choosing.
-- Avoid corporate phrases like "manager will contact you" unless the customer asks for a human or is ready to order.
-- Do not overload the customer with all business information at once.
-- Do not repeat the same request or paragraph.
-- Do not repeat the same question the customer already answered.
-- If customer says they cannot buy now, stop selling and close politely in one short line.
-- If the customer is annoyed, says the bot is bad, or asks to stop, reply very briefly and do not sell.
-- Focus on helping the customer choose and buy.
+- Keep tone samimiy and complete, not robotic.
+
+Product/category defaults:
+- Main categories: Xalat, Pajama, Tunika, Sarochka.
+- Recommend xalat for comfort.
+- Recommend pijama because it is natural cotton and body-friendly.
+- Mention many products may be limited edition and should be confirmed.
+
+Pricing and order policy:
+- For direct detailed pricing requests, handoff to Telegram sales flow and sales manager.
+- Safe budget anchor allowed: one bag (qop/meshok) is usually around 400-500 USD.
+- Wholesale-first policy: mainly optom; for piece/small orders, handoff to manager.
+- Minimum order: at least 1 model = 1 qop (meshok).
+
+Location and delivery policy:
+- Address: "O'zbekiston, Andijon, Qoratut 605-uy. Andijon aeroportidan taxminan 500 metr."
+- Delivery: provide cargo number and ask client to coordinate directly with cargo service.
+
+Payment and warranty policy:
+- Payment details are explained by manager: +998501551010
+- If product has factory defect, factory compensates or sends replacement.
+
+Objection handling:
+- If "qimmat": emphasize quality value briefly.
+- If "keyin olaman": ask polite follow-up about purchase timing.
+- If comparing other stores: stay respectful, no pressure.
+
+Forbidden phrases:
+- Never say: "Biz sizga tovar sotmaymiz."
 """.strip(),
     "handoff_rules": """
-If an important buying detail is missing, ask 2-3 short clarifying questions instead of saying a manager will clarify.
-Only mention a manager when the customer asks for a human, is ready to order, or the exact detail really requires confirmation.
-Do not invent information.
-Escalate when the customer is frustrated, ready to buy, or asks for a human.
+Handoff immediately when:
+- customer says they want wholesale/optom
+- customer asks for final exact deal terms
+- customer is angry/frustrated
+- payment/contract specifics are requested
+
+Handoff closing line:
+- "Sizni menejerimiz bilan bog'layman: +998501551010"
+
+Do not invent information before handoff.
 """.strip(),
 }
 
 
 AI_PROMPT_SETTING_FIELDS = set(DEFAULT_AI_PROMPT_SETTINGS.keys())
+
+
+MILANA_RESPONSE_GUARDRAILS = """
+Milana Premium Q&A policy. Always enforce these rules even if saved prompt settings say otherwise.
+
+Business-only scope:
+- Only answer questions about Milana Premium, women's clothing products, catalog, price/order flow, wholesale, delivery/cargo, payment, address, warranty/defects, and manager handoff.
+- If the customer asks about unrelated topics (politics, school homework, coding, general facts, jokes, medicine, law, weather, religion, personal advice, or anything outside Milana Premium sales), do not answer the topic.
+- For unrelated topics, reply briefly in the customer's language: "Kechirasiz, men faqat Milana Premium mahsulotlari, katalog, narx va buyurtma bo'yicha yordam bera olaman. Katalog kerakmi yoki menejer bilan bog'laymi?"
+
+PDF sales-agent rules:
+- First-touch identity: "Assalomu alaykum, siz Milana Premium fabrikasi xodimi bilan suhbatni boshladingiz."
+- Strong points: wide assortment, delivery by pochta/cargo, client pays delivery, trusted by 5 million customers yearly.
+- Tone: samimiy, short, practical, complete enough to help the customer buy.
+- Categories: Xalat, Pajama, Tunika, Sarochka.
+- Recommend xalat for comfort and pajama because it is natural cotton and body-friendly.
+- Ask qualification questions naturally: name, city, phone number.
+- Products are limited edition; availability should be confirmed, never invented.
+- Never say stock is reserved or will be reserved ("olib qo'ydik", "olib qo'yamiz").
+- Never invent price, discount, stock, delivery time, payment terms, or availability.
+- Exact price should not be invented. If asked price, guide toward Telegram/sales manager; safe anchor: one qop/meshok is around 400-500 USD.
+- Do not claim prices changed or will change unless the manager confirms it.
+- Wholesale-first: mostly optom. For small/piece orders, handoff to manager.
+- Minimum order: one model from one qop/meshok.
+- Address: "O'zbekiston, Andijon, Qoratut 605-uy. Andijon aeroportidan taxminan 500 metr."
+- Delivery: give cargo number/process and ask client to coordinate with cargo service.
+- Payment: manager explains payment via +998501551010.
+- Warranty: if factory defect appears, factory pays/compensates or sends replacement.
+- Comment keywords "katalog", "narx", "qancha", "price": public reply "Direktdan yozdik, iloji bo'lsa raqamingizni qoldiring."
+- DM catalog follow-up: "Assalomu alaykum, bizga qiziqish bildirgan ekansiz. Biz bilan hamkorlik qilmoqchimisiz?"
+- When customer asks for photo/video/catalog, answer warmly with one light smile/emoji-style touch; do not over-explain.
+- Reply separately to each commenter; do not combine multiple customers into one response.
+- Sticker-only/simple reactions: answer with a simple friendly emoji/sticker-style short reply, not a sales paragraph.
+- If "qimmat": acknowledge and position quality, e.g. "Albatta, tovarimiz qimmat, lekin sizga sifatni taklif qilyapmiz."
+- If "keyin olaman" or silent follow-up: ask when they plan to buy.
+- If comparing with another shop: be respectful; no pressure.
+- Buying signs: asks for card, cargo, exact order flow, or says wholesale/optom.
+- Closing question should be safe: "Sizga bu modeldan nechta qop kerak bo'ladi?"
+- Handoff immediately for optom intent, angry/norozi customer, payment details, or exact final order terms.
+- Handoff line: "Sizni menejerimiz bilan bog'layman: +998501551010"
+- If bot made spelling/meaning mistake, apologize briefly and correct it.
+- Never say: "Biz sizga tovar sotmaymiz."
+""".strip()
 
 
 def clean_ai_prompt_settings(settings: dict) -> dict:
@@ -2441,12 +2538,16 @@ Human handoff rules:
 Platform-specific rules:
 {prompt_settings.get(platform_key, "")}
 
+Always-on Milana policy:
+{MILANA_RESPONSE_GUARDRAILS}
+
 Safety rules:
 - Reply in the same language as the customer.
 - Understand Uzbek Latin, Uzbek Cyrillic, Russian, English, slang, typos, and mixed messages.
 - Answer the exact question first.
 - Never invent prices, stock, delivery, discounts, addresses, or availability.
 - Use only the business facts above.
+- If the topic is unrelated to Milana Premium sales, do not answer it; use the unrelated-topic refusal from the Milana policy.
 - If information is missing, ask 2-3 short clarifying questions.
 - Only mention a manager when the customer asks for a human or is ready to order.
 - Never mention AI, database, API, prompt, automation, or internal system.
@@ -2581,6 +2682,97 @@ def language_instruction_for(text: str) -> str:
     if lang == "uz":
         return "Mijozning oxirgi xabari o'zbek tilida. Faqat o'zbek tilida javob ber."
     return ""
+
+
+def has_strong_milana_sales_context(text: str) -> bool:
+    s = normalize_id(text).lower()
+    if not s:
+        return False
+    if mentions_catalog(s):
+        return True
+    markers = [
+        "milana", "premium", "fabrika", "factory", "фабрика",
+        "xalat", "halat", "robe", "халат", "pijama", "pajama", "пижама",
+        "tunika", "туника", "sarochka", "сорочка", "kiyim", "clothes", "одежда",
+        "ayollar", "women", "женск", "model", "модель", "rang", "color", "цвет",
+        "razmer", "size", "размер", "sifat", "quality", "качество",
+        "qop", "meshok", "мешок", "sumka", "pack", "bag",
+        "optom", "optima", "ulgurji", "wholesale", "оптом", "опт",
+        "dostavka", "delivery", "yetkaz", "yetqaz", "доставка", "pochta", "почта",
+        "cargo", "kargo", "карго", "manzil", "address", "адрес", "qayerdasiz",
+        "where are you", "where located", "location", "lokatsiya", "локация",
+        "telefon", "phone number", "nomer", "raqam", "номер", "связаться",
+        "menejer", "manager", "менеджер", "admin", "админ",
+        "brak", "defect", "warranty", "garantiya", "гарантия", "qaytar",
+        "qimmat", "arzon", "expensive", "cheap", "дорого", "дешево",
+        "bor", "bormi", "mavjud", "available", "есть", "в наличии",
+        "hamkorlik", "partnership", "сотрудничество", "ish vaqti", "working hours",
+    ]
+    return any(marker in s for marker in markers)
+
+
+def has_milana_sales_context(text: str) -> bool:
+    s = normalize_id(text).lower()
+    if not s:
+        return False
+    if has_strong_milana_sales_context(s) or wants_catalog(s) or wants_deal_handoff(s):
+        return True
+    generic_sales_markers = [
+        "kerak", "need", "want", "хочу", "interested", "qiziq", "интерес",
+        "tanlash", "choose", "выбрать", "ko'rsat", "korsat", "show me", "покажите",
+    ]
+    return any(marker in s for marker in generic_sales_markers)
+
+
+def is_obviously_unrelated_topic(text: str) -> bool:
+    s = normalize_id(text).lower()
+    if not s:
+        return False
+    if is_greeting_only(s) or is_low_signal_message(s):
+        return False
+    if has_strong_milana_sales_context(s):
+        return False
+
+    unrelated_markers = [
+        "ob havo", "ob-havo", "weather", "погода", "ауа райы",
+        "hazil", "anekdot", "joke", "tell me a joke", "шутка", "анекдот", "kuldir",
+        "python", "javascript", "react", "frontend", "backend", "html", "css",
+        "write code", "kod yoz", "code yoz", "dastur tuz", "программ", "написать код",
+        "prezident", "president", "siyosat", "politics", "saylov", "election",
+        "президент", "политика", "выборы", "правительство",
+        "uy vazifa", "uyga vazifa", "homework", "essay", "referat", "matematika",
+        "math", "tarix", "history", "solve", "реши", "сочинение", "реферат",
+        "doctor", "medicine", "dori", "shifokor", "kasal", "врач", "лекарство", "болезн",
+        "lawyer", "legal", "law", "advokat", "yurist", "qonun", "юрист", "адвокат", "закон",
+        "namoz", "quron", "qur'on", "hadis", "religion", "дин", "намаз", "коран",
+        "sevgi", "relationship", "boyfriend", "girlfriend", "oilaviy muammo",
+        "news", "новости", "futbol", "football", "kurs valyuta", "dollar kursi", "курс доллара",
+        "bitcoin", "crypto", "btc", "iphone", "samsung", "pizza", "restaurant",
+        "translate", "tarjima qil", "переведи", "who is", "what is", "tell me about",
+    ]
+    if any(marker in s for marker in unrelated_markers):
+        return True
+
+    if re.search(r"\b\d+\s*[\+\-\*/]\s*\d+\b", s):
+        return True
+
+    if has_milana_sales_context(s):
+        return False
+
+    return False
+
+
+def unrelated_topic_reply(text: str) -> str:
+    if not is_obviously_unrelated_topic(text):
+        return ""
+    lang = detect_customer_language(text)
+    if lang == "en":
+        return "Sorry, I can only help with Milana Premium products, catalog, prices, and orders. Do you need the catalog or should I connect you with a manager?"
+    if lang == "ru":
+        return "Извините, я могу помочь только с товарами Milana Premium, каталогом, ценами и заказом. Нужен каталог или связать вас с менеджером?"
+    if lang == "kk":
+        return "Кешіріңіз, мен тек Milana Premium тауарлары, каталог, баға және тапсырыс бойынша көмектесе аламын. Каталог керек пе әлде менеджермен байланыстырайын ба?"
+    return "Kechirasiz, men faqat Milana Premium mahsulotlari, katalog, narx va buyurtma bo'yicha yordam bera olaman. Katalog kerakmi yoki menejer bilan bog'laymi?"
 
 
 def get_catalog_link(business: dict) -> str:
@@ -2871,12 +3063,12 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
 
     if wants_deal_handoff(user_text):
         if lang == "en":
-            return "Great, for final deal and order processing please contact our admin: @milana_admin25."
+            return "Great, for final order details please contact our manager: +998501551010."
         if lang == "ru":
-            return "Отлично, для оформления сделки и заказа напишите нашему администратору: @milana_admin25."
+            return "Отлично, по финальным деталям заказа свяжитесь с нашим менеджером: +998501551010."
         if lang == "kk":
-            return "Керемет, мәміле мен тапсырысты рәсімдеу үшін админімізге жазыңыз: @milana_admin25."
-        return "Ajoyib, kelishuv va buyurtmani rasmiylashtirish uchun adminimizga yozing: @milana_admin25."
+            return "Керемет, тапсырыстың соңғы шарттары үшін менеджерімізге хабарласыңыз: +998501551010."
+        return "Sizni menejerimiz bilan bog'layman: +998501551010"
 
     if any(phrase in user for phrase in [
         "meni haqimda hamma ma'lumotni unut",
@@ -2968,23 +3160,23 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     if price_ask and not has_number:
         if lang == "en":
             text = (
-                "You can check the price in our catalog. "
-                "Which model do you need? What quantity do you want? Which color do you prefer?"
+                "Our manager explains exact prices. One qop/meshok is usually around 400-500 USD. "
+                "Which model do you need?"
             )
         elif lang == "kk":
             text = (
-                "Бағаны каталогтан көре аласыз. "
-                "Қай модель керек? Қанша дана аласыз? Қай түс ұнайды?"
+                "Нақты бағаны менеджеріміз түсіндіреді. Бір қоп/қап әдетте 400-500 USD шамасында. "
+                "Қай модель керек?"
             )
         elif lang == "ru":
             text = (
-                "Цену можно посмотреть в каталоге. "
-                "Какая модель нужна? Сколько штук нужно? Какой цвет предпочитаете?"
+                "Точную цену объяснит наш менеджер. Один мешок обычно около 400-500 USD. "
+                "Какая модель нужна?"
             )
         else:
             text = (
-                "Narxini Katalogdan ko'rib olishingiz mumkin. "
-                "Qaysi model kerak? Necha dona olmoqchisiz? Qaysi rang yoqdi?"
+                "Aniq narxni menejerimiz tushuntiradi. 1 qop odatda 400-500 dollar atrofida bo'ladi. "
+                "Sizga qaysi model kerak?"
             )
 
     # Strong language guard: if customer wrote in English but reply is not English, return safe English fallback.
@@ -2995,8 +3187,8 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
         if has_cyr or any(m in low for m in uz_markers):
             if price_ask:
                 text = (
-                    "You can check the price in our catalog. "
-                    "Which model do you need? What quantity do you want? Which color do you prefer?"
+                    "Our manager explains exact prices. One qop/meshok is usually around 400-500 USD. "
+                    "Which model do you need?"
                 )
             else:
                 text = "Hello! Of course. Which products are you interested in?"
@@ -3056,6 +3248,10 @@ def get_recent_platform_chat_history(platform: str, business: dict, customer_id:
 
 def get_ai_reply(user_text: str, business: dict, platform: str = "instagram", customer_id: str = "", channel: str = ""):
     try:
+        off_topic_reply = unrelated_topic_reply(user_text)
+        if off_topic_reply:
+            return off_topic_reply
+
         messages = [{"role": "system", "content": build_sales_system_prompt(business, platform)}]
         messages.extend(get_recent_platform_chat_history(platform, business, customer_id, channel, limit=8))
         language_instruction = language_instruction_for(user_text)
@@ -3925,6 +4121,12 @@ Fallback catalog link:
 
 def get_whatsapp_ai_reply(phone: str, user_text: str, business: dict) -> str:
     chat = get_whatsapp_chat(phone)
+
+    off_topic_reply = unrelated_topic_reply(user_text)
+    if off_topic_reply:
+        add_whatsapp_memory(phone, "user", user_text)
+        add_whatsapp_memory(phone, "assistant", off_topic_reply)
+        return off_topic_reply
 
     if not chat.get("intro_sent"):
         chat["intro_sent"] = True
@@ -5071,6 +5273,51 @@ async def get_conversation_messages_v2(
             customer_id, post_id = decode_comment_scope(customer_scope)
 
         limit = max(1, min(int(limit or 50), 50))
+        cache_key = json.dumps(
+            {
+                "conversation_id": conversation_id,
+                "limit": limit,
+                "include_raw": bool(include_raw),
+            },
+            sort_keys=True,
+        )
+        now_ts = time.time()
+        cached = _conversation_messages_cache.get(cache_key)
+        if cached and (now_ts - cached[0]) <= CONVERSATION_MESSAGES_CACHE_TTL_SECONDS:
+            if mark_read:
+                def mark_read_cached_task():
+                    try:
+                        mark_query = (
+                            supabase.table("inbox_messages")
+                            .update({"is_read": True})
+                            .eq("platform", platform)
+                            .eq("business_id", business_id)
+                            .eq("direction", "inbound")
+                            .eq("is_read", False)
+                        )
+                        if platform == "telegram" and channel in ("telegram_bot_group", "telegram_bot_private"):
+                            mark_query = mark_query.or_(f"chat_id.eq.{customer_id},customer_id.eq.{customer_id}")
+                        elif platform == "instagram" and "comment" in channel:
+                            if channel:
+                                mark_query = mark_query.eq("channel", channel)
+                            if post_id:
+                                mark_query = mark_query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
+                            elif customer_id:
+                                mark_query = mark_query.eq("customer_id", str(customer_id))
+                        else:
+                            mark_query = mark_query.eq("customer_id", str(customer_id))
+                            if channel:
+                                mark_query = mark_query.eq("channel", channel)
+                        mark_query.execute()
+                    except Exception:
+                        pass
+
+                if background_tasks is not None:
+                    background_tasks.add_task(mark_read_cached_task)
+                else:
+                    mark_read_cached_task()
+            return cached[1]
+
         base_fields = (
             "id,direction,role,created_at,media_type,content,platform,channel,customer_id,"
             "external_message_id,media_url,post_permalink,post_image_url,post_media_type,raw_payload"
@@ -5217,11 +5464,16 @@ async def get_conversation_messages_v2(
             else:
                 mark_read_task()
 
-        return {
+        response_payload = {
             'status': 'ok',
             'count': len(messages),
             'data': messages
         }
+        _conversation_messages_cache[cache_key] = (time.time(), response_payload)
+        if len(_conversation_messages_cache) > 500:
+            for stale_key in sorted(_conversation_messages_cache, key=lambda item: _conversation_messages_cache[item][0])[:150]:
+                _conversation_messages_cache.pop(stale_key, None)
+        return response_payload
 
     except Exception as e:
         log("Error fetching conversation messages", str(e))
@@ -5483,6 +5735,7 @@ async def delete_conversation_v2(
 
         result = query.execute()
         deleted = len(result.data or [])
+        clear_inbox_caches()
 
         return {
             "status": "ok",
