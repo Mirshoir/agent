@@ -1141,7 +1141,12 @@ function normalizeConversation(row) {
   const parsedCustomerId = parts[3] || '';
   const customerId = row.customer_id || parsedCustomerId;
   const chatId = row.chat_id || customerId;
-  const name = row.customer_name || row.name || `Client ${String(customerId || '').slice(-4)}`;
+  const rawName = String(row.customer_name || row.name || '').trim();
+  const generatedInstagramName = /^instagram\s+(user|client|ig user)\s+\d{2,}$/i.test(rawName);
+  const numericName = /^\d{6,}$/.test(rawName);
+  const name = rawName && !generatedInstagramName && !numericName
+    ? rawName
+    : (platform === 'instagram' && customerId ? `@${customerId}` : `Client ${String(customerId || '').slice(-4)}`);
   const unread = Number(row.unread_count ?? row.unread ?? 0);
   const total = Number(row.total_messages ?? row.kpis?.orders ?? 0);
   const platform = row.platform || 'instagram';
@@ -3346,7 +3351,7 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
 
   const sendDraft = async () => {
     const text = draft.trim();
-    if (!text || sending) return;
+    if (!text) return;
     setDraft('');
     const sent = await onSend(text, { replyToCommentId: replyTarget?.commentId || '' });
     if (sent !== false) setReplyTarget(null);
@@ -3647,8 +3652,8 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
             </button>
             <div className="grow" />
             <span style={{ fontSize: 11, color: 'var(--muted)', marginRight: 6 }}>{t.kbdHint}</span>
-            <button className={`send ${draft.trim() && !sending ? '' : 'disabled'}`} onClick={sendDraft}>
-              <I.Send /> {sending ? 'Sending' : t.send}
+            <button className={`send ${draft.trim() ? '' : 'disabled'}`} onClick={sendDraft}>
+              <I.Send /> {t.send}
             </button>
           </div>
           {recording && (
@@ -4563,6 +4568,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
 
   const sendMessage = async (text, options = {}) => {
     if (!conv) return false;
+    const targetConv = conv;
 
     if (!liveMode) {
       const localMessage = {
@@ -4573,10 +4579,10 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
         text,
       };
       setThreads(prev => {
-        const existing = prev[conv.id]?.messages || prev[conv.id] || [];
+        const existing = prev[targetConv.id]?.messages || prev[targetConv.id] || [];
         return {
           ...prev,
-          [conv.id]: {
+          [targetConv.id]: {
             updatedAt: Date.now(),
             messages: [...existing, localMessage],
           },
@@ -4585,8 +4591,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       return true;
     }
 
-    setSending(true);
-    const optimisticId = `optimistic-${Date.now()}`;
+    const optimisticId = `optimistic-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const optimisticMessage = {
       id: optimisticId,
       side: 'outbound',
@@ -4596,39 +4601,40 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       pending: true,
     };
     setThreads(prev => {
-      const existing = prev[conv.id]?.messages || prev[conv.id] || [];
+      const existing = prev[targetConv.id]?.messages || prev[targetConv.id] || [];
       return {
         ...prev,
-        [conv.id]: {
+        [targetConv.id]: {
           updatedAt: Date.now(),
           messages: [...existing, optimisticMessage],
         },
       };
     });
-    try {
-      await sendLiveMessage(conv, text, options);
-      await loadThread(conv.id, { silent: true, limit: 300 });
-      await loadConversations({ silent: true, sideLoad: false });
-      showToast('Message sent');
-      return true;
-    } catch (e) {
-      setThreads(prev => {
-        const existing = prev[conv.id]?.messages || prev[conv.id] || [];
-        const nextMessages = existing.filter(item => item.id !== optimisticId);
-        return {
-          ...prev,
-          [conv.id]: {
-            updatedAt: Date.now(),
-            messages: nextMessages,
-          },
-        };
-      });
-      setApiError(e.message);
-      showToast(e.message);
-      return false;
-    } finally {
-      setSending(false);
-    }
+
+    (async () => {
+      try {
+        await sendLiveMessage(targetConv, text, options);
+        await loadThread(targetConv.id, { silent: true, limit: 300, noCache: true });
+        await loadConversations({ silent: true, sideLoad: false });
+        showToast('Message sent');
+      } catch (e) {
+        setThreads(prev => {
+          const existing = prev[targetConv.id]?.messages || prev[targetConv.id] || [];
+          const nextMessages = existing.filter(item => item.id !== optimisticId);
+          return {
+            ...prev,
+            [targetConv.id]: {
+              updatedAt: Date.now(),
+              messages: nextMessages,
+            },
+          };
+        });
+        setApiError(e.message);
+        showToast(e.message);
+      }
+    })();
+
+    return true;
   };
 
   useEffect(() => {
