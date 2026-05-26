@@ -10,6 +10,7 @@ import tempfile
 import shutil
 import subprocess
 import requests
+import telegram_bot as telegram_bot_module
 from urllib.parse import urlencode, urlparse, parse_qs, unquote
 from typing import Optional
 from datetime import datetime, timedelta
@@ -32,8 +33,6 @@ from telegram_bot import (
     send_telegram_user_message,
     send_telegram_user_file,
     send_telegram_user_voice_file,
-    edit_telegram_user_message,
-    delete_telegram_user_message,
     send_telegram_bot_message,
     save_telegram_message,
     get_active_business,
@@ -1056,6 +1055,20 @@ def delete_telegram_bot_message(chat_id: str, message_id: str, business: dict):
     )
 
 
+async def edit_telegram_user_message_safe(customer_id: str, message_id: str, text: str):
+    handler = getattr(telegram_bot_module, "edit_telegram_user_message", None)
+    if not handler:
+        return False, {"error": "Telegram user-account edit support is not deployed yet. Deploy the updated telegram_bot.py too."}
+    return await handler(customer_id, message_id, text)
+
+
+async def delete_telegram_user_message_safe(customer_id: str, message_id: str):
+    handler = getattr(telegram_bot_module, "delete_telegram_user_message", None)
+    if not handler:
+        return False, {"error": "Telegram user-account delete support is not deployed yet. Deploy the updated telegram_bot.py too."}
+    return await handler(customer_id, message_id)
+
+
 def get_inbox_message_for_dashboard(message_id: str, access: dict):
     message_id = normalize_id(message_id)
     if not message_id:
@@ -1106,8 +1119,8 @@ async def mutate_delivered_telegram_message(row: dict, business: dict, action: s
     try:
         if channel == "telegram_user_private":
             if action == "edit":
-                return await edit_telegram_user_message(target_id, message_id, text)
-            return await delete_telegram_user_message(target_id, message_id)
+                return await edit_telegram_user_message_safe(target_id, message_id, text)
+            return await delete_telegram_user_message_safe(target_id, message_id)
 
         if action == "edit":
             res = edit_telegram_bot_message(target_id, message_id, text, business)
