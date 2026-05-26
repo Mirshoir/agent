@@ -84,7 +84,6 @@ async def dashboard():
     """Serve React dashboard"""
     for path in (
         "frontend/dist/index.html",
-        "frontend/index.html",
         "static/index.html",
         "static/Instaagent Dashboard.html",
     ):
