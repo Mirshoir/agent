@@ -3882,6 +3882,8 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const conv = conversations.find(c => c.id === selectedId);
   const aiOn = conv ? conv.aiOn : false;
   const messages = threads[selectedId] || window.getThread(selectedId);
+  const roleScope = resolveRoleScope(currentUser, businesses);
+  const isOperator = roleScope.isOperator;
 
   const [theme, setTheme] = useState(TWEAK_DEFAULTS.theme);
   useEffect(() => {
