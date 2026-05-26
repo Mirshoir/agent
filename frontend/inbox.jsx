@@ -4896,5 +4896,3 @@ function Root() {
 }
 
 createRoot(document.getElementById('root')).render(<Root />);
-  const roleScope = resolveRoleScope(currentUser, businesses);
-  const isOperator = roleScope.isOperator;
