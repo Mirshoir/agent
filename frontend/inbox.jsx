@@ -3217,6 +3217,7 @@ function Message({ m, conv, t, onReplyComment, onEditMessage, onDeleteMessage })
     typeof onReplyComment === 'function'
   );
   const canManageOutbound = Boolean(
+    conv?.platform === 'telegram' &&
     m.side === 'outbound' &&
     !m.pending &&
     m.id &&
@@ -3340,7 +3341,7 @@ function ThreadHead({ conv, aiOn, onToggleAi, t, onPin, onArchive, onDelete, onM
 }
 
 // ---------- Thread column ----------
-function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, threadLoading, onTool }) {
+function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, onEditMessage, onDeleteMessage, sending, threadLoading, onTool }) {
   if (!conv) {
     return <section className="thread-col" />;
   }
@@ -3587,7 +3588,14 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
           return (
             <React.Fragment key={m.id}>
               {dayChanged && <div className="day-sep">{m.day}</div>}
-              <Message m={m} conv={conv} t={t} onReplyComment={selectReplyTarget} />
+              <Message
+                m={m}
+                conv={conv}
+                t={t}
+                onReplyComment={selectReplyTarget}
+                onEditMessage={onEditMessage}
+                onDeleteMessage={onDeleteMessage}
+              />
             </React.Fragment>
           );
         })}
@@ -4836,6 +4844,81 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     }
   };
 
+  const editMessage = async (message) => {
+    if (!conv || !message?.id) return;
+    if (conv.platform !== 'telegram') {
+      showToast('Instagram and WhatsApp do not support editing already-delivered messages through the connected API.');
+      return;
+    }
+
+    const currentText = String(message.text || '').trim();
+    const nextText = window.prompt('Edit this Telegram message:', currentText);
+    if (nextText === null) return;
+    const cleanText = nextText.trim();
+    if (!cleanText || cleanText === currentText) return;
+
+    const conversationId = conv.id;
+    setThreads(prev => {
+      const existing = prev[conversationId]?.messages || prev[conversationId] || [];
+      return {
+        ...prev,
+        [conversationId]: {
+          updatedAt: Date.now(),
+          messages: existing.map(item => item.id === message.id ? { ...item, text: cleanText } : item),
+        },
+      };
+    });
+
+    try {
+      await API.postJson('/api/v2/message/edit', { message_id: message.id, text: cleanText });
+      await loadThread(conversationId, { silent: true, limit: 300, noCache: true });
+      await loadConversations({ silent: true, sideLoad: false });
+      showToast('Message edited on Telegram');
+    } catch (e) {
+      setThreads(prev => {
+        const existing = prev[conversationId]?.messages || prev[conversationId] || [];
+        return {
+          ...prev,
+          [conversationId]: {
+            updatedAt: Date.now(),
+            messages: existing.map(item => item.id === message.id ? { ...item, text: currentText } : item),
+          },
+        };
+      });
+      setApiError(e.message);
+      showToast(e.message);
+    }
+  };
+
+  const deleteMessage = async (message) => {
+    if (!conv || !message?.id) return;
+    if (conv.platform !== 'telegram') {
+      showToast('Instagram and WhatsApp do not support deleting already-delivered messages through the connected API.');
+      return;
+    }
+    if (!window.confirm('Delete this message from the real Telegram chat and this dashboard?')) return;
+
+    const conversationId = conv.id;
+    try {
+      await API.postJson('/api/v2/message/delete', { message_id: message.id });
+      setThreads(prev => {
+        const existing = prev[conversationId]?.messages || prev[conversationId] || [];
+        return {
+          ...prev,
+          [conversationId]: {
+            updatedAt: Date.now(),
+            messages: existing.filter(item => item.id !== message.id),
+          },
+        };
+      });
+      await loadConversations({ silent: true, sideLoad: false });
+      showToast('Message deleted from Telegram');
+    } catch (e) {
+      setApiError(e.message);
+      showToast(e.message);
+    }
+  };
+
   const handleTool = async (tool, setDraft, file, caption = '') => {
     if (file) {
       if (!conv) return false;
@@ -5084,6 +5167,8 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
             t={t}
             messages={messages}
             onSend={sendMessage}
+            onEditMessage={editMessage}
+            onDeleteMessage={deleteMessage}
             sending={sending}
             threadLoading={threadLoading}
             onTool={handleTool}
