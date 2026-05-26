@@ -185,8 +185,8 @@ const API = {
   },
 };
 
-const THREAD_POLL_MS = 2500;
-const INBOX_POLL_MS = 6000;
+const THREAD_POLL_MS = 1200;
+const INBOX_POLL_MS = 2000;
 const STATS_POLL_MS = 20000;
 const THREAD_WARMUP_CONCURRENCY = 6;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
@@ -4319,7 +4319,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       if (sideLoad || !businessesRef.current.length) {
         await loadBusinesses({ silent: true, ownerEmailOverride });
       }
-      const data = await API.get('/api/v2/conversations');
+      const data = await API.get('/api/v2/conversations?no_cache=1');
       const selectedCurrent = selectedIdRef.current;
       const ownerScoped = normalizeOwnerEmail(ownerEmailOverride || ownerEmail);
       const allowedBusinessIds = new Set((businessesRef.current || []).map(row => row.id).filter(Boolean));
@@ -4386,14 +4386,14 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     showToast(clean ? `Owner scoped to ${clean}` : 'Owner scope cleared');
   };
 
-  const loadThread = async (conversationId, { silent = false, markRead = true, limit = 200 } = {}) => {
+  const loadThread = async (conversationId, { silent = false, markRead = true, limit = 200, noCache = false } = {}) => {
     if (!conversationId || !liveMode) return;
     const inFlight = threadLoadPromisesRef.current[conversationId];
     if (inFlight) return inFlight;
     if (!silent) setThreadLoading(true);
     const request = (async () => {
       try {
-        const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?mark_read=${markRead ? '1' : '0'}&limit=${Math.max(1, Number(limit || 200))}`);
+        const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?mark_read=${markRead ? '1' : '0'}&limit=${Math.max(1, Number(limit || 200))}&no_cache=${noCache ? '1' : '0'}`);
         const normalized = (data.data || []).map(normalizeMessage);
         setThreads(prev => ({
           ...prev,
@@ -4427,7 +4427,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       const currentMessages = getThreadMessages(threads[conversationId]);
       if (!conversationId || currentMessages.length > 0) continue;
       threadWarmupRunningRef.current += 1;
-      loadThread(conversationId, { silent: true, markRead: false, limit: 120 })
+      loadThread(conversationId, { silent: true, markRead: false, limit: 120, noCache: true })
         .catch(() => false)
         .finally(() => {
           threadWarmupRunningRef.current = Math.max(0, threadWarmupRunningRef.current - 1);
@@ -4586,13 +4586,43 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     }
 
     setSending(true);
+    const optimisticId = `optimistic-${Date.now()}`;
+    const optimisticMessage = {
+      id: optimisticId,
+      side: 'outbound',
+      type: 'text',
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      text,
+      pending: true,
+    };
+    setThreads(prev => {
+      const existing = prev[conv.id]?.messages || prev[conv.id] || [];
+      return {
+        ...prev,
+        [conv.id]: {
+          updatedAt: Date.now(),
+          messages: [...existing, optimisticMessage],
+        },
+      };
+    });
     try {
       await sendLiveMessage(conv, text, options);
-      await loadThread(conv.id);
-      await loadConversations();
+      await loadThread(conv.id, { silent: true, limit: 300 });
+      await loadConversations({ silent: true, sideLoad: false });
       showToast('Message sent');
       return true;
     } catch (e) {
+      setThreads(prev => {
+        const existing = prev[conv.id]?.messages || prev[conv.id] || [];
+        const nextMessages = existing.filter(item => item.id !== optimisticId);
+        return {
+          ...prev,
+          [conv.id]: {
+            updatedAt: Date.now(),
+            messages: nextMessages,
+          },
+        };
+      });
       setApiError(e.message);
       showToast(e.message);
       return false;
@@ -4640,7 +4670,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
 
   useEffect(() => {
     const cached = getThreadMessages(threads[selectedId]);
-    loadThread(selectedId, { silent: cached.length > 0, limit: 300 });
+    loadThread(selectedId, { silent: cached.length > 0, limit: 300, noCache: true });
   }, [selectedId, liveMode]);
 
   useEffect(() => {
@@ -4651,7 +4681,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       if (!currentId || threadPollBusy.current) return;
       threadPollBusy.current = true;
       try {
-        await loadThread(currentId, { silent: true });
+        await loadThread(currentId, { silent: true, noCache: true });
       } finally {
         threadPollBusy.current = false;
       }
