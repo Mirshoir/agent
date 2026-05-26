@@ -1,13 +1,11 @@
 /* global window */
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
+import { I } from './icons.jsx';
 
 import './app.css';
 import './tweaks-panel.jsx';
 import './data.jsx';
-import './icons.jsx';
-
-const I = window.I;
 const IS_LOCALHOST = ['localhost', '127.0.0.1'].includes(window.location.hostname);
 
 const ENV_API_BASE = import.meta.env.VITE_API_URL || 'https://agent-1-xi6h.onrender.com';
