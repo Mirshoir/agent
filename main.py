@@ -5243,7 +5243,7 @@ async def get_conversations_v2(
 async def get_conversation_messages_v2(
         conversation_id: str,
         background_tasks: BackgroundTasks,
-        limit: int = 50,
+        limit: int = 200,
         mark_read: bool = True,
         include_raw: bool = False,
         authorization: str = Header(default=""),
@@ -5272,7 +5272,7 @@ async def get_conversation_messages_v2(
         if platform == "instagram" and "comment" in channel:
             customer_id, post_id = decode_comment_scope(customer_scope)
 
-        limit = max(1, min(int(limit or 50), 50))
+        limit = max(1, min(int(limit or 200), 300))
         cache_key = json.dumps(
             {
                 "conversation_id": conversation_id,
@@ -5341,7 +5341,7 @@ async def get_conversation_messages_v2(
             elif customer_id:
                 query = query.eq("customer_id", str(customer_id))
         else:
-            query = query.eq("customer_id", str(customer_id))
+            query = query.or_(f"customer_id.eq.{customer_id},chat_id.eq.{customer_id}")
             if platform == "instagram" and channel in ("dm", "instagram_dm", "instagram_private"):
                 query = query.in_("channel", ["dm", "instagram_dm", "instagram_private", ""])
             elif channel:
@@ -5358,7 +5358,7 @@ async def get_conversation_messages_v2(
                 .select(select_fields)
                 .eq("platform", platform)
                 .eq("business_id", business_id)
-                .eq("customer_id", str(customer_id))
+                .or_(f"customer_id.eq.{customer_id},chat_id.eq.{customer_id}")
                 .order("created_at", desc=True)
                 .limit(limit)
             )
@@ -5452,7 +5452,7 @@ async def get_conversation_messages_v2(
                         elif customer_id:
                             mark_query = mark_query.eq("customer_id", str(customer_id))
                     else:
-                        mark_query = mark_query.eq("customer_id", str(customer_id))
+                        mark_query = mark_query.or_(f"customer_id.eq.{customer_id},chat_id.eq.{customer_id}")
                         if channel:
                             mark_query = mark_query.eq("channel", channel)
                     mark_query.execute()
