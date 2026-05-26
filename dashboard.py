@@ -411,6 +411,61 @@ def create_business(payload):
     return supabase.table("businesses").insert(payload).execute()
 
 
+def sync_business_primary_channel_fields(business_id, platform, config, account_external_id=""):
+    """
+    Keep legacy `businesses` token fields in sync with channel records so backend
+    integrations work for every business, not only one preset account.
+    """
+    if not business_id:
+        return None
+    platform = str(platform or "").strip().lower()
+    config = config or {}
+    patch = {}
+
+    if platform == "instagram":
+        ig_business_id = str(config.get("instagram_business_id") or account_external_id or "").strip()
+        fb_page_id = str(config.get("facebook_page_id") or "").strip()
+        access_token = str(config.get("access_token") or "").strip()
+        page_access_token = str(config.get("page_access_token") or "").strip()
+        if ig_business_id:
+            patch["instagram_business_id"] = ig_business_id
+        if fb_page_id:
+            patch["facebook_page_id"] = fb_page_id
+        if access_token:
+            patch["access_token"] = access_token
+            patch["token_preview"] = f"{access_token[:10]}..." if len(access_token) > 10 else access_token
+        if page_access_token:
+            patch["page_access_token"] = page_access_token
+
+    elif platform == "whatsapp":
+        wa_token = str(config.get("access_token") or "").strip()
+        wa_phone_id = str(config.get("phone_number_id") or account_external_id or "").strip()
+        wa_waba_id = str(config.get("waba_id") or "").strip()
+        if wa_token:
+            patch["whatsapp_access_token"] = wa_token
+        if wa_phone_id:
+            patch["whatsapp_phone_number_id"] = wa_phone_id
+        if wa_waba_id:
+            patch["whatsapp_business_account_id"] = wa_waba_id
+
+    elif platform == "telegram_bot":
+        bot_token = str(config.get("bot_token") or "").strip()
+        if bot_token:
+            patch["telegram_bot_token"] = bot_token
+
+    elif platform == "telegram_user":
+        session_filename = str(config.get("session_filename") or "").strip()
+        session_b64 = str(config.get("session_file_b64") or "").strip()
+        if session_filename:
+            patch["telegram_session_filename"] = session_filename
+        if session_b64:
+            patch["telegram_session_b64"] = session_b64
+
+    if not patch:
+        return None
+    return update_business(business_id, patch)
+
+
 def delete_business(business_id):
     if not business_id:
         return None
@@ -1202,6 +1257,12 @@ def render_account_connections_page(businesses):
             }
             try:
                 upsert_business_channel(payload)
+                sync_business_primary_channel_fields(
+                    business_id=business_id,
+                    platform=platform,
+                    config=config,
+                    account_external_id=account_external_id.strip(),
+                )
                 st.success("Account connection saved.")
                 st.rerun()
             except Exception as e:
@@ -1776,6 +1837,147 @@ def render_creator_db_control():
                 st.error("Some rows failed:\n" + "\n".join(errors[:8]))
 
 
+def render_creator_onboarding(businesses):
+    st.subheader("Creator Onboarding")
+    st.caption("Create and configure any new business with initial channels and tokens.")
+
+    with st.form("creator_new_business_form"):
+        st.markdown("### 1) Create business")
+        c1, c2 = st.columns(2)
+        with c1:
+            business_name = st.text_input("Business name", placeholder="New Brand LLC")
+            business_type = st.text_input("Business type", placeholder="Retail / Textile / Services")
+            owner_email = st.text_input("Owner email (optional)", placeholder="owner@brand.com")
+        with c2:
+            language = st.selectbox("Default language", ["uz", "ru", "en"], index=0)
+            tone = st.text_input("Tone", value="friendly, polite, sales-focused")
+            ai_provider = st.selectbox("AI provider", ["mistral", "openai", "gemini", "anthropic"], index=0)
+
+        st.markdown("### 2) Optional initial channels")
+        platforms = st.multiselect(
+            "Add channels now",
+            ["instagram", "telegram_bot", "telegram_user", "whatsapp"],
+            default=["instagram"],
+        )
+
+        ig_business_id = st.text_input("Instagram Business ID", placeholder="1784...")
+        fb_page_id = st.text_input("Facebook Page ID", placeholder="12345...")
+        ig_access_token = st.text_area("Instagram access token", height=90)
+        ig_page_access_token = st.text_area("Facebook page token", height=90)
+
+        tg_bot_token = st.text_area("Telegram bot token", height=90)
+        tg_bot_username = st.text_input("Telegram bot username (optional)", placeholder="@your_bot")
+        tg_session_name = st.text_input("Telegram user session filename (optional)", placeholder="brand_user.session")
+        tg_session_file = st.file_uploader("Telegram user .session (optional)", type=["session"])
+
+        wa_waba_id = st.text_input("WhatsApp WABA ID")
+        wa_phone_id = st.text_input("WhatsApp Phone Number ID")
+        wa_access_token = st.text_area("WhatsApp access token", height=90)
+
+        submit = st.form_submit_button("Create business with channels", type="primary")
+
+        if submit:
+            if not business_name.strip():
+                st.warning("Business name is required.")
+                return
+            try:
+                base_payload = {
+                    "business_name": business_name.strip(),
+                    "business_type": (business_type or "General").strip(),
+                    "language": language,
+                    "tone": tone.strip() or "friendly, polite, sales-focused",
+                    "bot_enabled": True,
+                    "auto_reply_dms": True,
+                    "auto_reply_comments": True,
+                    "knowledge": "",
+                    "products": "",
+                    "prices": "",
+                    "delivery_info": "",
+                    "working_hours": "",
+                    "faq": "",
+                    "catalog_link": "",
+                    "sales_phone": "",
+                    "ai_model": "mistral-small-latest",
+                    "ai_provider": ai_provider,
+                    "ai_temperature": 0.5,
+                    "ai_max_tokens": 130,
+                }
+                created = create_business(base_payload).data or []
+                if not created:
+                    st.error("Business creation returned empty result.")
+                    return
+                business = created[0]
+                business_id = business["id"]
+
+                if owner_email.strip():
+                    create_or_update_dashboard_user(owner_email.strip(), "TempPass123!", True)
+                    assign_user_business(owner_email.strip(), business_id, "owner")
+
+                if "instagram" in platforms and (ig_business_id.strip() or ig_access_token.strip()):
+                    ig_config = {
+                        "instagram_business_id": ig_business_id.strip(),
+                        "facebook_page_id": fb_page_id.strip(),
+                        "access_token": ig_access_token.strip(),
+                        "page_access_token": ig_page_access_token.strip(),
+                    }
+                    upsert_business_channel({
+                        "business_id": business_id,
+                        "platform": "instagram",
+                        "account_label": "Instagram main",
+                        "account_external_id": ig_business_id.strip() or fb_page_id.strip() or f"ig_{business_id[:8]}",
+                        "is_active": True,
+                        "config": ig_config,
+                    })
+                    sync_business_primary_channel_fields(business_id, "instagram", ig_config, ig_business_id.strip())
+
+                if "telegram_bot" in platforms and tg_bot_token.strip():
+                    tg_bot_config = {"bot_token": tg_bot_token.strip(), "bot_username": tg_bot_username.strip()}
+                    upsert_business_channel({
+                        "business_id": business_id,
+                        "platform": "telegram_bot",
+                        "account_label": "Telegram bot",
+                        "account_external_id": tg_bot_username.strip() or f"tg_bot_{business_id[:8]}",
+                        "is_active": True,
+                        "config": tg_bot_config,
+                    })
+                    sync_business_primary_channel_fields(business_id, "telegram_bot", tg_bot_config)
+
+                if "telegram_user" in platforms:
+                    session_b64 = base64.b64encode(tg_session_file.getvalue()).decode() if tg_session_file is not None else ""
+                    if tg_session_name.strip() or session_b64:
+                        tg_user_config = {"session_filename": tg_session_name.strip(), "session_file_b64": session_b64}
+                        upsert_business_channel({
+                            "business_id": business_id,
+                            "platform": "telegram_user",
+                            "account_label": "Telegram user",
+                            "account_external_id": tg_session_name.strip() or f"tg_user_{business_id[:8]}",
+                            "is_active": True,
+                            "config": tg_user_config,
+                        })
+                        sync_business_primary_channel_fields(business_id, "telegram_user", tg_user_config)
+
+                if "whatsapp" in platforms and (wa_phone_id.strip() or wa_access_token.strip()):
+                    wa_config = {
+                        "waba_id": wa_waba_id.strip(),
+                        "phone_number_id": wa_phone_id.strip(),
+                        "access_token": wa_access_token.strip(),
+                    }
+                    upsert_business_channel({
+                        "business_id": business_id,
+                        "platform": "whatsapp",
+                        "account_label": "WhatsApp main",
+                        "account_external_id": wa_phone_id.strip() or f"wa_{business_id[:8]}",
+                        "is_active": True,
+                        "config": wa_config,
+                    })
+                    sync_business_primary_channel_fields(business_id, "whatsapp", wa_config, wa_phone_id.strip())
+
+                st.success("Business and channels created successfully.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Onboarding failed: {e}")
+
+
 def login_screen():
     st.markdown('<div class="login-card">', unsafe_allow_html=True)
     st.title("InsaAgent Login")
@@ -1818,6 +2020,7 @@ with st.sidebar:
     menu_items = ["Overview", "Social Sales Chat", "Business Settings", "Account Connections", "Webhook Info"]
     if is_admin:
         menu_items.insert(3, "User Management")
+        menu_items.insert(4, "Creator Onboarding")
         menu_items.insert(4, "Creator DB Control")
     page = st.radio("Menu", menu_items)
 
@@ -1865,6 +2068,12 @@ elif page == "Creator DB Control":
         st.error("Only admin can access Creator DB Control.")
     else:
         render_creator_db_control()
+
+elif page == "Creator Onboarding":
+    if not is_admin:
+        st.error("Only admin can access Creator Onboarding.")
+    else:
+        render_creator_onboarding(get_all_businesses())
 
 elif page == "Webhook Info":
     st.subheader("Webhook URLs")
