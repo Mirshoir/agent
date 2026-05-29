@@ -97,6 +97,7 @@ async def dashboard():
 
 @app.on_event("startup")
 async def startup_telegram_user_client():
+    log("Application startup", {"version": APP_VERSION})
     await start_telegram_user_client()
 
 
@@ -108,6 +109,7 @@ async def shutdown_telegram_user_client():
 # ============================================================================
 # ENV
 # ============================================================================
+APP_VERSION = "5.1.2-instagram-comment-debug"
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -4686,7 +4688,7 @@ async def home():
 async def api_health():
     return {
         "status": "ok",
-        "version": "5.1.0-telegram-voice",
+        "version": APP_VERSION,
         "ffmpeg": bool(shutil.which("ffmpeg")),
     }
 
@@ -4722,7 +4724,7 @@ async def api_health_deep(
 
     return {
         "status": "ok" if healthy else "degraded",
-        "version": "5.1.1-telegram-media-fallback",
+        "version": APP_VERSION,
         "checks": checks,
     }
 
@@ -6139,6 +6141,7 @@ async def receive_webhook(request: Request):
                             "field": change.get("field"),
                             "message_count": len(((change.get("value") or {}).get("messages") or [])),
                             "status_count": len(((change.get("value") or {}).get("statuses") or [])),
+                            "has_comment_id": bool(((change.get("value") or {}).get("comment_id") or (change.get("value") or {}).get("id")) if change.get("field") in ["comments", "feed"] else False),
                             "phone_number_id": normalize_id(((change.get("value") or {}).get("metadata") or {}).get("phone_number_id")),
                         }
                         for change in (entry.get("changes", []) or [])
