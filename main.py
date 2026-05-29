@@ -97,7 +97,6 @@ async def dashboard():
 
 @app.on_event("startup")
 async def startup_telegram_user_client():
-    log("Application startup", {"version": APP_VERSION})
     await start_telegram_user_client()
 
 
@@ -109,7 +108,6 @@ async def shutdown_telegram_user_client():
 # ============================================================================
 # ENV
 # ============================================================================
-APP_VERSION = "5.1.2-instagram-comment-debug"
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -1445,24 +1443,19 @@ def get_business_channel(platform: str, external_account_id: str = "", only_acti
     external_account_id = normalize_id(external_account_id)
     if not platform or not external_account_id:
         return None
-    # Canonical column is account_external_id. Keep a legacy fallback for older schemas.
-    lookup_columns = ("account_external_id", "external_account_id")
-    for column_name in lookup_columns:
-        try:
-            query = (
-                supabase.table("business_channels")
-                .select("*")
-                .eq("platform", platform)
-                .eq(column_name, external_account_id)
-            )
-            if only_active:
-                query = query.eq("is_active", True)
-            result = query.limit(1).execute()
-            if result.data:
-                return result.data[0]
-        except Exception:
-            continue
-    return None
+    try:
+        query = (
+            supabase.table("business_channels")
+            .select("*")
+            .eq("platform", platform)
+            .eq("external_account_id", external_account_id)
+        )
+        if only_active:
+            query = query.eq("is_active", True)
+        result = query.limit(1).execute()
+        return result.data[0] if result.data else None
+    except Exception:
+        return None
 
 
 def get_business(instagram_business_id: str):
@@ -3746,50 +3739,23 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     commenter_username = normalize_id(from_user.get("username"))
     post_id = extract_instagram_comment_post_id(value)
     comment_text = value.get("message") or value.get("text") or ""
-    log(
-        "Instagram comment event parsed",
-        {
-            "entry_id": entry_id,
-            "comment_id": comment_id,
-            "commenter_id": commenter_id,
-            "commenter_username": commenter_username,
-            "post_id": post_id,
-            "has_text": bool(comment_text),
-            "text_preview": (comment_text or "")[:120],
-        },
-    )
 
     if not comment_id or not comment_text:
-        log("Instagram comment skipped: missing comment_id or text", {"comment_id": comment_id, "has_text": bool(comment_text)})
         return
 
     if already_processed(processed_comment_ids, comment_id):
-        log("Instagram comment skipped: already processed", {"comment_id": comment_id})
         return
 
     business = find_business_for_webhook(entry_id)
     if not business:
-        log("Instagram comment skipped: business not found", {"entry_id": entry_id, "comment_id": comment_id})
         return
-    log(
-        "Instagram comment business resolved",
-        {
-            "comment_id": comment_id,
-            "business_id": normalize_id(business.get("id")),
-            "oauth_provider": normalize_id(business.get("oauth_provider")),
-            "instagram_business_id": normalize_id(business.get("instagram_business_id")),
-            "facebook_page_id": normalize_id(business.get("facebook_page_id")),
-        },
-    )
 
     # Prevent self-echo loops and duplicate self threads.
     if is_own_instagram_comment_actor(business, entry_id, commenter_id, commenter_username):
-        log("Instagram comment skipped: own actor echo", {"comment_id": comment_id, "entry_id": entry_id, "commenter_id": commenter_id})
         mark_processed(processed_comment_ids, comment_id)
         return
 
     access_token = get_business_access_token(business)
-    log("Instagram comment token check", {"comment_id": comment_id, "has_access_token": bool(access_token)})
     media_info = fetch_instagram_media_info(access_token, post_id, business) if access_token and post_id else {}
 
     inbound_payload = dict(value)
@@ -3816,12 +3782,10 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     )
 
     if not business.get("bot_enabled", True):
-        log("Instagram comment skipped: bot disabled", {"comment_id": comment_id, "business_id": normalize_id(business.get("id"))})
         mark_processed(processed_comment_ids, comment_id)
         return
 
     if business.get("auto_reply_comments") is False:
-        log("Instagram comment skipped: auto_reply_comments disabled", {"comment_id": comment_id, "business_id": normalize_id(business.get("id"))})
         mark_processed(processed_comment_ids, comment_id)
         return
 
@@ -3831,12 +3795,10 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     if ai_enabled and comment_scope != (commenter_id or comment_id):
         ai_enabled = is_chat_ai_enabled("instagram", "instagram_comment", commenter_id or comment_id, business.get("id"))
     if not ai_enabled:
-        log("Instagram comment skipped: AI disabled for scope", {"comment_id": comment_id, "comment_scope": comment_scope})
         mark_processed(processed_comment_ids, comment_id)
         return
 
     if not access_token:
-        log("Instagram comment skipped: missing access token", {"comment_id": comment_id, "business_id": normalize_id(business.get("id"))})
         mark_processed(processed_comment_ids, comment_id)
         return
 
@@ -3868,19 +3830,7 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
 
     send_result = reply_to_comment(access_token, comment_id, reply_text, business)
     raw_result = safe_json(send_result) if send_result is not None else {}
-    if send_result is None:
-        log("Instagram comment reply failed: no response object", {"comment_id": comment_id})
-    elif not send_result.ok:
-        log(
-            "Instagram comment reply failed",
-            {
-                "comment_id": comment_id,
-                "status": send_result.status_code,
-                "result": raw_result,
-            },
-        )
     if send_result is not None and send_result.ok:
-        log("Instagram comment reply sent", {"comment_id": comment_id, "result": raw_result})
         outbound_payload = dict(raw_result) if isinstance(raw_result, dict) else {}
         outbound_payload["post_id"] = post_id
         if not outbound_payload.get("post_permalink"):
@@ -4688,7 +4638,7 @@ async def home():
 async def api_health():
     return {
         "status": "ok",
-        "version": APP_VERSION,
+        "version": "5.1.0-telegram-voice",
         "ffmpeg": bool(shutil.which("ffmpeg")),
     }
 
@@ -4724,7 +4674,7 @@ async def api_health_deep(
 
     return {
         "status": "ok" if healthy else "degraded",
-        "version": APP_VERSION,
+        "version": "5.1.1-telegram-media-fallback",
         "checks": checks,
     }
 
@@ -6141,7 +6091,6 @@ async def receive_webhook(request: Request):
                             "field": change.get("field"),
                             "message_count": len(((change.get("value") or {}).get("messages") or [])),
                             "status_count": len(((change.get("value") or {}).get("statuses") or [])),
-                            "has_comment_id": bool(((change.get("value") or {}).get("comment_id") or (change.get("value") or {}).get("id")) if change.get("field") in ["comments", "feed"] else False),
                             "phone_number_id": normalize_id(((change.get("value") or {}).get("metadata") or {}).get("phone_number_id")),
                         }
                         for change in (entry.get("changes", []) or [])
