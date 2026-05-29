@@ -3744,23 +3744,50 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     commenter_username = normalize_id(from_user.get("username"))
     post_id = extract_instagram_comment_post_id(value)
     comment_text = value.get("message") or value.get("text") or ""
+    log(
+        "Instagram comment event parsed",
+        {
+            "entry_id": entry_id,
+            "comment_id": comment_id,
+            "commenter_id": commenter_id,
+            "commenter_username": commenter_username,
+            "post_id": post_id,
+            "has_text": bool(comment_text),
+            "text_preview": (comment_text or "")[:120],
+        },
+    )
 
     if not comment_id or not comment_text:
+        log("Instagram comment skipped: missing comment_id or text", {"comment_id": comment_id, "has_text": bool(comment_text)})
         return
 
     if already_processed(processed_comment_ids, comment_id):
+        log("Instagram comment skipped: already processed", {"comment_id": comment_id})
         return
 
     business = find_business_for_webhook(entry_id)
     if not business:
+        log("Instagram comment skipped: business not found", {"entry_id": entry_id, "comment_id": comment_id})
         return
+    log(
+        "Instagram comment business resolved",
+        {
+            "comment_id": comment_id,
+            "business_id": normalize_id(business.get("id")),
+            "oauth_provider": normalize_id(business.get("oauth_provider")),
+            "instagram_business_id": normalize_id(business.get("instagram_business_id")),
+            "facebook_page_id": normalize_id(business.get("facebook_page_id")),
+        },
+    )
 
     # Prevent self-echo loops and duplicate self threads.
     if is_own_instagram_comment_actor(business, entry_id, commenter_id, commenter_username):
+        log("Instagram comment skipped: own actor echo", {"comment_id": comment_id, "entry_id": entry_id, "commenter_id": commenter_id})
         mark_processed(processed_comment_ids, comment_id)
         return
 
     access_token = get_business_access_token(business)
+    log("Instagram comment token check", {"comment_id": comment_id, "has_access_token": bool(access_token)})
     media_info = fetch_instagram_media_info(access_token, post_id, business) if access_token and post_id else {}
 
     inbound_payload = dict(value)
@@ -3787,10 +3814,12 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     )
 
     if not business.get("bot_enabled", True):
+        log("Instagram comment skipped: bot disabled", {"comment_id": comment_id, "business_id": normalize_id(business.get("id"))})
         mark_processed(processed_comment_ids, comment_id)
         return
 
     if business.get("auto_reply_comments") is False:
+        log("Instagram comment skipped: auto_reply_comments disabled", {"comment_id": comment_id, "business_id": normalize_id(business.get("id"))})
         mark_processed(processed_comment_ids, comment_id)
         return
 
@@ -3800,10 +3829,12 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     if ai_enabled and comment_scope != (commenter_id or comment_id):
         ai_enabled = is_chat_ai_enabled("instagram", "instagram_comment", commenter_id or comment_id, business.get("id"))
     if not ai_enabled:
+        log("Instagram comment skipped: AI disabled for scope", {"comment_id": comment_id, "comment_scope": comment_scope})
         mark_processed(processed_comment_ids, comment_id)
         return
 
     if not access_token:
+        log("Instagram comment skipped: missing access token", {"comment_id": comment_id, "business_id": normalize_id(business.get("id"))})
         mark_processed(processed_comment_ids, comment_id)
         return
 
@@ -3835,7 +3866,19 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
 
     send_result = reply_to_comment(access_token, comment_id, reply_text, business)
     raw_result = safe_json(send_result) if send_result is not None else {}
+    if send_result is None:
+        log("Instagram comment reply failed: no response object", {"comment_id": comment_id})
+    elif not send_result.ok:
+        log(
+            "Instagram comment reply failed",
+            {
+                "comment_id": comment_id,
+                "status": send_result.status_code,
+                "result": raw_result,
+            },
+        )
     if send_result is not None and send_result.ok:
+        log("Instagram comment reply sent", {"comment_id": comment_id, "result": raw_result})
         outbound_payload = dict(raw_result) if isinstance(raw_result, dict) else {}
         outbound_payload["post_id"] = post_id
         if not outbound_payload.get("post_permalink"):
