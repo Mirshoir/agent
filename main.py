@@ -1443,19 +1443,24 @@ def get_business_channel(platform: str, external_account_id: str = "", only_acti
     external_account_id = normalize_id(external_account_id)
     if not platform or not external_account_id:
         return None
-    try:
-        query = (
-            supabase.table("business_channels")
-            .select("*")
-            .eq("platform", platform)
-            .eq("external_account_id", external_account_id)
-        )
-        if only_active:
-            query = query.eq("is_active", True)
-        result = query.limit(1).execute()
-        return result.data[0] if result.data else None
-    except Exception:
-        return None
+    # Canonical column is account_external_id. Keep a legacy fallback for older schemas.
+    lookup_columns = ("account_external_id", "external_account_id")
+    for column_name in lookup_columns:
+        try:
+            query = (
+                supabase.table("business_channels")
+                .select("*")
+                .eq("platform", platform)
+                .eq(column_name, external_account_id)
+            )
+            if only_active:
+                query = query.eq("is_active", True)
+            result = query.limit(1).execute()
+            if result.data:
+                return result.data[0]
+        except Exception:
+            continue
+    return None
 
 
 def get_business(instagram_business_id: str):
