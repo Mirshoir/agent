@@ -3803,12 +3803,27 @@ def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
     return reply_text[:1000]
 
 
+def catalog_subtitle_text(raw_text: str, business: dict) -> str:
+    text = clean_ai_reply_for_catalog(raw_text, business)
+    text = complete_sentence_reply(text, limit=78)
+    if text and len(text) <= 78:
+        return text
+
+    # Keep template subtitle short and always complete.
+    lang = detect_customer_language(text)
+    if lang == "ru":
+        return "Нажмите кнопку ниже, чтобы открыть каталог."
+    if lang == "en":
+        return "Tap the button below to open the catalog."
+    return "Quyidagi tugma orqali katalogni oching."
+
+
 def catalog_template_payload(recipient: dict, business: dict, text: str = "") -> dict:
     catalog_link = get_catalog_link(business)
     business_name = normalize_id((business or {}).get("business_name")) or "Milana Premium"
-    text = clean_ai_reply_for_catalog(text, business)
-    if not text:
-        text = f"{business_name} katalogi shu yerda. Qaysi mahsulotlar sizni qiziqtirmoqda?"
+    subtitle = catalog_subtitle_text(text, business)
+    if not subtitle:
+        subtitle = f"{business_name} katalogi shu yerda."
 
     return {
         "recipient": recipient,
@@ -3820,7 +3835,7 @@ def catalog_template_payload(recipient: dict, business: dict, text: str = "") ->
                     "elements": [
                         {
                             "title": "Katalogni ko'rish",
-                            "subtitle": text[:80],
+                            "subtitle": subtitle,
                             "default_action": {
                                 "type": "web_url",
                                 "url": catalog_link,
@@ -4706,6 +4721,13 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                     "top_match_model": media_match.get("top_match_model"),
                     "top_score": media_match.get("top_score"),
                 })
+            else:
+                log("Instagram DM media matcher miss", {
+                    "customer_id": sender_id,
+                    "message_id": message_id,
+                    "media_type": media_type,
+                    "source_url_host": urlparse(matcher_source_url).netloc if matcher_source_url else "",
+                })
         elif should_reuse_recent_media_match(message_text or "", media_type or ""):
             cached_match = load_recent_instagram_media_match(business_id=business_id, customer_id=sender_id)
             if cached_match:
@@ -4750,6 +4772,8 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             and not is_greeting_only(message_text)
             and not is_auto_media_placeholder_message(message_text)
             and not (media_type in {"photo", "video", "file", "audio"})
+            and not bool(media_match_context)
+            and not bool(media_reply_hint)
         )
         if should_send_catalog:
             send_result = send_catalog_button(access_token, sender_id, business, reply_text)
