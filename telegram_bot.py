@@ -214,6 +214,13 @@ def detect_customer_language(text: str) -> str:
         "salom", "assalomu", "alaykum", "narx", "qancha", "qayer", "kerak", "olmoq",
         "sotib", "mahsulot", "katalog", "manzil", "rahmat", "bormi", "necha",
     }
+    uzbek_cyrillic_markers = {
+        "салом", "ассалому", "алайкум", "нарх", "канча", "қанча", "нечпул", "нечпуд",
+        "неча", "пул", "керак", "олмок", "олмоқ", "сотиб", "махсулот", "маҳсулот",
+        "каталог", "манзил", "рахмат", "раҳмат", "борми", "шу", "халат", "тошкент",
+        "тошкентдам", "бормм", "донага", "бераслами", "юборасизми",
+        "етказиб", "йетказиб", "доставка", "оптом", "оптима", "улгуржи",
+    }
     kazakh_markers = {
         "сәлем", "салем", "қалай", "баға", "бағасы", "қанша", "қажет", "жеткізу",
         "тапсырыс", "каталог", "тауар", "бар", "мен", "сіз", "үшін",
@@ -226,6 +233,8 @@ def detect_customer_language(text: str) -> str:
     words = set(re.findall(r"[a-zA-Z']+|[А-Яа-яЁё]+", lower))
     if any(m in lower for m in kazakh_markers):
         return "kk"
+    if words & uzbek_cyrillic_markers or any(m in lower for m in uzbek_cyrillic_markers):
+        return "uz"
     if words & russian_words:
         return "ru"
     if words & english_words and not (words & uzbek_latin_markers):
@@ -246,7 +255,7 @@ def language_instruction_for(text: str) -> str:
     if lang == "kk":
         return "Клиенттің соңғы хабары қазақ тілінде. Тек қазақ тілінде жауап бер."
     if lang == "uz":
-        return "Mijozning oxirgi xabari o'zbek tilida. Faqat o'zbek tilida javob ber."
+        return "Mijozning oxirgi xabari o'zbek tilida, hattoki kirill yozuvida bo'lsa ham. Faqat o'zbek tilida javob ber. Rus tilida javob berma."
     return ""
 
 
