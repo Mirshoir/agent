@@ -19,13 +19,30 @@ if (urlParams.get('clear_auth')) {
   window.localStorage.removeItem('instaagent_owner_email');
   window.localStorage.removeItem('instaagent_api_base');
 }
-const API_BASE = (
+function sanitizeApiBase(rawValue) {
+  const value = String(rawValue || '').trim().replace(/\/$/, '');
+  if (!value) return '';
+  if (/^https?:\/\//i.test(value)) {
+    // Prevent mixed-content fetch errors when dashboard is opened on HTTPS.
+    if (window.location.protocol === 'https:' && /^http:\/\//i.test(value)) {
+      return '';
+    }
+    return value;
+  }
+  return '';
+}
+
+const RAW_API_BASE = (
   urlParams.get('api') ||
   window.localStorage.getItem('instaagent_api_base') ||
   ENV_API_BASE ||
   window.INSTAAGENT_API_BASE ||
   (IS_LOCALHOST ? 'http://localhost:8000' : '')
-).replace(/\/$/, '');
+);
+let API_BASE = sanitizeApiBase(RAW_API_BASE);
+if (!API_BASE) {
+  API_BASE = sanitizeApiBase(ENV_API_BASE) || sanitizeApiBase(window.INSTAAGENT_API_BASE) || '';
+}
 
 const DASHBOARD_SECRET =
   urlParams.get('secret') ||
@@ -36,7 +53,8 @@ const DASHBOARD_SECRET =
   window.INSTAAGENT_DASHBOARD_SECRET ||
   '';
 
-if (urlParams.get('api')) window.localStorage.setItem('instaagent_api_base', API_BASE);
+if (urlParams.get('api') && API_BASE) window.localStorage.setItem('instaagent_api_base', API_BASE);
+if (!API_BASE) window.localStorage.removeItem('instaagent_api_base');
 if (urlParams.get('secret') && DASHBOARD_SECRET !== 'YOUR_DASHBOARD_SECRET') {
   window.sessionStorage.setItem('instaagent_dashboard_secret', DASHBOARD_SECRET);
 }
@@ -138,59 +156,64 @@ function scopedPath(path) {
 }
 
 const API = {
+  isAbortError(err) {
+    const message = String(err?.message || err || '').toLowerCase();
+    return message.includes('aborted') || message.includes('aborterror') || message.includes('signal is aborted');
+  },
   async fetchWithTimeout(url, options = {}, timeoutMs = 35000) {
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
       return await fetch(url, { ...options, signal: controller.signal });
+    } catch (err) {
+      if (API.isAbortError(err)) {
+        throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s. Please retry.`);
+      }
+      throw err;
     } finally {
       window.clearTimeout(timer);
     }
   },
-  async get(path, timeoutMs) {
+  async get(path, { timeoutMs = 35000 } = {}) {
     const res = await API.fetchWithTimeout(`${API_BASE}${scopedPath(path)}`, { headers: apiHeaders() }, timeoutMs);
     const data = await res.json();
     if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
     return data;
   },
-  async post(path, params = {}) {
+  async post(path, params = {}, { timeoutMs = 35000 } = {}) {
     const qs = new URLSearchParams(params);
     const endpoint = `${scopedPath(path)}${qs.toString() ? `${scopedPath(path).includes('?') ? '&' : '?'}${qs.toString()}` : ''}`;
     const res = await API.fetchWithTimeout(`${API_BASE}${endpoint}`, {
       method: 'POST',
       headers: apiHeaders(),
-    });
+    }, timeoutMs);
     const data = await res.json();
     if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
     return data;
   },
-  async postJson(path, body = {}) {
+  async postJson(path, body = {}, { timeoutMs = 35000 } = {}) {
     const res = await API.fetchWithTimeout(`${API_BASE}${scopedPath(path)}`, {
       method: 'POST',
       headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...body, owner_email: body?.owner_email || resolvedOwnerEmail() || undefined }),
-    });
+    }, timeoutMs);
     const data = await res.json();
     if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
     return data;
   },
-  async delete(path) {
+  async delete(path, { timeoutMs = 35000 } = {}) {
     const res = await API.fetchWithTimeout(`${API_BASE}${scopedPath(path)}`, {
       method: 'DELETE',
       headers: apiHeaders(),
-    });
+    }, timeoutMs);
     const data = await res.json();
     if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
     return data;
   },
 };
 
-function isAbortLikeError(error) {
-  return /aborted|aborterror|signal is aborted/i.test(String(error?.message || error || ''));
-}
-
-const THREAD_POLL_MS = 3000;
-const INBOX_POLL_MS = 5000;
+const THREAD_POLL_MS = 1200;
+const INBOX_POLL_MS = 2000;
 const STATS_POLL_MS = 20000;
 const THREAD_WARMUP_CONCURRENCY = 6;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
@@ -1143,9 +1166,9 @@ function normalizeConversation(row) {
   const parsedBusinessId = parts[1] || '';
   const parsedChannel = parts[2] || '';
   const parsedCustomerId = parts[3] || '';
+  const platform = row.platform || 'instagram';
   const customerId = row.customer_id || parsedCustomerId;
   const chatId = row.chat_id || customerId;
-  const platform = row.platform || 'instagram';
   const rawName = String(row.customer_name || row.name || '').trim();
   const generatedInstagramName = /^instagram\s+(user|client|ig user)\s+\d{2,}$/i.test(rawName);
   const numericName = /^\d{6,}$/.test(rawName);
@@ -1433,6 +1456,30 @@ const WORKSPACE_TEXT = {
     operatorRanking: 'Operators ranking', successfulDeals: 'Successful deals', operatorPanel: 'Operator panel', adminPanel: 'Admin panel',
     operatorAccounts: 'Operator accounts', operatorAccountsHint: 'Create operator logins for this business.', operatorId: 'Operator ID', operatorPassword: 'Password',
     addOperator: 'Add operator', noOperators: 'No operators yet.',
+    igGrowthTitle: 'Instagram Growth Analyzer',
+    igGrowthSubtitle: 'AI recommendations for content quality, engagement, and conversion.',
+    igGrowthScore: 'Account score',
+    igGrowthProduct: 'Product to promote this week',
+    igGrowthProblems: 'Main problems',
+    igGrowthNextContent: 'Recommended next content',
+    igGrowthWeeklyPlan: 'Weekly content plan',
+    igGrowthMonthlyPlan: 'Monthly focus',
+    igGrowthTasks: 'Account improvement tasks',
+    igGrowthQuestions: 'Common customer questions',
+    igGrowthScope: 'Analysis scope',
+    igGrowthLoading: 'Analyzing Instagram activity...',
+    igGrowthEmpty: 'No analysis yet. Connect live data and refresh.',
+    igGrowthRefresh: 'Refresh analysis',
+    igGrowthRetry: 'Retry',
+    postsTitle: 'Posts',
+    postsSubtitle: 'Import Instagram posts/reels and add post-specific info for bot replies.',
+    importPosts: 'Import posts',
+    refreshPosts: 'Refresh posts',
+    postsLoading: 'Loading posts...',
+    postsEmpty: 'No posts imported yet.',
+    postExtraInfo: 'Post extra info for bot replies',
+    savePostInfo: 'Save post info',
+    postSaved: 'Post info saved',
   },
   uz: {
     workspace: 'Ish maydoni', leadsTitle: 'Lidlar pipeline', promptsTitle: 'AI Prompt sozlamalari', profile: 'Profil', refresh: 'Yangilash', liveWorkspace: 'Live backend ish maydoni',
@@ -1474,6 +1521,30 @@ const WORKSPACE_TEXT = {
     operatorRanking: 'Operatorlar reytingi', successfulDeals: 'Muvaffaqiyatli bitimlar', operatorPanel: 'Operator panel', adminPanel: 'Admin panel',
     operatorAccounts: 'Operator akkauntlari', operatorAccountsHint: 'Bu biznes uchun operator loginlarini yarating.', operatorId: 'Operator ID', operatorPassword: 'Parol',
     addOperator: 'Operator qo‘shish', noOperators: 'Hali operator yo‘q.',
+    igGrowthTitle: 'Instagram Growth Analyzer',
+    igGrowthSubtitle: 'Kontent sifati, engagement va konversiya bo‘yicha AI tavsiyalar.',
+    igGrowthScore: 'Akkaunt skori',
+    igGrowthProduct: 'Bu hafta targ‘ib qilinadigan mahsulot',
+    igGrowthProblems: 'Asosiy muammolar',
+    igGrowthNextContent: 'Keyingi tavsiya etilgan kontent',
+    igGrowthWeeklyPlan: 'Haftalik kontent reja',
+    igGrowthMonthlyPlan: 'Oylik fokus',
+    igGrowthTasks: 'Akkauntni yaxshilash vazifalari',
+    igGrowthQuestions: 'Mijozlarning ko‘p beradigan savollari',
+    igGrowthScope: 'Tahlil qamrovi',
+    igGrowthLoading: 'Instagram faolligi tahlil qilinmoqda...',
+    igGrowthEmpty: 'Hali tahlil yo‘q. Live data ulang va yangilang.',
+    igGrowthRefresh: 'Tahlilni yangilash',
+    igGrowthRetry: 'Qayta urinish',
+    postsTitle: 'Postlar',
+    postsSubtitle: 'Instagram post/reellarni import qiling va bot javobi uchun postga xos maʼlumot yozing.',
+    importPosts: 'Postlarni import qilish',
+    refreshPosts: 'Postlarni yangilash',
+    postsLoading: 'Postlar yuklanmoqda...',
+    postsEmpty: 'Hali post import qilinmagan.',
+    postExtraInfo: 'Bot javobi uchun postga xos qo‘shimcha maʼlumot',
+    savePostInfo: 'Post maʼlumotini saqlash',
+    postSaved: 'Post maʼlumoti saqlandi',
   },
   ru: {
     workspace: 'Рабочая область', leadsTitle: 'Воронка лидов', promptsTitle: 'Настройки AI Prompt', profile: 'Профиль', refresh: 'Обновить', liveWorkspace: 'Рабочая область backend',
@@ -1515,6 +1586,30 @@ const WORKSPACE_TEXT = {
     operatorRanking: 'Рейтинг операторов', successfulDeals: 'Успешные сделки', operatorPanel: 'Панель оператора', adminPanel: 'Панель админа',
     operatorAccounts: 'Аккаунты операторов', operatorAccountsHint: 'Создайте логины операторов для этого бизнеса.', operatorId: 'ID оператора', operatorPassword: 'Пароль',
     addOperator: 'Добавить оператора', noOperators: 'Операторов пока нет.',
+    igGrowthTitle: 'Instagram Growth Analyzer',
+    igGrowthSubtitle: 'AI-рекомендации по качеству контента, engagement и конверсии.',
+    igGrowthScore: 'Скор аккаунта',
+    igGrowthProduct: 'Продукт для продвижения на этой неделе',
+    igGrowthProblems: 'Основные проблемы',
+    igGrowthNextContent: 'Рекомендуемый следующий контент',
+    igGrowthWeeklyPlan: 'Недельный контент-план',
+    igGrowthMonthlyPlan: 'Месячный фокус',
+    igGrowthTasks: 'Задачи по улучшению аккаунта',
+    igGrowthQuestions: 'Частые вопросы клиентов',
+    igGrowthScope: 'Охват анализа',
+    igGrowthLoading: 'Анализируем Instagram-активность...',
+    igGrowthEmpty: 'Пока нет анализа. Подключите live-данные и обновите.',
+    igGrowthRefresh: 'Обновить анализ',
+    igGrowthRetry: 'Повторить',
+    postsTitle: 'Посты',
+    postsSubtitle: 'Импортируйте посты/reels Instagram и добавляйте доп. контекст для ответов бота.',
+    importPosts: 'Импорт постов',
+    refreshPosts: 'Обновить посты',
+    postsLoading: 'Загрузка постов...',
+    postsEmpty: 'Посты пока не импортированы.',
+    postExtraInfo: 'Доп. информация по посту для ответов бота',
+    savePostInfo: 'Сохранить информацию',
+    postSaved: 'Информация по посту сохранена',
   },
 };
 
@@ -1752,6 +1847,176 @@ function InsightsDashboard({ conversations, stats, w }) {
         ))}
       </div>
     </div>
+  );
+}
+
+function InstagramGrowthAnalyzerCard({ data, loading, error, onRefresh, w = WORKSPACE_TEXT.en }) {
+  const score = Number(data?.account_score || 0);
+  const categoryScores = data?.category_scores || {};
+  const nextContent = Array.isArray(data?.recommended_next_content) ? data.recommended_next_content : [];
+  const weeklyPlan = Array.isArray(data?.weekly_content_plan) ? data.weekly_content_plan : [];
+  const monthlyPlan = Array.isArray(data?.monthly_content_plan) ? data.monthly_content_plan : [];
+  const problems = Array.isArray(data?.problems) ? data.problems : [];
+  const tasks = Array.isArray(data?.account_improvement_tasks) ? data.account_improvement_tasks : [];
+  const questions = Array.isArray(data?.common_customer_questions) ? data.common_customer_questions : [];
+
+  return (
+    <section className="ig-growth-card">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.igGrowthTitle}</h3>
+          <p>{w.igGrowthSubtitle}</p>
+        </div>
+        <button className="panel-btn" onClick={() => onRefresh?.()}>{w.igGrowthRefresh}</button>
+      </div>
+
+      {loading && <div className="ig-growth-state">{w.igGrowthLoading}</div>}
+      {!loading && error && (
+        <div className="ig-growth-state error">
+          <span>{error}</span>
+          <button className="panel-btn subtle" onClick={() => onRefresh?.()}>{w.igGrowthRetry}</button>
+        </div>
+      )}
+      {!loading && !error && !data && <div className="ig-growth-state">{w.igGrowthEmpty}</div>}
+
+      {!loading && !error && data && (
+        <div className="ig-growth-body">
+          <div className="ig-growth-score">
+            <span>{w.igGrowthScore}</span>
+            <b>{Number.isFinite(score) ? `${score}/100` : '0/100'}</b>
+            <em>{w.igGrowthProduct}: {data?.product_to_promote_this_week || '—'}</em>
+            <small>
+              {data?.data_source ? `Source: ${String(data.data_source).replaceAll('_', ' ')}` : ''}
+              {data?.fetched_at ? ` · Fetched: ${String(data.fetched_at).replace('T', ' ').slice(0, 16)} UTC` : ''}
+            </small>
+          </div>
+
+          <div className="ig-growth-metrics">
+            {Object.entries(categoryScores).map(([key, value]) => (
+              <div className="metric-card rich" key={key}>
+                <span>{String(key).replaceAll('_', ' ')}</span>
+                <b>{value}</b>
+              </div>
+            ))}
+          </div>
+
+          <div className="ig-growth-grid">
+            <div className="ig-growth-column">
+              <h4>{w.igGrowthProblems}</h4>
+              <ul>{problems.map((item, idx) => <li key={`p-${idx}`}>{item}</li>)}</ul>
+            </div>
+            <div className="ig-growth-column">
+              <h4>{w.igGrowthNextContent}</h4>
+              <ul>{nextContent.map((item, idx) => <li key={`n-${idx}`}>{item?.type ? `${item.type}: ` : ''}{item?.idea || ''}</li>)}</ul>
+            </div>
+            <div className="ig-growth-column">
+              <h4>{w.igGrowthQuestions}</h4>
+              <ul>{questions.map((item, idx) => <li key={`q-${idx}`}>{item?.theme || ''}{item?.count ? ` (${item.count})` : ''}</li>)}</ul>
+            </div>
+            <div className="ig-growth-column">
+              <h4>{w.igGrowthTasks}</h4>
+              <ul>{tasks.map((item, idx) => <li key={`t-${idx}`}>{item}</li>)}</ul>
+            </div>
+          </div>
+
+          <div className="ig-growth-grid">
+            <div className="ig-growth-column">
+              <h4>{w.igGrowthWeeklyPlan}</h4>
+              <ul>{weeklyPlan.map((item, idx) => <li key={`w-${idx}`}>{item}</li>)}</ul>
+            </div>
+            <div className="ig-growth-column">
+              <h4>{w.igGrowthMonthlyPlan}</h4>
+              <ul>{monthlyPlan.map((item, idx) => <li key={`m-${idx}`}>{item}</li>)}</ul>
+            </div>
+          </div>
+
+          {data?.analysis_scope && (
+            <p className="ig-growth-scope"><b>{w.igGrowthScope}:</b> {data.analysis_scope}</p>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PostsWorkspace({
+  posts = [],
+  loading = false,
+  error = '',
+  selectedPostId = '',
+  onSelectPost,
+  onImportPosts,
+  onRefreshPosts,
+  onSaveExtraInfo,
+  w = WORKSPACE_TEXT.en,
+}) {
+  const selected = posts.find(item => item.post_id === selectedPostId) || posts[0] || null;
+  const [draft, setDraft] = useState('');
+
+  useEffect(() => {
+    setDraft(selected?.extra_info || '');
+  }, [selectedPostId, selected?.extra_info]);
+
+  return (
+    <section className="posts-workspace">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.postsTitle}</h3>
+          <p>{w.postsSubtitle}</p>
+        </div>
+        <div className="panel-actions">
+          <button className="panel-btn subtle" onClick={() => onRefreshPosts?.()}>{w.refreshPosts}</button>
+          <button className="panel-btn" onClick={() => onImportPosts?.()}>{w.importPosts}</button>
+        </div>
+      </div>
+
+      {loading && <div className="ig-growth-state">{w.postsLoading}</div>}
+      {!loading && error && <div className="ig-growth-state error"><span>{error}</span></div>}
+      {!loading && !error && !posts.length && <div className="ig-growth-state">{w.postsEmpty}</div>}
+
+      {!loading && !error && posts.length > 0 && (
+        <div className="posts-grid">
+          <div className="posts-list">
+            {posts.map((post) => (
+              <button
+                key={post.post_id}
+                className={`post-row ${selected?.post_id === post.post_id ? 'active' : ''}`}
+                onClick={() => onSelectPost?.(post.post_id)}
+              >
+                <span className="post-row-head">
+                  <b>{post.media_product_type || post.media_type || 'post'}</b>
+                  <em>{(post.timestamp || '').slice(0, 10)}</em>
+                </span>
+                <p>{post.caption || post.permalink || post.post_id}</p>
+                <span className="post-row-stats">❤ {post.like_count || 0} · 💬 {post.comments_count || 0}</span>
+              </button>
+            ))}
+          </div>
+
+          <div className="post-details">
+            {selected && (
+              <>
+                <div className="post-preview">
+                  {(selected.thumbnail_url || selected.media_url) && <img src={selected.thumbnail_url || selected.media_url} alt="post preview" />}
+                  <div>
+                    <h4>{selected.media_product_type || selected.media_type || 'post'}</h4>
+                    <p>{selected.caption || '—'}</p>
+                    {selected.permalink && <a href={selected.permalink} target="_blank" rel="noreferrer">{selected.permalink}</a>}
+                  </div>
+                </div>
+                <label className="field-row prompt-row">
+                  <span>{w.postExtraInfo}</span>
+                  <textarea rows={6} value={draft} onChange={(e) => setDraft(e.target.value)} />
+                </label>
+                <div className="panel-actions">
+                  <button onClick={() => onSaveExtraInfo?.(selected.post_id, draft)}>{w.savePostInfo}</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -2545,6 +2810,18 @@ function WorkspacePanel({
   t,
   view,
   stats,
+  posts,
+  postsLoading,
+  postsError,
+  selectedPostId,
+  onSelectPost,
+  onImportPosts,
+  onRefreshPosts,
+  onSavePostInfo,
+  growthAnalyzer,
+  growthAnalyzerLoading,
+  growthAnalyzerError,
+  onRefreshGrowthAnalyzer,
   conversations,
   businesses,
   selectedBusinessId,
@@ -2585,7 +2862,7 @@ function WorkspacePanel({
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
   const roleScope = resolveRoleScope(currentUser, businesses || []);
   const isOperator = roleScope.isOperator;
-  if (isOperator && !['leads', 'inbox', 'clients', 'operators', 'settings', 'profile'].includes(view)) return null;
+  if (isOperator && !['leads', 'inbox', 'posts', 'clients', 'operators', 'settings', 'profile'].includes(view)) return null;
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId) || businesses[0] || {};
   const activeProviderId = aiProviderForBusiness(selectedBusiness);
   const activeProvider = AI_PROVIDERS.find(provider => provider.id === activeProviderId) || AI_PROVIDERS[0];
@@ -2593,6 +2870,7 @@ function WorkspacePanel({
   const modelSelectValue = activeProvider.models.includes(activeModel) ? activeModel : 'custom';
   const title = {
     insights: t.insights,
+    posts: t.posts || w.postsTitle,
     leads: t.leads,
     clients: t.clients || w.clientsTitle,
     operators: t.operators || w.operatorsTitle,
@@ -2616,7 +2894,30 @@ function WorkspacePanel({
       </div>
 
       {view === 'insights' && (
-        <InsightsDashboard conversations={conversations} stats={stats} w={w} />
+        <>
+          <InsightsDashboard conversations={conversations} stats={stats} w={w} />
+          <InstagramGrowthAnalyzerCard
+            data={growthAnalyzer}
+            loading={growthAnalyzerLoading}
+            error={growthAnalyzerError}
+            onRefresh={onRefreshGrowthAnalyzer}
+            w={w}
+          />
+        </>
+      )}
+
+      {view === 'posts' && (
+        <PostsWorkspace
+          posts={posts}
+          loading={postsLoading}
+          error={postsError}
+          selectedPostId={selectedPostId}
+          onSelectPost={onSelectPost}
+          onImportPosts={onImportPosts}
+          onRefreshPosts={onRefreshPosts}
+          onSaveExtraInfo={onSavePostInfo}
+          w={w}
+        />
       )}
 
       {view === 'leads' && (
@@ -3005,12 +3306,13 @@ function Rail({ t, activeView, onView, currentUser, userProfile, businesses }) {
   const items = [
     { id: 'leads', icon: <I.Star />, label: t.leads || 'Leads' },
     { id: 'inbox', icon: <I.Inbox />, label: t.inbox, dot: true },
+    { id: 'posts', icon: <I.Photo />, label: t.posts || 'Posts' },
     { id: 'clients', icon: <I.Comment />, label: t.clients || 'Clients' },
     { id: 'operators', icon: <I.Phone />, label: t.operators || 'Operators' },
     { id: 'knowledge', icon: <I.Book />, label: t.knowledge },
     { id: 'prompts', icon: <I.Sparkle />, label: t.prompts || 'AI Prompts' },
     { id: 'accounts', icon: <I.Layers />, label: t.accounts },
-  ].filter(item => !isOperator || ['leads', 'inbox', 'clients', 'operators'].includes(item.id));
+  ].filter(item => !isOperator || ['leads', 'inbox', 'posts', 'clients', 'operators'].includes(item.id));
   return (
     <aside className="rail">
       {items.map(it => (
@@ -3221,6 +3523,7 @@ function Message({ m, conv, t, onReplyComment, onEditMessage, onDeleteMessage })
     typeof onReplyComment === 'function'
   );
   const canManageOutbound = Boolean(
+    conv?.platform === 'telegram' &&
     m.side === 'outbound' &&
     !m.pending &&
     m.id &&
@@ -3344,7 +3647,7 @@ function ThreadHead({ conv, aiOn, onToggleAi, t, onPin, onArchive, onDelete, onM
 }
 
 // ---------- Thread column ----------
-function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, threadLoading, onTool }) {
+function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, onEditMessage, onDeleteMessage, sending, threadLoading, onTool }) {
   if (!conv) {
     return <section className="thread-col" />;
   }
@@ -3591,7 +3894,14 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, sending, th
           return (
             <React.Fragment key={m.id}>
               {dayChanged && <div className="day-sep">{m.day}</div>}
-              <Message m={m} conv={conv} t={t} onReplyComment={selectReplyTarget} />
+              <Message
+                m={m}
+                conv={conv}
+                t={t}
+                onReplyComment={selectReplyTarget}
+                onEditMessage={onEditMessage}
+                onDeleteMessage={onDeleteMessage}
+              />
             </React.Fragment>
           );
         })}
@@ -3835,7 +4145,7 @@ function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onT
   const [profileOpen, setProfileOpen] = useState(false);
   const fileInputRef = useRef(null);
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
-  const workspaceNames = { inbox: t.inbox, insights: t.insights, knowledge: t.knowledge, prompts: w.promptsTitle, accounts: t.accounts, settings: t.settings, profile: w.profile };
+  const workspaceNames = { inbox: t.inbox, insights: t.insights, posts: t.posts || w.postsTitle, knowledge: t.knowledge, prompts: w.promptsTitle, accounts: t.accounts, settings: t.settings, profile: w.profile };
   const displayName = String(userProfile?.name || 'User');
   const initials = initialsFromName(displayName);
 
@@ -3954,6 +4264,13 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const [apiError, setApiError] = useState('');
   const [liveMode, setLiveMode] = useState(false);
   const [stats, setStats] = useState(null);
+  const [posts, setPosts] = useState([]);
+  const [postsLoading, setPostsLoading] = useState(false);
+  const [postsError, setPostsError] = useState('');
+  const [selectedPostId, setSelectedPostId] = useState('');
+  const [growthAnalyzer, setGrowthAnalyzer] = useState(null);
+  const [growthAnalyzerLoading, setGrowthAnalyzerLoading] = useState(false);
+  const [growthAnalyzerError, setGrowthAnalyzerError] = useState('');
   const [activeView, setActiveView] = useState('inbox');
   const [toast, setToast] = useState('');
   const [moreOpen, setMoreOpen] = useState(false);
@@ -4088,6 +4405,131 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       setStats(data.data || null);
     } catch (e) {
       setStats(null);
+    }
+  };
+
+  const loadGrowthAnalyzer = async (businessId = selectedBusinessId, { silent = false, noCache = false } = {}) => {
+    const business = String(businessId || '').trim();
+    if (!business) {
+      setGrowthAnalyzer(null);
+      setGrowthAnalyzerError('');
+      return null;
+    }
+    if (!silent) setGrowthAnalyzerLoading(true);
+    try {
+      const data = await API.get(`/api/v2/instagram-growth-analyzer?business_id=${encodeURIComponent(business)}&days=30&no_cache=${noCache ? '1' : '0'}`);
+      setGrowthAnalyzer(data?.data || null);
+      setGrowthAnalyzerError('');
+      return data?.data || null;
+    } catch (e) {
+      setGrowthAnalyzer(null);
+      setGrowthAnalyzerError(e.message || 'Could not load growth analysis');
+      return null;
+    } finally {
+      if (!silent) setGrowthAnalyzerLoading(false);
+    }
+  };
+
+  const resolveBusinessId = (candidate = '') => {
+    const direct = String(candidate || '').trim();
+    if (direct) return direct;
+    const selected = String(selectedBusinessId || '').trim();
+    if (selected) return selected;
+    const fromCurrentConversation = String((conv || {}).businessId || '').trim();
+    if (fromCurrentConversation) return fromCurrentConversation;
+    const fromSelectedConversation = String(
+      (conversations || []).find(item => item.id === (selectedIdRef.current || selectedId))?.businessId || '',
+    ).trim();
+    if (fromSelectedConversation) return fromSelectedConversation;
+    const fromConversationList = String((conversations || []).find(item => item.businessId)?.businessId || '').trim();
+    if (fromConversationList) return fromConversationList;
+    const fromRef = String((businessesRef.current || [])[0]?.id || '').trim();
+    if (fromRef) return fromRef;
+    const fromState = String((businesses || [])[0]?.id || '').trim();
+    return fromState;
+  };
+
+  const loadInstagramPosts = async (businessId = selectedBusinessId, { refresh = false, silent = false } = {}) => {
+    let business = resolveBusinessId(businessId);
+    if (!business) {
+      await loadBusinesses({ silent: true });
+      business = resolveBusinessId(businessId);
+    }
+    if (!business) {
+      setPosts([]);
+      setSelectedPostId('');
+      setPostsError('');
+      return [];
+    }
+    if (!silent) setPostsLoading(true);
+    try {
+      const data = await API.get(
+        `/api/v2/instagram-posts?business_id=${encodeURIComponent(business)}&refresh=${refresh ? '1' : '0'}&limit=300`,
+        { timeoutMs: refresh ? 180000 : 60000 },
+      );
+      const rows = Array.isArray(data?.data) ? data.data : [];
+      setPosts(rows);
+      setSelectedPostId((current) => (rows.some(item => item.post_id === current) ? current : (rows[0]?.post_id || '')));
+      setPostsError('');
+      return rows;
+    } catch (e) {
+      setPosts([]);
+      setSelectedPostId('');
+      setPostsError(e.message || 'Could not load posts');
+      return [];
+    } finally {
+      if (!silent) setPostsLoading(false);
+    }
+  };
+
+  const importInstagramPosts = async (businessId = selectedBusinessId) => {
+    let business = resolveBusinessId(businessId);
+    if (!business) {
+      await loadBusinesses({ silent: true });
+      business = resolveBusinessId(businessId);
+    }
+    if (!business) {
+      showToast('No business found. Please connect/select a business first.');
+      return [];
+    }
+    if (!String(selectedBusinessId || '').trim() || String(selectedBusinessId).trim() !== business) {
+      setSelectedBusinessId(business);
+    }
+    setPostsLoading(true);
+    try {
+      const data = await API.postJson(
+        '/api/v2/instagram-posts/import',
+        { business_id: business, max_items: 300 },
+        { timeoutMs: 180000 },
+      );
+      const rows = Array.isArray(data?.data) ? data.data : [];
+      setPosts(rows);
+      setSelectedPostId(rows[0]?.post_id || '');
+      setPostsError('');
+      showToast(`Imported ${rows.length} posts`);
+      return rows;
+    } catch (e) {
+      setPostsError(e.message || 'Could not import posts');
+      showToast(e.message || 'Could not import posts');
+      return [];
+    } finally {
+      setPostsLoading(false);
+    }
+  };
+
+  const saveInstagramPostInfo = async (postId, extraInfo) => {
+    const business = resolveBusinessId(selectedBusinessId);
+    if (!business || !postId) return;
+    try {
+      await API.postJson('/api/v2/instagram-posts/extra-info', {
+        business_id: business,
+        post_id: postId,
+        extra_info: extraInfo || '',
+      });
+      setPosts(items => items.map(item => item.post_id === postId ? { ...item, extra_info: extraInfo || '' } : item));
+      showToast((WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en).postSaved);
+    } catch (e) {
+      showToast(e.message || 'Could not save post info');
     }
   };
 
@@ -4300,6 +4742,8 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       loadStats(),
       loadBusinesses(),
       loadPromptSettings(selectedBusinessId, { silent: true }),
+      loadInstagramPosts(selectedBusinessId, { refresh: false, silent: true }),
+      loadGrowthAnalyzer(selectedBusinessId, { silent: true, noCache: true }),
       loadOperatorAccounts(selectedBusinessId),
       loadWorkspaceState(selectedBusinessId),
       loadOperatorTasks(selectedBusinessId, { forMe: isOperator, silent: true }),
@@ -4342,7 +4786,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       if (sideLoad || !businessesRef.current.length) {
         await loadBusinesses({ silent: true, ownerEmailOverride });
       }
-      const data = await API.get('/api/v2/conversations?no_cache=1');
+      const data = await API.get('/api/v2/conversations?no_cache=1&fast=1', { timeoutMs: 25000 });
       const selectedCurrent = selectedIdRef.current;
       const ownerScoped = normalizeOwnerEmail(ownerEmailOverride || ownerEmail);
       const allowedBusinessIds = new Set((businessesRef.current || []).map(row => row.id).filter(Boolean));
@@ -4371,7 +4815,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       }
       return true;
     } catch (e) {
-      const isAbort = isAbortLikeError(e);
+      const isAbort = /aborted|aborterror|signal is aborted/i.test(String(e?.message || ''));
       if (silent) {
         if (!isAbort) setApiError(`Live sync delayed: ${e.message}`);
         return false;
@@ -4416,7 +4860,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     if (!silent) setThreadLoading(true);
     const request = (async () => {
       try {
-        const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?mark_read=${markRead ? '1' : '0'}&limit=${Math.max(1, Number(limit || 200))}&no_cache=${noCache ? '1' : '0'}`, 60000);
+        const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?mark_read=${markRead ? '1' : '0'}&limit=${Math.max(1, Number(limit || 200))}&no_cache=${noCache ? '1' : '0'}`);
         const normalized = (data.data || []).map(normalizeMessage);
         setThreads(prev => ({
           ...prev,
@@ -4429,9 +4873,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
         setApiError('');
         return true;
       } catch (e) {
-        if (!isAbortLikeError(e)) {
-          setApiError(`${e.message} Showing cached messages.`);
-        }
+        setApiError(`${e.message} Showing cached messages.`);
         return false;
       } finally {
         delete threadLoadPromisesRef.current[conversationId];
@@ -4680,6 +5122,16 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   }, [selectedBusinessId]);
 
   useEffect(() => {
+    if (!selectedBusinessId || !liveMode || activeView !== 'insights') return;
+    loadGrowthAnalyzer(selectedBusinessId, { silent: true });
+  }, [selectedBusinessId, activeView, liveMode]);
+
+  useEffect(() => {
+    if (!selectedBusinessId || !liveMode || activeView !== 'posts') return;
+    loadInstagramPosts(selectedBusinessId, { refresh: false, silent: true });
+  }, [selectedBusinessId, activeView, liveMode]);
+
+  useEffect(() => {
     if (liveMode) loadOperatorAccounts(selectedBusinessId);
   }, [selectedBusinessId, liveMode]);
 
@@ -4842,6 +5294,81 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     }
   };
 
+  const editMessage = async (message) => {
+    if (!conv || !message?.id) return;
+    if (conv.platform !== 'telegram') {
+      showToast('Instagram and WhatsApp do not support editing already-delivered messages through the connected API.');
+      return;
+    }
+
+    const currentText = String(message.text || '').trim();
+    const nextText = window.prompt('Edit this Telegram message:', currentText);
+    if (nextText === null) return;
+    const cleanText = nextText.trim();
+    if (!cleanText || cleanText === currentText) return;
+
+    const conversationId = conv.id;
+    setThreads(prev => {
+      const existing = prev[conversationId]?.messages || prev[conversationId] || [];
+      return {
+        ...prev,
+        [conversationId]: {
+          updatedAt: Date.now(),
+          messages: existing.map(item => item.id === message.id ? { ...item, text: cleanText } : item),
+        },
+      };
+    });
+
+    try {
+      await API.postJson('/api/v2/message/edit', { message_id: message.id, text: cleanText });
+      await loadThread(conversationId, { silent: true, limit: 300, noCache: true });
+      await loadConversations({ silent: true, sideLoad: false });
+      showToast('Message edited on Telegram');
+    } catch (e) {
+      setThreads(prev => {
+        const existing = prev[conversationId]?.messages || prev[conversationId] || [];
+        return {
+          ...prev,
+          [conversationId]: {
+            updatedAt: Date.now(),
+            messages: existing.map(item => item.id === message.id ? { ...item, text: currentText } : item),
+          },
+        };
+      });
+      setApiError(e.message);
+      showToast(e.message);
+    }
+  };
+
+  const deleteMessage = async (message) => {
+    if (!conv || !message?.id) return;
+    if (conv.platform !== 'telegram') {
+      showToast('Instagram and WhatsApp do not support deleting already-delivered messages through the connected API.');
+      return;
+    }
+    if (!window.confirm('Delete this message from the real Telegram chat and this dashboard?')) return;
+
+    const conversationId = conv.id;
+    try {
+      await API.postJson('/api/v2/message/delete', { message_id: message.id });
+      setThreads(prev => {
+        const existing = prev[conversationId]?.messages || prev[conversationId] || [];
+        return {
+          ...prev,
+          [conversationId]: {
+            updatedAt: Date.now(),
+            messages: existing.filter(item => item.id !== message.id),
+          },
+        };
+      });
+      await loadConversations({ silent: true, sideLoad: false });
+      showToast('Message deleted from Telegram');
+    } catch (e) {
+      setApiError(e.message);
+      showToast(e.message);
+    }
+  };
+
   const handleTool = async (tool, setDraft, file, caption = '') => {
     if (file) {
       if (!conv) return false;
@@ -4895,9 +5422,9 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   };
 
   const changeView = (view) => {
-    if (isOperator && !['leads', 'inbox', 'clients', 'operators', 'settings', 'profile'].includes(view)) {
+    if (isOperator && !['leads', 'inbox', 'posts', 'clients', 'operators', 'settings', 'profile'].includes(view)) {
       setActiveView('inbox');
-      showToast('Operator access is limited to Leads, Inbox, Clients, Operators, Settings, and Profile');
+      showToast('Operator access is limited to Leads, Inbox, Posts, Clients, Operators, Settings, and Profile');
       return;
     }
     if ((view === 'operators' || view === 'settings') && liveModeRef.current) {
@@ -4907,6 +5434,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     const names = {
       inbox: t.inbox,
       insights: t.insights,
+      posts: t.posts || 'Posts',
       leads: t.leads || 'Leads',
       clients: t.clients || 'Clients',
       operators: t.operators || 'Operators',
@@ -5090,6 +5618,8 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
             t={t}
             messages={messages}
             onSend={sendMessage}
+            onEditMessage={editMessage}
+            onDeleteMessage={deleteMessage}
             sending={sending}
             threadLoading={threadLoading}
             onTool={handleTool}
@@ -5100,6 +5630,18 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
             t={t}
             view={activeView}
             stats={stats}
+            posts={posts}
+            postsLoading={postsLoading}
+            postsError={postsError}
+            selectedPostId={selectedPostId}
+            onSelectPost={setSelectedPostId}
+            onImportPosts={() => importInstagramPosts(selectedBusinessId)}
+            onRefreshPosts={() => loadInstagramPosts(selectedBusinessId, { refresh: true })}
+            onSavePostInfo={saveInstagramPostInfo}
+            growthAnalyzer={growthAnalyzer}
+            growthAnalyzerLoading={growthAnalyzerLoading}
+            growthAnalyzerError={growthAnalyzerError}
+            onRefreshGrowthAnalyzer={() => loadGrowthAnalyzer(selectedBusinessId, { noCache: true })}
             conversations={conversations}
             businesses={businesses}
             selectedBusinessId={selectedBusinessId}
@@ -5169,7 +5711,14 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
 
 function Root() {
   const [lang, setLang] = useState(() => window.localStorage.getItem(UI_LANG_STORAGE_KEY) || 'en');
-  const [showDashboard, setShowDashboard] = useState(() => window.location.hash === DASHBOARD_HASH || urlParams.get('dashboard') === '1');
+  const forceDashboard = Boolean(urlParams.get('api') || urlParams.get('secret') || readAuthSession()?.token);
+  const [showDashboard, setShowDashboard] = useState(() => {
+    const hasDashboardHash = window.location.hash === DASHBOARD_HASH;
+    const forceDashboard = urlParams.get('dashboard') === '1';
+    const hasApiContext = Boolean(urlParams.get('api') || urlParams.get('secret'));
+    const hasAuthToken = Boolean(readAuthSession()?.token);
+    return hasDashboardHash || forceDashboard || hasApiContext || hasAuthToken;
+  });
   const [currentUser, setCurrentUser] = useState(() => readAuthSession() || null);
   const [signedIn, setSignedIn] = useState(() => {
     const auth = readAuthSession();
@@ -5185,6 +5734,13 @@ function Root() {
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
+
+  useEffect(() => {
+    if (!showDashboard && !forceDashboard) return;
+    if (!showDashboard && forceDashboard) setShowDashboard(true);
+    if (window.location.hash === DASHBOARD_HASH) return;
+    window.location.hash = DASHBOARD_HASH;
+  }, [showDashboard, forceDashboard]);
 
   const openDashboard = () => {
     window.location.hash = DASHBOARD_HASH;
@@ -5211,7 +5767,7 @@ function Root() {
     setShowDashboard(true);
   };
 
-  if (!showDashboard) return <LandingPage onOpenDashboard={openDashboard} lang={lang} setLang={setLang} />;
+  if (!showDashboard && !forceDashboard) return <LandingPage onOpenDashboard={openDashboard} lang={lang} setLang={setLang} />;
   if (!signedIn) return <SignInPage lang={lang} onSignedIn={(session) => { setCurrentUser(session || readAuthSession()); setSignedIn(true); }} onBack={backToLanding} />;
   return <App lang={lang} setLang={setLang} onSignOut={signOut} onAuthExpired={authExpired} currentUser={currentUser || readAuthSession()} />;
 }
