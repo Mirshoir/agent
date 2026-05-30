@@ -199,6 +199,10 @@ PRODUCT_MATCHER_API_URLS = [str(url or "").strip() for url in _product_matcher_u
 PRODUCT_MATCHER_TIMEOUT_SECONDS = max(3, min(60, int(os.getenv("PRODUCT_MATCHER_TIMEOUT_SECONDS", "20"))))
 PRODUCT_MATCHER_TOP_K = max(1, min(10, int(os.getenv("PRODUCT_MATCHER_TOP_K", "3"))))
 PRODUCT_MATCHER_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_MIN_SCORE", "0.45"))))
+PRODUCT_MATCHER_CONTEXT_TTL_SECONDS = max(
+    60,
+    min(24 * 60 * 60, int(os.getenv("PRODUCT_MATCHER_CONTEXT_TTL_SECONDS", "1800"))),
+)
 
 if not SUPABASE_URL:
     raise RuntimeError("Missing SUPABASE_URL")
@@ -216,6 +220,7 @@ DEDUP_TTL_SECONDS = 60 * 60
 WHATSAPP_CHAT_MEMORY = {}
 WHATSAPP_EMBEDDED_SESSIONS = {}
 LAST_WEBHOOK_EVENTS = []
+INSTAGRAM_MEDIA_MATCH_MEMORY: dict[str, dict] = {}
 
 
 # ============================================================================
@@ -3470,6 +3475,66 @@ def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: st
     }
 
 
+def _instagram_media_memory_key(business_id: str, customer_id: str) -> str:
+    business_id = normalize_id(business_id)
+    customer_id = normalize_id(customer_id)
+    if not business_id or not customer_id:
+        return ""
+    return f"{business_id}:{customer_id}"
+
+
+def remember_instagram_media_match(
+    business_id: str,
+    customer_id: str,
+    context: str,
+    reply_hint: str = "",
+    top_match_code: str = "",
+    top_match_model: str = "",
+    top_score: float = 0.0,
+):
+    key = _instagram_media_memory_key(business_id, customer_id)
+    if not key or not normalize_id(context):
+        return
+    INSTAGRAM_MEDIA_MATCH_MEMORY[key] = {
+        "saved_at": time.time(),
+        "context": normalize_id(context),
+        "reply_hint": normalize_id(reply_hint),
+        "top_match_code": normalize_id(top_match_code),
+        "top_match_model": normalize_id(top_match_model),
+        "top_score": _safe_score(top_score),
+    }
+
+
+def load_recent_instagram_media_match(business_id: str, customer_id: str) -> dict:
+    key = _instagram_media_memory_key(business_id, customer_id)
+    if not key:
+        return {}
+    payload = INSTAGRAM_MEDIA_MATCH_MEMORY.get(key)
+    if not isinstance(payload, dict):
+        return {}
+    saved_at = float(payload.get("saved_at") or 0.0)
+    if (time.time() - saved_at) > PRODUCT_MATCHER_CONTEXT_TTL_SECONDS:
+        INSTAGRAM_MEDIA_MATCH_MEMORY.pop(key, None)
+        return {}
+    return payload
+
+
+def should_reuse_recent_media_match(user_text: str, media_type: str = "") -> bool:
+    if media_type in {"photo", "video", "file"}:
+        return False
+    text = normalize_id(user_text)
+    if not text:
+        return False
+    lower = text.lower()
+    # Typical follow-up buying messages that refer to the previously sent product image.
+    if re.search(r"\b\d+\s*(qop|meshok|ta|dona|pack|quti)\b", lower):
+        return True
+    if has_strong_milana_sales_context(lower):
+        return True
+    short_followups = {"bor", "bormi", "narxi", "qancha", "razmer", "rang", "olaman", "zakaz", "беру", "есть"}
+    return lower in short_followups
+
+
 def has_strong_milana_sales_context(text: str) -> bool:
     s = normalize_id(text).lower()
     if not s:
@@ -4512,6 +4577,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         media_match_context = ""
         media_reply_hint = ""
         matcher_source_url = media_url or post_image_url
+        business_id = normalize_id(business.get("id"))
         if matcher_source_url and media_type in {"photo", "video", "file"}:
             media_match = analyze_media_for_sales_reply(
                 media_url=matcher_source_url,
@@ -4521,6 +4587,15 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             if media_match:
                 media_match_context = media_match.get("context", "")
                 media_reply_hint = media_match.get("reply_hint", "")
+                remember_instagram_media_match(
+                    business_id=business_id,
+                    customer_id=sender_id,
+                    context=media_match_context,
+                    reply_hint=media_reply_hint,
+                    top_match_code=media_match.get("top_match_code", ""),
+                    top_match_model=media_match.get("top_match_model", ""),
+                    top_score=media_match.get("top_score", 0.0),
+                )
                 log("Instagram DM media matcher hit", {
                     "customer_id": sender_id,
                     "message_id": message_id,
@@ -4529,6 +4604,23 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                     "top_match_model": media_match.get("top_match_model"),
                     "top_score": media_match.get("top_score"),
                 })
+        elif should_reuse_recent_media_match(message_text or "", media_type or ""):
+            cached_match = load_recent_instagram_media_match(business_id=business_id, customer_id=sender_id)
+            if cached_match:
+                cached_context = normalize_id(cached_match.get("context"))
+                if cached_context:
+                    media_match_context = (
+                        f"{cached_context}\n"
+                        "- This customer follow-up likely refers to the same previously matched product unless they ask to change model."
+                    )
+                    media_reply_hint = normalize_id(cached_match.get("reply_hint")) or media_reply_hint
+                    log("Instagram DM media matcher cache hit", {
+                        "customer_id": sender_id,
+                        "message_id": message_id,
+                        "top_match_code": normalize_id(cached_match.get("top_match_code")),
+                        "top_match_model": normalize_id(cached_match.get("top_match_model")),
+                        "top_score": _safe_score(cached_match.get("top_score")),
+                    })
 
         reply_text = get_ai_reply(
             message_text or "Photo/Video received",
@@ -5502,6 +5594,7 @@ async def api_health():
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "product_matcher_enabled": PRODUCT_MATCHER_ENABLED,
         "product_matcher_urls": PRODUCT_MATCHER_API_URLS,
+        "product_matcher_context_ttl_seconds": PRODUCT_MATCHER_CONTEXT_TTL_SECONDS,
     }
 
 
