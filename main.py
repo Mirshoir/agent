@@ -2841,6 +2841,57 @@ def complete_sentence_reply(text: str, limit: int = 950) -> str:
     return text.rstrip(" :：,;-").strip() + "."
 
 
+def is_semantically_incomplete_reply(text: str) -> bool:
+    clean = normalize_id(text).lower().rstrip(".!?。！？ :：,;-")
+    if not clean:
+        return True
+
+    if (
+        clean.startswith("assalomu alaykum, siz milana premium fabrikasi xodimi bilan")
+        and "suhbatni boshladingiz" not in clean
+    ):
+        return True
+
+    incomplete_endings = (
+        " bilan",
+        " uchun",
+        " orqali",
+        " bo'yicha",
+        " haqida",
+        " agar",
+        " va",
+        " yoki",
+        " hamda",
+        " iloji bo'lsa",
+        " please",
+        " with",
+        " for",
+        " about",
+        " and",
+        " or",
+        " через",
+        " для",
+        " если",
+        " и",
+        " или",
+    )
+    return clean.endswith(incomplete_endings)
+
+
+def repair_incomplete_sales_reply(text: str, user_text: str = "") -> str:
+    if not is_semantically_incomplete_reply(text):
+        return text
+
+    lang = detect_customer_language(user_text)
+    if lang == "en":
+        return "Hello! How can I help you today?"
+    if lang == "ru":
+        return "Здравствуйте! Чем могу помочь?"
+    if lang == "kk":
+        return "Сәлеметсіз бе! Қалай көмектесе аламын?"
+    return "Assalomu alaykum, siz Milana Premium fabrikasi xodimi bilan suhbatni boshladingiz. Qanday yordam kerak?"
+
+
 def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
     catalog_link = get_catalog_link(business)
     if catalog_link and catalog_link in (reply_text or ""):
@@ -2980,12 +3031,22 @@ def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
             },
             timeout=30,
         )
-        log(log_label, {"provider": provider, "model": model, "status": res.status_code, "body": res.text[:1000]})
+        body = safe_json(res)
+        choice = (body.get("choices") or [{}])[0] if isinstance(body, dict) else {}
+        log(
+            log_label,
+            {
+                "provider": provider,
+                "model": model,
+                "status": res.status_code,
+                "finish_reason": choice.get("finish_reason"),
+                "body": res.text[:1000],
+            },
+        )
         if not res.ok:
             return ""
         return (
-            res.json()
-            .get("choices", [{}])[0]
+            choice
             .get("message", {})
             .get("content", "")
             .strip()
@@ -3014,12 +3075,22 @@ def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
             },
             timeout=30,
         )
-        log(log_label, {"provider": provider, "model": model, "status": res.status_code, "body": res.text[:1000]})
+        body = safe_json(res)
+        candidate = (body.get("candidates") or [{}])[0] if isinstance(body, dict) else {}
+        log(
+            log_label,
+            {
+                "provider": provider,
+                "model": model,
+                "status": res.status_code,
+                "finish_reason": candidate.get("finishReason"),
+                "body": res.text[:1000],
+            },
+        )
         if not res.ok:
             return ""
         parts = (
-            res.json()
-            .get("candidates", [{}])[0]
+            candidate
             .get("content", {})
             .get("parts", [])
         )
@@ -3051,12 +3122,22 @@ def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
             },
             timeout=30,
         )
-        log(log_label, {"provider": provider, "model": model, "status": res.status_code, "body": res.text[:1000]})
+        body = safe_json(res)
+        log(
+            log_label,
+            {
+                "provider": provider,
+                "model": model,
+                "status": res.status_code,
+                "stop_reason": body.get("stop_reason") if isinstance(body, dict) else None,
+                "body": res.text[:1000],
+            },
+        )
         if not res.ok:
             return ""
         return "\n".join(
             block.get("text", "")
-            for block in res.json().get("content", [])
+            for block in body.get("content", [])
             if block.get("type") == "text"
         ).strip()
 
@@ -3158,7 +3239,7 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     for phrase in noisy_phrases:
         text = re.sub(re.escape(phrase), "", text, flags=re.IGNORECASE)
 
-    text = complete_sentence_reply(text)
+    text = repair_incomplete_sales_reply(complete_sentence_reply(text), user_text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
     # If customer asked price but reply has no numeric price hint, force concise pricing follow-up.
@@ -3211,7 +3292,7 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
         else:
             text = "Assalomu alaykum 😊 Qanday yordam kerak?"
 
-    text = complete_sentence_reply(text, limit=900)
+    text = repair_incomplete_sales_reply(complete_sentence_reply(text, limit=900), user_text)
 
     if text:
         return text
