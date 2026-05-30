@@ -1141,6 +1141,7 @@ function normalizeConversation(row) {
   const parsedCustomerId = parts[3] || '';
   const customerId = row.customer_id || parsedCustomerId;
   const chatId = row.chat_id || customerId;
+  const platform = row.platform || 'instagram';
   const rawName = String(row.customer_name || row.name || '').trim();
   const generatedInstagramName = /^instagram\s+(user|client|ig user)\s+\d{2,}$/i.test(rawName);
   const numericName = /^\d{6,}$/.test(rawName);
@@ -1149,7 +1150,6 @@ function normalizeConversation(row) {
     : (platform === 'instagram' && customerId ? `@${customerId}` : `Client ${String(customerId || '').slice(-4)}`);
   const unread = Number(row.unread_count ?? row.unread ?? 0);
   const total = Number(row.total_messages ?? row.kpis?.orders ?? 0);
-  const platform = row.platform || 'instagram';
   const channel = row.channel || parsedChannel || '';
   const channelName = row.channelName || channelLabel(platform || parsedPlatform, channel);
   const isCommentThread = Boolean(row.isCommentThread || (platform === 'instagram' && String(channel).toLowerCase().includes('comment')));
