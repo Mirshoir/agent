@@ -147,8 +147,8 @@ const API = {
       window.clearTimeout(timer);
     }
   },
-  async get(path) {
-    const res = await API.fetchWithTimeout(`${API_BASE}${scopedPath(path)}`, { headers: apiHeaders() });
+  async get(path, timeoutMs) {
+    const res = await API.fetchWithTimeout(`${API_BASE}${scopedPath(path)}`, { headers: apiHeaders() }, timeoutMs);
     const data = await res.json();
     if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
     return data;
@@ -185,8 +185,12 @@ const API = {
   },
 };
 
-const THREAD_POLL_MS = 1200;
-const INBOX_POLL_MS = 2000;
+function isAbortLikeError(error) {
+  return /aborted|aborterror|signal is aborted/i.test(String(error?.message || error || ''));
+}
+
+const THREAD_POLL_MS = 3000;
+const INBOX_POLL_MS = 5000;
 const STATS_POLL_MS = 20000;
 const THREAD_WARMUP_CONCURRENCY = 6;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
@@ -4367,7 +4371,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       }
       return true;
     } catch (e) {
-      const isAbort = /aborted|aborterror|signal is aborted/i.test(String(e?.message || ''));
+      const isAbort = isAbortLikeError(e);
       if (silent) {
         if (!isAbort) setApiError(`Live sync delayed: ${e.message}`);
         return false;
@@ -4412,7 +4416,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     if (!silent) setThreadLoading(true);
     const request = (async () => {
       try {
-        const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?mark_read=${markRead ? '1' : '0'}&limit=${Math.max(1, Number(limit || 200))}&no_cache=${noCache ? '1' : '0'}`);
+        const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?mark_read=${markRead ? '1' : '0'}&limit=${Math.max(1, Number(limit || 200))}&no_cache=${noCache ? '1' : '0'}`, 60000);
         const normalized = (data.data || []).map(normalizeMessage);
         setThreads(prev => ({
           ...prev,
@@ -4425,7 +4429,9 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
         setApiError('');
         return true;
       } catch (e) {
-        setApiError(`${e.message} Showing cached messages.`);
+        if (!isAbortLikeError(e)) {
+          setApiError(`${e.message} Showing cached messages.`);
+        }
         return false;
       } finally {
         delete threadLoadPromisesRef.current[conversationId];
