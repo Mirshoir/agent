@@ -97,6 +97,7 @@ async def dashboard():
 
 @app.on_event("startup")
 async def startup_telegram_user_client():
+    log("Application startup", {"version": APP_VERSION})
     await start_telegram_user_client()
 
 
@@ -108,6 +109,7 @@ async def shutdown_telegram_user_client():
 # ============================================================================
 # ENV
 # ============================================================================
+APP_VERSION = "5.1.2-instagram-comment-debug"
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -1443,19 +1445,24 @@ def get_business_channel(platform: str, external_account_id: str = "", only_acti
     external_account_id = normalize_id(external_account_id)
     if not platform or not external_account_id:
         return None
-    try:
-        query = (
-            supabase.table("business_channels")
-            .select("*")
-            .eq("platform", platform)
-            .eq("external_account_id", external_account_id)
-        )
-        if only_active:
-            query = query.eq("is_active", True)
-        result = query.limit(1).execute()
-        return result.data[0] if result.data else None
-    except Exception:
-        return None
+    # Canonical column is account_external_id. Keep a legacy fallback for older schemas.
+    lookup_columns = ("account_external_id", "external_account_id")
+    for column_name in lookup_columns:
+        try:
+            query = (
+                supabase.table("business_channels")
+                .select("*")
+                .eq("platform", platform)
+                .eq(column_name, external_account_id)
+            )
+            if only_active:
+                query = query.eq("is_active", True)
+            result = query.limit(1).execute()
+            if result.data:
+                return result.data[0]
+        except Exception:
+            continue
+    return None
 
 
 def get_business(instagram_business_id: str):
@@ -2620,39 +2627,6 @@ def is_low_signal_message(text: str, raw_payload: dict = None) -> bool:
     return False
 
 
-
-def is_emoji_only_text(text: str) -> bool:
-    """True only when the visible content is made from emoji/reaction characters."""
-    s = normalize_id(text)
-    if not s:
-        return False
-    compact = re.sub(r"\s+", "", s)
-    if not compact:
-        return False
-    emoji_only_re = re.compile(r"^[\u2600-\u27BF\U0001F300-\U0001FAFF\U0001F1E6-\U0001F1FF\u200d\ufe0f]+$")
-    return bool(emoji_only_re.fullmatch(compact))
-
-
-def matching_reaction_reply(text: str) -> str:
-    """Return one natural emoji reaction for emoji-only comments/story reactions."""
-    s = normalize_id(text)
-    if not s:
-        return "😊"
-    compact = re.sub(r"\s+", "", s)
-    # Prefer the first full emoji-like cluster. This keeps replies short: 😍😍😍 -> 😍.
-    match = re.search(r"[\U0001F300-\U0001FAFF\u2600-\u27BF](?:\ufe0f|\u200d[\U0001F300-\U0001FAFF\u2600-\u27BF])*", compact)
-    return match.group(0) if match else "😊"
-
-
-def fixed_instagram_public_comment_reply(comment_text: str) -> str:
-    """
-    Public comments should not depend on the LLM prompt.
-    This prevents prompt rules for story reactions from accidentally stopping comment replies.
-    """
-    if is_emoji_only_text(comment_text):
-        return matching_reaction_reply(comment_text)
-    return "Direktdan yozdik, iloji bo‘lsa nomer qoldiring."
-
 def wants_deal_handoff(text: str) -> bool:
     s = normalize_id(text).lower()
     if not s:
@@ -3460,38 +3434,20 @@ def reply_to_comment(access_token: str, comment_id: str, text: str, business: di
     if not access_token or not comment_id or not text:
         return None
 
-    business = business or {}
-    oauth_provider = business.get("oauth_provider", "")
+    oauth_provider = (business or {}).get("oauth_provider", "")
+
+    if oauth_provider == "facebook_page":
+        url = f"{GRAPH_FACEBOOK}/{comment_id}/comments"
+    else:
+        url = f"{GRAPH_INSTAGRAM}/{comment_id}/replies"
 
     text = remove_urls(text)[:1000]
     if not text:
-        text = "Direktdan yozdik, iloji bo‘lsa nomer qoldiring."
+        text = "Xabaringiz uchun rahmat 😊 Batafsil ma'lumot uchun DM yozing."
 
-    # Some accounts are connected through Facebook Page tokens, others through Instagram tokens.
-    # Try the expected endpoint first, then fallback to the other comment-reply endpoint.
-    if oauth_provider == "facebook_page":
-        urls = [
-            f"{GRAPH_FACEBOOK}/{comment_id}/comments",
-            f"{GRAPH_INSTAGRAM}/{comment_id}/replies",
-        ]
-    else:
-        urls = [
-            f"{GRAPH_INSTAGRAM}/{comment_id}/replies",
-            f"{GRAPH_FACEBOOK}/{comment_id}/comments",
-        ]
-
-    last_res = None
-    for url in urls:
-        try:
-            res = requests.post(url, params={"access_token": access_token, "message": text}, timeout=30)
-            log("Comment reply result", {"url": url, "status": res.status_code, "body": res.text})
-            last_res = res
-            if res.ok:
-                return res
-        except Exception as e:
-            log("Comment reply request error", {"url": url, "error": str(e)})
-
-    return last_res
+    res = requests.post(url, params={"access_token": access_token, "message": text}, timeout=30)
+    log("Comment reply result", {"status": res.status_code, "body": res.text})
+    return res
 
 
 async def process_instagram_messaging_event(entry_id: str, messaging: dict):
@@ -3783,175 +3739,171 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
 
 
 async def process_instagram_comment_event(entry_id: str, change: dict):
-    value = change.get("value", {}) or {}
+    value = change.get("value", {})
     comment_id = normalize_id(value.get("comment_id") or value.get("id"))
     from_user = value.get("from") or {}
     commenter_id = normalize_id(from_user.get("id"))
     commenter_username = normalize_id(from_user.get("username"))
     post_id = extract_instagram_comment_post_id(value)
-    comment_text = normalize_id(value.get("message") or value.get("text") or "")
-
-    log("Instagram comment event received", {
-        "entry_id": entry_id,
-        "comment_id": comment_id,
-        "commenter_id": commenter_id,
-        "commenter_username": commenter_username,
-        "post_id": post_id,
-        "comment_text": comment_text,
-        "field": change.get("field"),
-    })
-
-    if not comment_id:
-        log("Instagram comment skipped", "missing comment_id")
-        return
-
-    # Ignore truly empty/non-text comment events, but do not let emoji-only comments be skipped.
-    if not comment_text:
-        log("Instagram comment skipped", {"comment_id": comment_id, "reason": "empty comment_text"})
-        return
-
-    if is_processed(processed_comment_ids, comment_id):
-        log("Instagram comment skipped", {"comment_id": comment_id, "reason": "already processed"})
-        return
-
-    if comment_id in processing_comment_ids:
-        log("Instagram comment skipped", {"comment_id": comment_id, "reason": "currently processing"})
-        return
-
-    processing_comment_ids.add(comment_id)
-
-    try:
-        business = find_business_for_webhook(entry_id)
-        if not business:
-            log("Instagram comment skipped", {"comment_id": comment_id, "reason": "business not found", "entry_id": entry_id})
-            return
-
-        # Prevent self-echo loops and duplicate self threads.
-        if is_own_instagram_comment_actor(business, entry_id, commenter_id, commenter_username):
-            log("Instagram comment skipped", {"comment_id": comment_id, "reason": "own comment"})
-            mark_processed(processed_comment_ids, comment_id)
-            return
-
-        access_token = get_business_access_token(business)
-        media_info = fetch_instagram_media_info(access_token, post_id, business) if access_token and post_id else {}
-
-        inbound_payload = dict(value)
-        inbound_payload["post_id"] = post_id
-        if not inbound_payload.get("post_permalink"):
-            inbound_payload["post_permalink"] = media_info.get("post_permalink") or (f"https://www.instagram.com/p/{post_id}/" if post_id else "")
-        if not inbound_payload.get("post_image_url"):
-            inbound_payload["post_image_url"] = media_info.get("post_image_url") or ""
-        if not inbound_payload.get("post_media_type"):
-            inbound_payload["post_media_type"] = normalize_id(media_info.get("post_media_type")).lower()
-
-        save_inbox_message(
-            business=business,
-            platform="instagram",
-            sender_id=commenter_id or comment_id,
-            recipient_id=entry_id,
-            message_text=comment_text,
-            direction="inbound",
-            platform_message_id=comment_id,
-            raw_payload=inbound_payload,
-            customer_name=commenter_username or f"IG User {str(commenter_id or comment_id)[-4:]}",
-            is_read=False,
-            channel="instagram_comment",
-        )
-
-        if not business.get("bot_enabled", True):
-            log("Instagram comment auto-reply skipped", {"comment_id": comment_id, "reason": "bot_enabled is false"})
-            mark_processed(processed_comment_ids, comment_id)
-            return
-
-        if business.get("auto_reply_comments") is False:
-            log("Instagram comment auto-reply skipped", {"comment_id": comment_id, "reason": "auto_reply_comments is false"})
-            mark_processed(processed_comment_ids, comment_id)
-            return
-
-        comment_scope = encode_comment_scope("", post_id) if post_id else (commenter_id or comment_id)
-        ai_enabled = is_chat_ai_enabled("instagram", "instagram_comment", comment_scope, business.get("id"))
-        # Backward compatibility with old per-customer comment settings.
-        if ai_enabled and comment_scope != (commenter_id or comment_id):
-            ai_enabled = is_chat_ai_enabled("instagram", "instagram_comment", commenter_id or comment_id, business.get("id"))
-        if not ai_enabled:
-            log("Instagram comment auto-reply skipped", {"comment_id": comment_id, "reason": "chat_ai_settings disabled", "scope": comment_scope})
-            mark_processed(processed_comment_ids, comment_id)
-            return
-
-        if not access_token:
-            log("Instagram comment auto-reply skipped", {"comment_id": comment_id, "reason": "missing access token"})
-            mark_processed(processed_comment_ids, comment_id)
-            return
-
-        # IMPORTANT FIX:
-        # Public comment replies no longer depend on the LLM prompt.
-        # Text comments always get the standard public reply; emoji-only comments get a matching emoji.
-        reply_text = fixed_instagram_public_comment_reply(comment_text)
-
-        # Still try to send catalog/details privately when the comment asks for catalog/price,
-        # but public reply remains fixed and safe.
-        if wants_catalog(comment_text):
-            catalog_link = get_catalog_link(business)
-            dm_result = send_catalog_private_reply(access_token, comment_id, business)
-            dm_raw_result = safe_json(dm_result) if dm_result is not None else {}
-            if dm_result is not None and dm_result.ok:
-                save_inbox_message(
-                    business=business,
-                    platform="instagram",
-                    sender_id=entry_id,
-                    recipient_id=commenter_id or comment_id,
-                    message_text=f"Katalog: {catalog_link}" if catalog_link else "Katalog DM orqali yuborildi",
-                    direction="outbound",
-                    platform_message_id=normalize_id(dm_raw_result.get("message_id") or dm_raw_result.get("id")) if isinstance(dm_raw_result, dict) else "",
-                    raw_payload=dm_raw_result if isinstance(dm_raw_result, dict) else {},
-                    customer_name=commenter_username or f"IG User {str(commenter_id or comment_id)[-4:]}",
-                    is_read=True,
-                    channel="dm",
-                )
-            else:
-                log("Instagram catalog private reply failed", {"comment_id": comment_id, "result": dm_raw_result})
-
-        log("Instagram comment auto-reply sending", {
+    comment_text = value.get("message") or value.get("text") or ""
+    log(
+        "Instagram comment event parsed",
+        {
+            "entry_id": entry_id,
             "comment_id": comment_id,
-            "reply_text": reply_text,
-            "business_id": business.get("id"),
-            "auto_reply_comments": business.get("auto_reply_comments"),
-            "ai_enabled": ai_enabled,
-            "has_access_token": bool(access_token),
-        })
+            "commenter_id": commenter_id,
+            "commenter_username": commenter_username,
+            "post_id": post_id,
+            "has_text": bool(comment_text),
+            "text_preview": (comment_text or "")[:120],
+        },
+    )
 
-        send_result = reply_to_comment(access_token, comment_id, reply_text, business)
-        raw_result = safe_json(send_result) if send_result is not None else {}
-        if send_result is not None and send_result.ok:
-            outbound_payload = dict(raw_result) if isinstance(raw_result, dict) else {}
-            outbound_payload["post_id"] = post_id
-            if not outbound_payload.get("post_permalink"):
-                outbound_payload["post_permalink"] = inbound_payload.get("post_permalink", "")
-            if not outbound_payload.get("post_image_url"):
-                outbound_payload["post_image_url"] = inbound_payload.get("post_image_url", "")
-            if not outbound_payload.get("post_media_type"):
-                outbound_payload["post_media_type"] = normalize_id(inbound_payload.get("post_media_type")).lower()
+    if not comment_id or not comment_text:
+        log("Instagram comment skipped: missing comment_id or text", {"comment_id": comment_id, "has_text": bool(comment_text)})
+        return
+
+    if already_processed(processed_comment_ids, comment_id):
+        log("Instagram comment skipped: already processed", {"comment_id": comment_id})
+        return
+
+    business = find_business_for_webhook(entry_id)
+    if not business:
+        log("Instagram comment skipped: business not found", {"entry_id": entry_id, "comment_id": comment_id})
+        return
+    log(
+        "Instagram comment business resolved",
+        {
+            "comment_id": comment_id,
+            "business_id": normalize_id(business.get("id")),
+            "oauth_provider": normalize_id(business.get("oauth_provider")),
+            "instagram_business_id": normalize_id(business.get("instagram_business_id")),
+            "facebook_page_id": normalize_id(business.get("facebook_page_id")),
+        },
+    )
+
+    # Prevent self-echo loops and duplicate self threads.
+    if is_own_instagram_comment_actor(business, entry_id, commenter_id, commenter_username):
+        log("Instagram comment skipped: own actor echo", {"comment_id": comment_id, "entry_id": entry_id, "commenter_id": commenter_id})
+        mark_processed(processed_comment_ids, comment_id)
+        return
+
+    access_token = get_business_access_token(business)
+    log("Instagram comment token check", {"comment_id": comment_id, "has_access_token": bool(access_token)})
+    media_info = fetch_instagram_media_info(access_token, post_id, business) if access_token and post_id else {}
+
+    inbound_payload = dict(value)
+    inbound_payload["post_id"] = post_id
+    if not inbound_payload.get("post_permalink"):
+        inbound_payload["post_permalink"] = media_info.get("post_permalink") or (f"https://www.instagram.com/p/{post_id}/" if post_id else "")
+    if not inbound_payload.get("post_image_url"):
+        inbound_payload["post_image_url"] = media_info.get("post_image_url") or ""
+    if not inbound_payload.get("post_media_type"):
+        inbound_payload["post_media_type"] = normalize_id(media_info.get("post_media_type")).lower()
+
+    save_inbox_message(
+        business=business,
+        platform="instagram",
+        sender_id=commenter_id or comment_id,
+        recipient_id=entry_id,
+        message_text=comment_text,
+        direction="inbound",
+        platform_message_id=comment_id,
+        raw_payload=inbound_payload,
+        customer_name=commenter_username or f"IG User {str(commenter_id or comment_id)[-4:]}",
+        is_read=False,
+        channel="instagram_comment",
+    )
+
+    if not business.get("bot_enabled", True):
+        log("Instagram comment skipped: bot disabled", {"comment_id": comment_id, "business_id": normalize_id(business.get("id"))})
+        mark_processed(processed_comment_ids, comment_id)
+        return
+
+    if business.get("auto_reply_comments") is False:
+        log("Instagram comment skipped: auto_reply_comments disabled", {"comment_id": comment_id, "business_id": normalize_id(business.get("id"))})
+        mark_processed(processed_comment_ids, comment_id)
+        return
+
+    comment_scope = encode_comment_scope("", post_id) if post_id else (commenter_id or comment_id)
+    ai_enabled = is_chat_ai_enabled("instagram", "instagram_comment", comment_scope, business.get("id"))
+    # Backward compatibility with old per-customer comment settings.
+    if ai_enabled and comment_scope != (commenter_id or comment_id):
+        ai_enabled = is_chat_ai_enabled("instagram", "instagram_comment", commenter_id or comment_id, business.get("id"))
+    if not ai_enabled:
+        log("Instagram comment skipped: AI disabled for scope", {"comment_id": comment_id, "comment_scope": comment_scope})
+        mark_processed(processed_comment_ids, comment_id)
+        return
+
+    if not access_token:
+        log("Instagram comment skipped: missing access token", {"comment_id": comment_id, "business_id": normalize_id(business.get("id"))})
+        mark_processed(processed_comment_ids, comment_id)
+        return
+
+    if wants_catalog(comment_text):
+        catalog_link = get_catalog_link(business)
+        dm_result = send_catalog_private_reply(access_token, comment_id, business)
+        dm_raw_result = safe_json(dm_result) if dm_result is not None else {}
+        if dm_result is not None and dm_result.ok:
             save_inbox_message(
                 business=business,
                 platform="instagram",
                 sender_id=entry_id,
                 recipient_id=commenter_id or comment_id,
-                message_text=reply_text,
+                message_text=f"Katalog: {catalog_link}",
                 direction="outbound",
-                platform_message_id=normalize_id(raw_result.get("id")) if isinstance(raw_result, dict) else "",
-                raw_payload=outbound_payload,
+                platform_message_id=normalize_id(dm_raw_result.get("message_id") or dm_raw_result.get("id")) if isinstance(dm_raw_result, dict) else "",
+                raw_payload=dm_raw_result if isinstance(dm_raw_result, dict) else {},
                 customer_name=commenter_username or f"IG User {str(commenter_id or comment_id)[-4:]}",
                 is_read=True,
-                channel="instagram_comment",
+                channel="dm",
             )
-            mark_processed(processed_comment_ids, comment_id)
+            reply_text = "Katalog DM orqali yuborildi"
         else:
-            log("Instagram comment auto-reply failed", {"comment_id": comment_id, "result": raw_result})
+            log("Instagram catalog private reply failed", {"comment_id": comment_id, "result": dm_raw_result})
+            reply_text = "Katalogni DM orqali yuborish uchun bizga xabar yozing."
+    else:
+        reply_text = get_ai_reply(comment_text, business, "instagram", commenter_id or comment_id, "instagram_comment")
+        reply_text = remove_urls(reply_text)
 
-    except Exception as e:
-        log("Instagram comment processing error", {"comment_id": comment_id, "error": str(e)})
-    finally:
-        processing_comment_ids.discard(comment_id)
+    send_result = reply_to_comment(access_token, comment_id, reply_text, business)
+    raw_result = safe_json(send_result) if send_result is not None else {}
+    if send_result is None:
+        log("Instagram comment reply failed: no response object", {"comment_id": comment_id})
+    elif not send_result.ok:
+        log(
+            "Instagram comment reply failed",
+            {
+                "comment_id": comment_id,
+                "status": send_result.status_code,
+                "result": raw_result,
+            },
+        )
+    if send_result is not None and send_result.ok:
+        log("Instagram comment reply sent", {"comment_id": comment_id, "result": raw_result})
+        outbound_payload = dict(raw_result) if isinstance(raw_result, dict) else {}
+        outbound_payload["post_id"] = post_id
+        if not outbound_payload.get("post_permalink"):
+            outbound_payload["post_permalink"] = inbound_payload.get("post_permalink", "")
+        if not outbound_payload.get("post_image_url"):
+            outbound_payload["post_image_url"] = inbound_payload.get("post_image_url", "")
+        if not outbound_payload.get("post_media_type"):
+            outbound_payload["post_media_type"] = normalize_id(inbound_payload.get("post_media_type")).lower()
+        save_inbox_message(
+            business=business,
+            platform="instagram",
+            sender_id=entry_id,
+            recipient_id=commenter_id or comment_id,
+            message_text=reply_text,
+            direction="outbound",
+            platform_message_id=normalize_id(raw_result.get("id")) if isinstance(raw_result, dict) else "",
+            raw_payload=outbound_payload,
+            customer_name=commenter_username or f"IG User {str(commenter_id or comment_id)[-4:]}",
+            is_read=True,
+            channel="instagram_comment",
+        )
+
+    mark_processed(processed_comment_ids, comment_id)
 
 
 # ============================================================================
@@ -4736,7 +4688,7 @@ async def home():
 async def api_health():
     return {
         "status": "ok",
-        "version": "5.1.0-telegram-voice",
+        "version": APP_VERSION,
         "ffmpeg": bool(shutil.which("ffmpeg")),
     }
 
@@ -4772,7 +4724,7 @@ async def api_health_deep(
 
     return {
         "status": "ok" if healthy else "degraded",
-        "version": "5.1.1-telegram-media-fallback",
+        "version": APP_VERSION,
         "checks": checks,
     }
 
@@ -6189,6 +6141,7 @@ async def receive_webhook(request: Request):
                             "field": change.get("field"),
                             "message_count": len(((change.get("value") or {}).get("messages") or [])),
                             "status_count": len(((change.get("value") or {}).get("statuses") or [])),
+                            "has_comment_id": bool(((change.get("value") or {}).get("comment_id") or (change.get("value") or {}).get("id")) if change.get("field") in ["comments", "feed"] else False),
                             "phone_number_id": normalize_id(((change.get("value") or {}).get("metadata") or {}).get("phone_number_id")),
                         }
                         for change in (entry.get("changes", []) or [])
