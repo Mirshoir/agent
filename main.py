@@ -3297,6 +3297,19 @@ def is_low_signal_message(text: str, raw_payload: dict = None) -> bool:
     return False
 
 
+def is_auto_media_placeholder_message(text: str) -> bool:
+    s = normalize_id(text).strip().lower()
+    return s in {
+        "📸 photo",
+        "🎥 video",
+        "🎤 audio",
+        "📎 file",
+        "📎 attachment",
+        "🔁 forwarded post",
+        "🔁 forwarded reel",
+    }
+
+
 def wants_deal_handoff(text: str) -> bool:
     s = normalize_id(text).lower()
     if not s:
@@ -4634,7 +4647,13 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             media_reply_hint=media_reply_hint,
         )
 
-        should_send_catalog = bool(get_catalog_link(business)) and wants_catalog(message_text) and not is_greeting_only(message_text)
+        should_send_catalog = (
+            bool(get_catalog_link(business))
+            and wants_catalog(message_text)
+            and not is_greeting_only(message_text)
+            and not is_auto_media_placeholder_message(message_text)
+            and not (media_type in {"photo", "video", "file", "audio"})
+        )
         if should_send_catalog:
             send_result = send_catalog_button(access_token, sender_id, business, reply_text)
             saved_reply_text = clean_ai_reply_for_catalog(reply_text, business) + "\n[Catalog button sent]"
