@@ -15,6 +15,7 @@ import telegram_bot as telegram_bot_module
 from urllib.parse import urlencode, urlparse, parse_qs, unquote
 from typing import Optional
 from datetime import datetime, timedelta
+import mimetypes
 try:
     import bcrypt
 except Exception:
@@ -202,6 +203,10 @@ PRODUCT_MATCHER_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_M
 PRODUCT_MATCHER_CONTEXT_TTL_SECONDS = max(
     60,
     min(24 * 60 * 60, int(os.getenv("PRODUCT_MATCHER_CONTEXT_TTL_SECONDS", "1800"))),
+)
+PRODUCT_MATCHER_MAX_MEDIA_MB = max(
+    2,
+    min(40, int(os.getenv("PRODUCT_MATCHER_MAX_MEDIA_MB", "20"))),
 )
 
 if not SUPABASE_URL:
@@ -3392,6 +3397,47 @@ def product_matcher_health_url(api_url: str) -> str:
     return api_url.rstrip("/") + "/health"
 
 
+def product_matcher_file_url(api_url: str) -> str:
+    api_url = normalize_id(api_url)
+    if not api_url:
+        return ""
+    if api_url.endswith("/api/process-media-url"):
+        return api_url[:-len("/api/process-media-url")] + "/api/process-media"
+    if api_url.endswith("/api/process-media"):
+        return api_url
+    return api_url.rstrip("/") + "/api/process-media"
+
+
+def download_media_for_matcher(media_url: str) -> tuple[bytes, str, str]:
+    media_url = normalize_id(media_url)
+    if not media_url:
+        raise ValueError("Empty media URL")
+    limit_bytes = PRODUCT_MATCHER_MAX_MEDIA_MB * 1024 * 1024
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept": "*/*",
+    }
+    response = requests.get(media_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 20), stream=True, headers=headers)
+    response.raise_for_status()
+    content_type = normalize_id(response.headers.get("content-type")).split(";")[0].strip() or "application/octet-stream"
+    chunks = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=64 * 1024):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > limit_bytes:
+            raise ValueError(f"Media is too large (> {PRODUCT_MATCHER_MAX_MEDIA_MB} MB)")
+        chunks.append(chunk)
+    data = b"".join(chunks)
+    if not data:
+        raise ValueError("Downloaded media is empty")
+
+    ext = mimetypes.guess_extension(content_type) or ".bin"
+    filename = f"media{ext}"
+    return data, filename, content_type
+
+
 def _safe_score(value) -> float:
     try:
         return float(value)
@@ -3435,9 +3481,52 @@ def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: st
             break
         last_error = f"{matcher_url}: invalid response shape"
     else:
-        if last_error:
-            log("Media matcher call failed", last_error)
-        return {}
+        body = {}
+
+    # URL-based matcher may fail for short-lived/private CDN links.
+    # Fallback: download media in Instaagent and upload bytes to matcher.
+    if not (isinstance(body, dict) and body.get("status") == "ok"):
+        try:
+            media_bytes, filename, mime_type = download_media_for_matcher(media_url)
+        except Exception as exc:
+            if last_error:
+                log("Media matcher call failed", {"url_mode": last_error, "upload_mode": str(exc)})
+            else:
+                log("Media matcher upload prep failed", str(exc))
+            return {}
+
+        upload_data = {
+            "user_message": user_text or "",
+            "language": media_matcher_language(user_text),
+            "top_k": str(PRODUCT_MATCHER_TOP_K),
+        }
+        upload_files = {
+            "file": (filename, media_bytes, mime_type),
+        }
+
+        for matcher_url in PRODUCT_MATCHER_API_URLS:
+            upload_url = product_matcher_file_url(matcher_url)
+            try:
+                response = requests.post(
+                    upload_url,
+                    data=upload_data,
+                    files=upload_files,
+                    timeout=max(PRODUCT_MATCHER_TIMEOUT_SECONDS, 30),
+                )
+            except Exception as exc:
+                last_error = f"{upload_url}: {exc}"
+                continue
+            if not response.ok:
+                last_error = f"{upload_url}: HTTP {response.status_code}"
+                continue
+            body = safe_json(response)
+            if isinstance(body, dict) and body.get("status") == "ok":
+                break
+            last_error = f"{upload_url}: invalid response shape"
+        else:
+            if last_error:
+                log("Media matcher call failed", last_error)
+            return {}
 
     matches = body.get("matches") if isinstance(body.get("matches"), list) else []
     top = matches[0] if matches else {}
@@ -4635,17 +4724,25 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                         "top_score": _safe_score(cached_match.get("top_score")),
                     })
 
-        reply_text = get_ai_reply(
-            message_text or "Photo/Video received",
-            business,
-            "instagram",
-            sender_id,
-            "dm",
-            post_id=share_asset_id,
-            post_permalink=post_permalink,
-            media_context=media_match_context,
-            media_reply_hint=media_reply_hint,
+        use_direct_matcher_reply = bool(media_reply_hint) and (
+            is_auto_media_placeholder_message(message_text)
+            or not normalize_id(message_text)
+            or (media_type in {"photo", "video"} and not message.get("text"))
         )
+        if use_direct_matcher_reply:
+            reply_text = clean_sales_reply(media_reply_hint, message_text or "photo")
+        else:
+            reply_text = get_ai_reply(
+                message_text or "Photo/Video received",
+                business,
+                "instagram",
+                sender_id,
+                "dm",
+                post_id=share_asset_id,
+                post_permalink=post_permalink,
+                media_context=media_match_context,
+                media_reply_hint=media_reply_hint,
+            )
 
         should_send_catalog = (
             bool(get_catalog_link(business))
