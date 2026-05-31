@@ -197,7 +197,7 @@ if not _product_matcher_urls:
     else:
         _product_matcher_urls = [DEFAULT_PRODUCT_MATCHER_API_URL]
 PRODUCT_MATCHER_API_URLS = [str(url or "").strip() for url in _product_matcher_urls if str(url or "").strip()]
-PRODUCT_MATCHER_TIMEOUT_SECONDS = max(3, min(60, int(os.getenv("PRODUCT_MATCHER_TIMEOUT_SECONDS", "20"))))
+PRODUCT_MATCHER_TIMEOUT_SECONDS = max(10, min(180, int(os.getenv("PRODUCT_MATCHER_TIMEOUT_SECONDS", "90"))))
 PRODUCT_MATCHER_TOP_K = max(1, min(10, int(os.getenv("PRODUCT_MATCHER_TOP_K", "3"))))
 PRODUCT_MATCHER_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_MIN_SCORE", "0.20"))))
 PRODUCT_MATCHER_CONTEXT_TTL_SECONDS = max(
@@ -3408,6 +3408,17 @@ def product_matcher_file_url(api_url: str) -> str:
     return api_url.rstrip("/") + "/api/process-media"
 
 
+def product_matcher_url_url(api_url: str) -> str:
+    api_url = normalize_id(api_url)
+    if not api_url:
+        return ""
+    if api_url.endswith("/api/process-media"):
+        return api_url[:-len("/api/process-media")] + "/api/process-media-url"
+    if api_url.endswith("/api/process-media-url"):
+        return api_url
+    return api_url.rstrip("/") + "/api/process-media-url"
+
+
 def append_url_query(url: str, params: dict) -> str:
     parsed = urlparse(url)
     query = parse_qs(parsed.query, keep_blank_values=True)
@@ -3433,7 +3444,7 @@ def download_media_for_matcher(media_url: str, access_token: str = "") -> tuple[
         headers["Authorization"] = f"Bearer {clean_token}"
 
     try:
-        response = requests.get(media_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 20), stream=True, headers=headers)
+        response = requests.get(media_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 30), stream=True, headers=headers)
         response.raise_for_status()
     except requests.HTTPError as exc:
         response = getattr(exc, "response", None)
@@ -3441,7 +3452,7 @@ def download_media_for_matcher(media_url: str, access_token: str = "") -> tuple[
             raise
         token_url = append_url_query(media_url, {"access_token": clean_token})
         token_headers = {key: value for key, value in headers.items() if key.lower() != "authorization"}
-        response = requests.get(token_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 20), stream=True, headers=token_headers)
+        response = requests.get(token_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 30), stream=True, headers=token_headers)
         response.raise_for_status()
 
     content_type = normalize_id(response.headers.get("content-type")).split(";")[0].strip() or "application/octet-stream"
@@ -3516,7 +3527,7 @@ def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: st
                     upload_url,
                     data=upload_data,
                     files=upload_files,
-                    timeout=max(PRODUCT_MATCHER_TIMEOUT_SECONDS, 30),
+                    timeout=max(PRODUCT_MATCHER_TIMEOUT_SECONDS, 90),
                 )
             except Exception as exc:
                 last_upload_error = f"{upload_url}: {exc}"
@@ -3534,22 +3545,23 @@ def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: st
     # Fallback to URL mode if upload mode fails.
     if not (isinstance(body, dict) and body.get("status") == "ok"):
         for matcher_url in PRODUCT_MATCHER_API_URLS:
+            url_endpoint = product_matcher_url_url(matcher_url)
             try:
                 response = requests.post(
-                    matcher_url,
+                    url_endpoint,
                     json=payload,
-                    timeout=PRODUCT_MATCHER_TIMEOUT_SECONDS,
+                    timeout=max(PRODUCT_MATCHER_TIMEOUT_SECONDS, 90),
                 )
             except Exception as exc:
-                last_url_error = f"{matcher_url}: {exc}"
+                last_url_error = f"{url_endpoint}: {exc}"
                 continue
             if not response.ok:
-                last_url_error = f"{matcher_url}: HTTP {response.status_code}"
+                last_url_error = f"{url_endpoint}: HTTP {response.status_code}"
                 continue
             body = safe_json(response)
             if isinstance(body, dict) and body.get("status") == "ok":
                 break
-            last_url_error = f"{matcher_url}: invalid response shape"
+            last_url_error = f"{url_endpoint}: invalid response shape"
         else:
             body = {}
 
