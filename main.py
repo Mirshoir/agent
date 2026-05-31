@@ -6280,16 +6280,27 @@ async def get_conversations_v2(
             return q
 
         if fast:
+            # Fast mode is used by the inbox poller; keep it lightweight but large enough
+            # to avoid hiding older active conversations.
             recent_cutoff = (datetime.utcnow() - timedelta(days=120)).strftime("%Y-%m-%dT00:00:00Z")
-            rows = (
-                build_base_query()
-                .gte("created_at", recent_cutoff)
-                .order("created_at", desc=True)
-                .limit(80)
-                .execute()
-                .data
-                or []
-            )
+            rows = []
+            page_size = 250
+            max_scan_rows = 2500
+            for offset in range(0, max_scan_rows, page_size):
+                page = (
+                    build_base_query()
+                    .gte("created_at", recent_cutoff)
+                    .order("created_at", desc=True)
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                    .data
+                    or []
+                )
+                if not page:
+                    break
+                rows.extend(page)
+                if len(page) < page_size:
+                    break
         else:
             rows = []
             page_size = 450
