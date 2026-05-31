@@ -3462,39 +3462,19 @@ def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: st
 
     response = None
     body = {}
-    last_error = ""
-    for matcher_url in PRODUCT_MATCHER_API_URLS:
-        try:
-            response = requests.post(
-                matcher_url,
-                json=payload,
-                timeout=PRODUCT_MATCHER_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:
-            last_error = f"{matcher_url}: {exc}"
-            continue
-        if not response.ok:
-            last_error = f"{matcher_url}: HTTP {response.status_code}"
-            continue
-        body = safe_json(response)
-        if isinstance(body, dict) and body.get("status") == "ok":
-            break
-        last_error = f"{matcher_url}: invalid response shape"
-    else:
-        body = {}
+    last_upload_error = ""
+    last_url_error = ""
 
-    # URL-based matcher may fail for short-lived/private CDN links.
-    # Fallback: download media in Instaagent and upload bytes to matcher.
-    if not (isinstance(body, dict) and body.get("status") == "ok"):
-        try:
-            media_bytes, filename, mime_type = download_media_for_matcher(media_url)
-        except Exception as exc:
-            if last_error:
-                log("Media matcher call failed", {"url_mode": last_error, "upload_mode": str(exc)})
-            else:
-                log("Media matcher upload prep failed", str(exc))
-            return {}
+    # Upload-first strategy: avoids frequent 403 on short-lived Instagram CDN links.
+    try:
+        media_bytes, filename, mime_type = download_media_for_matcher(media_url)
+    except Exception as exc:
+        media_bytes = b""
+        filename = ""
+        mime_type = ""
+        last_upload_error = f"download: {exc}"
 
+    if media_bytes:
         upload_data = {
             "user_message": user_text or "",
             "language": media_matcher_language(user_text),
@@ -3514,19 +3494,46 @@ def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: st
                     timeout=max(PRODUCT_MATCHER_TIMEOUT_SECONDS, 30),
                 )
             except Exception as exc:
-                last_error = f"{upload_url}: {exc}"
+                last_upload_error = f"{upload_url}: {exc}"
                 continue
             if not response.ok:
-                last_error = f"{upload_url}: HTTP {response.status_code}"
+                last_upload_error = f"{upload_url}: HTTP {response.status_code}"
                 continue
             body = safe_json(response)
             if isinstance(body, dict) and body.get("status") == "ok":
                 break
-            last_error = f"{upload_url}: invalid response shape"
+            last_upload_error = f"{upload_url}: invalid response shape"
         else:
-            if last_error:
-                log("Media matcher call failed", last_error)
-            return {}
+            body = {}
+
+    # Fallback to URL mode if upload mode fails.
+    if not (isinstance(body, dict) and body.get("status") == "ok"):
+        for matcher_url in PRODUCT_MATCHER_API_URLS:
+            try:
+                response = requests.post(
+                    matcher_url,
+                    json=payload,
+                    timeout=PRODUCT_MATCHER_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                last_url_error = f"{matcher_url}: {exc}"
+                continue
+            if not response.ok:
+                last_url_error = f"{matcher_url}: HTTP {response.status_code}"
+                continue
+            body = safe_json(response)
+            if isinstance(body, dict) and body.get("status") == "ok":
+                break
+            last_url_error = f"{matcher_url}: invalid response shape"
+        else:
+            body = {}
+
+    if not (isinstance(body, dict) and body.get("status") == "ok"):
+        log(
+            "Media matcher call failed",
+            {"upload_mode": last_upload_error or "n/a", "url_mode": last_url_error or "n/a"},
+        )
+        return {}
 
     matches = body.get("matches") if isinstance(body.get("matches"), list) else []
     top = matches[0] if matches else {}
