@@ -199,7 +199,7 @@ if not _product_matcher_urls:
 PRODUCT_MATCHER_API_URLS = [str(url or "").strip() for url in _product_matcher_urls if str(url or "").strip()]
 PRODUCT_MATCHER_TIMEOUT_SECONDS = max(3, min(60, int(os.getenv("PRODUCT_MATCHER_TIMEOUT_SECONDS", "20"))))
 PRODUCT_MATCHER_TOP_K = max(1, min(10, int(os.getenv("PRODUCT_MATCHER_TOP_K", "3"))))
-PRODUCT_MATCHER_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_MIN_SCORE", "0.45"))))
+PRODUCT_MATCHER_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_MIN_SCORE", "0.20"))))
 PRODUCT_MATCHER_CONTEXT_TTL_SECONDS = max(
     60,
     min(24 * 60 * 60, int(os.getenv("PRODUCT_MATCHER_CONTEXT_TTL_SECONDS", "1800"))),
@@ -3408,7 +3408,18 @@ def product_matcher_file_url(api_url: str) -> str:
     return api_url.rstrip("/") + "/api/process-media"
 
 
-def download_media_for_matcher(media_url: str) -> tuple[bytes, str, str]:
+def append_url_query(url: str, params: dict) -> str:
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    for key, value in (params or {}).items():
+        clean_key = normalize_id(key)
+        clean_value = normalize_id(value)
+        if clean_key and clean_value:
+            query[clean_key] = [clean_value]
+    return parsed._replace(query=urlencode(query, doseq=True)).geturl()
+
+
+def download_media_for_matcher(media_url: str, access_token: str = "") -> tuple[bytes, str, str]:
     media_url = normalize_id(media_url)
     if not media_url:
         raise ValueError("Empty media URL")
@@ -3417,8 +3428,22 @@ def download_media_for_matcher(media_url: str) -> tuple[bytes, str, str]:
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
         "Accept": "*/*",
     }
-    response = requests.get(media_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 20), stream=True, headers=headers)
-    response.raise_for_status()
+    clean_token = normalize_id(access_token)
+    if clean_token:
+        headers["Authorization"] = f"Bearer {clean_token}"
+
+    try:
+        response = requests.get(media_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 20), stream=True, headers=headers)
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        response = getattr(exc, "response", None)
+        if not clean_token or response is None or response.status_code != 403:
+            raise
+        token_url = append_url_query(media_url, {"access_token": clean_token})
+        token_headers = {key: value for key, value in headers.items() if key.lower() != "authorization"}
+        response = requests.get(token_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 20), stream=True, headers=token_headers)
+        response.raise_for_status()
+
     content_type = normalize_id(response.headers.get("content-type")).split(";")[0].strip() or "application/octet-stream"
     chunks = []
     total = 0
@@ -3445,7 +3470,7 @@ def _safe_score(value) -> float:
         return 0.0
 
 
-def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: str = "") -> dict:
+def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: str = "", access_token: str = "") -> dict:
     media_url = normalize_id(media_url)
     if not PRODUCT_MATCHER_ENABLED or not PRODUCT_MATCHER_API_URLS or not media_url:
         return {}
@@ -3467,7 +3492,7 @@ def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: st
 
     # Upload-first strategy: avoids frequent 403 on short-lived Instagram CDN links.
     try:
-        media_bytes, filename, mime_type = download_media_for_matcher(media_url)
+        media_bytes, filename, mime_type = download_media_for_matcher(media_url, access_token=access_token)
     except Exception as exc:
         media_bytes = b""
         filename = ""
@@ -4713,6 +4738,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 media_url=matcher_source_url,
                 user_text=message_text or "",
                 media_type=media_type or "",
+                access_token=access_token,
             )
             if media_match:
                 media_match_context = media_match.get("context", "")
