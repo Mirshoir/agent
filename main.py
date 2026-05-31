@@ -200,6 +200,7 @@ PRODUCT_MATCHER_API_URLS = [str(url or "").strip() for url in _product_matcher_u
 PRODUCT_MATCHER_TIMEOUT_SECONDS = max(10, min(180, int(os.getenv("PRODUCT_MATCHER_TIMEOUT_SECONDS", "90"))))
 PRODUCT_MATCHER_TOP_K = max(1, min(10, int(os.getenv("PRODUCT_MATCHER_TOP_K", "3"))))
 PRODUCT_MATCHER_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_MIN_SCORE", "0.20"))))
+PRODUCT_MATCHER_WEAK_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_WEAK_MIN_SCORE", "0.10"))))
 PRODUCT_MATCHER_CONTEXT_TTL_SECONDS = max(
     60,
     min(24 * 60 * 60, int(os.getenv("PRODUCT_MATCHER_CONTEXT_TTL_SECONDS", "1800"))),
@@ -3253,6 +3254,16 @@ def wants_catalog(text: str) -> bool:
     return any(k in text for k in keywords)
 
 
+def is_price_question(text: str) -> bool:
+    text = normalize_id(text).lower()
+    if not text:
+        return False
+    return any(k in text for k in [
+        "narx", "narxi", "nechpul", "necha pul", "qancha", "kancha",
+        "цена", "сколько", "price",
+    ])
+
+
 def mentions_catalog(text: str) -> bool:
     text = (text or "").lower()
     markers = [
@@ -3342,6 +3353,7 @@ def detect_customer_language(text: str) -> str:
     uzbek_latin_markers = {
         "salom", "assalomu", "alaykum", "narx", "qancha", "qayer", "kerak", "olmoq",
         "sotib", "mahsulot", "katalog", "manzil", "rahmat", "bormi", "necha",
+        "nechpul", "nechi", "pul", "shu", "bo'lad", "bolad", "qop",
     }
     kazakh_markers = {
         "сәлем", "салем", "қалай", "баға", "бағасы", "қанша", "қажет", "жеткізу",
@@ -3481,6 +3493,66 @@ def _safe_score(value) -> float:
         return 0.0
 
 
+def _collect_instagram_payload_urls(value, url_candidates: list[str]):
+    if isinstance(value, dict):
+        for nested in value.values():
+            _collect_instagram_payload_urls(nested, url_candidates)
+        return
+    if isinstance(value, list):
+        for nested in value:
+            _collect_instagram_payload_urls(nested, url_candidates)
+        return
+    if isinstance(value, str) and value.startswith(("http://", "https://")) and value not in url_candidates:
+        url_candidates.append(value)
+
+
+def extract_instagram_media_url_from_payload(raw_payload: dict) -> tuple[str, str]:
+    raw_payload = raw_payload or {}
+    message = raw_payload.get("message") if isinstance(raw_payload.get("message"), dict) else {}
+    attachments = message.get("attachments") if isinstance(message.get("attachments"), list) else []
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        payload = att.get("payload") if isinstance(att.get("payload"), dict) else {}
+        url_candidates = []
+        for key in ("url", "media_url", "image_url", "video_url", "external_url", "link", "permalink", "src"):
+            direct = payload.get(key)
+            if isinstance(direct, str) and direct.startswith(("http://", "https://")) and direct not in url_candidates:
+                url_candidates.append(direct)
+        _collect_instagram_payload_urls(payload, url_candidates)
+        _collect_instagram_payload_urls(att, url_candidates)
+        media_url = normalize_id(url_candidates[0] if url_candidates else "")
+        if not media_url:
+            continue
+        att_type = normalize_id(att.get("type")).lower()
+        if att_type in {"image", "photo"}:
+            return media_url, "photo"
+        if att_type in {"video", "ig_reel", "reel"}:
+            return media_url, "video"
+        if re.search(r"\.(jpg|jpeg|png|gif|webp|bmp|heic|heif)(\?|$)", media_url.lower()):
+            return media_url, "photo"
+        if re.search(r"\.(mp4|mov|m4v|webm|avi|mkv)(\?|$)", media_url.lower()):
+            return media_url, "video"
+        return media_url, "file"
+    return "", ""
+
+
+def build_product_match_reply(code: str, model: str, price: str, currency: str, top_score: float) -> str:
+    code = normalize_id(code)
+    model = normalize_id(model)
+    price = normalize_id(price)
+    currency = normalize_id(currency)
+    label = code or model
+    if code and model and model != code:
+        label = f"{code}, model {model}"
+    confidence_note = ""
+    if top_score < PRODUCT_MATCHER_MIN_SCORE:
+        confidence_note = " O'xshash model deb ko'rinyapti."
+    if price:
+        return f"Topdim:{confidence_note} {label or 'shu model'} narxi {price} {currency or '$'}. Qaysi razmer va nechta qop kerak?"
+    return f"Topdim:{confidence_note} {label or 'shu model'} bo'yicha aniq narxni menejerimiz tekshirib beradi. Qaysi razmer va nechta qop kerak?"
+
+
 def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: str = "", access_token: str = "") -> dict:
     media_url = normalize_id(media_url)
     if not PRODUCT_MATCHER_ENABLED or not PRODUCT_MATCHER_API_URLS or not media_url:
@@ -3576,14 +3648,44 @@ def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: st
     top = matches[0] if matches else {}
     top_score = _safe_score(top.get("score"))
     extracted_codes = body.get("extracted_codes") if isinstance(body.get("extracted_codes"), list) else []
-
-    if top_score < PRODUCT_MATCHER_MIN_SCORE and not extracted_codes:
-        return {}
-
     code = normalize_id(top.get("product_code"))
     model = normalize_id(top.get("model_code"))
     price = normalize_id(top.get("price"))
     currency = normalize_id(top.get("currency"))
+    matcher_debug = body.get("debug") if isinstance(body.get("debug"), dict) else {}
+    has_match_identity = bool(code or model or price)
+    accepted_by_score = top_score >= PRODUCT_MATCHER_MIN_SCORE
+    accepted_by_code = bool(extracted_codes)
+    accepted_weak_match = has_match_identity and top_score >= PRODUCT_MATCHER_WEAK_MIN_SCORE
+
+    log("Media matcher response summary", {
+        "match_count": len(matches),
+        "top_score": round(top_score, 4),
+        "top_product_code": code,
+        "top_model_code": model,
+        "has_price": bool(price),
+        "extracted_codes": [normalize_id(x) for x in extracted_codes[:6]],
+        "min_required_score": PRODUCT_MATCHER_MIN_SCORE,
+        "weak_min_score": PRODUCT_MATCHER_WEAK_MIN_SCORE,
+        "accepted_by_score": accepted_by_score,
+        "accepted_by_code": accepted_by_code,
+        "accepted_weak_match": accepted_weak_match,
+        "clip_available": matcher_debug.get("clip_available"),
+        "clip_loaded": matcher_debug.get("clip_loaded"),
+        "matcher_min_fusion_score": matcher_debug.get("min_fusion_score"),
+    })
+
+    if not (accepted_by_score or accepted_by_code or accepted_weak_match):
+        log("Media matcher rejected by score", {
+            "top_score": round(top_score, 4),
+            "top_product_code": code,
+            "top_model_code": model,
+            "match_count": len(matches),
+            "min_required_score": PRODUCT_MATCHER_MIN_SCORE,
+            "weak_min_score": PRODUCT_MATCHER_WEAK_MIN_SCORE,
+        })
+        return {}
+
     parts = []
     if code:
         parts.append(f"code={code}")
@@ -3614,7 +3716,7 @@ def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: st
 
     return {
         "context": "\n".join(context_lines),
-        "reply_hint": normalize_id(body.get("llm_reply")),
+        "reply_hint": normalize_id(body.get("llm_reply")) or build_product_match_reply(code, model, price, currency, top_score),
         "top_score": top_score,
         "top_match_code": code,
         "top_match_model": model,
@@ -3665,6 +3767,40 @@ def load_recent_instagram_media_match(business_id: str, customer_id: str) -> dic
     return payload
 
 
+def load_instagram_message_media_reference(business_id: str, customer_id: str, message_id: str) -> dict:
+    business_id = normalize_id(business_id)
+    customer_id = normalize_id(customer_id)
+    message_id = normalize_id(message_id)
+    if not business_id or not customer_id or not message_id:
+        return {}
+    try:
+        result = (
+            supabase.table("inbox_messages")
+            .select("media_url,media_type,raw_payload")
+            .eq("business_id", business_id)
+            .eq("platform", "instagram")
+            .eq("customer_id", customer_id)
+            .eq("external_message_id", message_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        row = (result.data or [None])[0]
+        if not isinstance(row, dict):
+            return {}
+        media_url = normalize_id(row.get("media_url"))
+        media_type = normalize_id(row.get("media_type")).lower()
+        if not media_url:
+            media_url, payload_media_type = extract_instagram_media_url_from_payload(row.get("raw_payload") or {})
+            media_type = media_type or payload_media_type
+        if not media_url:
+            return {}
+        return {"media_url": media_url, "media_type": media_type or "photo"}
+    except Exception as exc:
+        log("Could not load Instagram reply-to media reference", str(exc))
+        return {}
+
+
 def should_reuse_recent_media_match(user_text: str, media_type: str = "") -> bool:
     if media_type in {"photo", "video", "file"}:
         return False
@@ -3701,6 +3837,7 @@ def has_strong_milana_sales_context(text: str) -> bool:
         "telefon", "phone number", "nomer", "raqam", "номер", "связаться",
         "menejer", "manager", "менеджер", "admin", "админ",
         "brak", "defect", "warranty", "garantiya", "гарантия", "qaytar",
+        "narx", "narxi", "nechpul", "necha pul", "qancha", "kancha", "price",
         "qimmat", "arzon", "expensive", "cheap", "дорого", "дешево",
         "bor", "bormi", "mavjud", "available", "есть", "в наличии",
         "hamkorlik", "partnership", "сотрудничество", "ish vaqti", "working hours",
@@ -4287,6 +4424,11 @@ def get_ai_reply(
                 messages.append({"role": "system", "content": post_context})
         if media_context:
             messages.append({"role": "system", "content": media_context})
+        if media_reply_hint:
+            messages.append({
+                "role": "system",
+                "content": f"Suggested product answer from media matcher: {media_reply_hint}. Keep the answer in the customer's language and do not ask which model if the matcher already found one.",
+            })
         messages.extend(get_recent_platform_chat_history(platform, business, customer_id, channel, limit=8))
         language_instruction = language_instruction_for(user_text)
         if language_instruction:
@@ -4487,6 +4629,8 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
     recipient_id = normalize_id(messaging.get("recipient", {}).get("id"))
     message_text = message.get("text") or ""
     message_id = normalize_id(message.get("mid") or str(messaging.get("timestamp") or ""))
+    reply_to = message.get("reply_to") if isinstance(message.get("reply_to"), dict) else {}
+    reply_to_message_id = normalize_id(reply_to.get("mid"))
     is_echo = bool(message.get("is_echo"))
 
     if is_echo:
@@ -4796,6 +4940,58 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                         "top_match_model": normalize_id(cached_match.get("top_match_model")),
                         "top_score": _safe_score(cached_match.get("top_score")),
                     })
+            elif reply_to_message_id:
+                media_ref = load_instagram_message_media_reference(
+                    business_id=business_id,
+                    customer_id=sender_id,
+                    message_id=reply_to_message_id,
+                )
+                replied_media_url = normalize_id(media_ref.get("media_url"))
+                replied_media_type = normalize_id(media_ref.get("media_type")).lower() or "photo"
+                if replied_media_url and replied_media_type in {"photo", "video", "file"}:
+                    log("Instagram DM reply-to media matcher request", {
+                        "customer_id": sender_id,
+                        "message_id": message_id,
+                        "reply_to_message_id": reply_to_message_id,
+                        "media_type": replied_media_type,
+                        "source_url_host": urlparse(replied_media_url).netloc,
+                    })
+                    media_match = analyze_media_for_sales_reply(
+                        media_url=replied_media_url,
+                        user_text=message_text or "",
+                        media_type=replied_media_type,
+                        access_token=access_token,
+                    )
+                    if media_match:
+                        media_match_context = (
+                            f"{media_match.get('context', '')}\n"
+                            "- This customer follow-up is replying directly to the matched product image."
+                        )
+                        media_reply_hint = media_match.get("reply_hint", "")
+                        remember_instagram_media_match(
+                            business_id=business_id,
+                            customer_id=sender_id,
+                            context=media_match_context,
+                            reply_hint=media_reply_hint,
+                            top_match_code=media_match.get("top_match_code", ""),
+                            top_match_model=media_match.get("top_match_model", ""),
+                            top_score=media_match.get("top_score", 0.0),
+                        )
+                        log("Instagram DM reply-to media matcher hit", {
+                            "customer_id": sender_id,
+                            "message_id": message_id,
+                            "reply_to_message_id": reply_to_message_id,
+                            "top_match_code": media_match.get("top_match_code"),
+                            "top_match_model": media_match.get("top_match_model"),
+                            "top_score": media_match.get("top_score"),
+                        })
+                    else:
+                        log("Instagram DM reply-to media matcher miss", {
+                            "customer_id": sender_id,
+                            "message_id": message_id,
+                            "reply_to_message_id": reply_to_message_id,
+                            "media_type": replied_media_type,
+                        })
 
         use_direct_matcher_reply = bool(media_reply_hint) and (
             is_auto_media_placeholder_message(message_text)
@@ -4820,6 +5016,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         should_send_catalog = (
             bool(get_catalog_link(business))
             and wants_catalog(message_text)
+            and not is_price_question(message_text)
             and not is_greeting_only(message_text)
             and not is_auto_media_placeholder_message(message_text)
             and not (media_type in {"photo", "video", "file", "audio"})
