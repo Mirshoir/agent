@@ -188,7 +188,7 @@ WHATSAPP_FALLBACK_MODEL = os.getenv("OPENAI_MODEL", os.getenv("MISTRAL_MODEL", "
 WHATSAPP_CATALOG_LINK = os.getenv("CATALOG_LINK", "Catalog link will be shared soon.")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 PRODUCT_MATCHER_ENABLED = str(os.getenv("PRODUCT_MATCHER_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
-DEFAULT_PRODUCT_MATCHER_API_URL = "https://new-project-2-kny4.onrender.com/api/process-media-url"
+DEFAULT_PRODUCT_MATCHER_API_URL = "https://new-project-2-kny4.onrender.com/api/process-media"
 _product_matcher_urls = env_list("PRODUCT_MATCHER_API_URLS", "")
 if not _product_matcher_urls:
     _legacy_matcher_url = os.getenv("PRODUCT_MATCHER_API_URL", "").strip()
@@ -4703,6 +4703,12 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         matcher_source_url = media_url or post_image_url
         business_id = normalize_id(business.get("id"))
         if matcher_source_url and media_type in {"photo", "video", "file"}:
+            log("Instagram DM media matcher request", {
+                "customer_id": sender_id,
+                "message_id": message_id,
+                "media_type": media_type,
+                "source_url_host": urlparse(matcher_source_url).netloc if matcher_source_url else "",
+            })
             media_match = analyze_media_for_sales_reply(
                 media_url=matcher_source_url,
                 user_text=message_text or "",
