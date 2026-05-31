@@ -6261,29 +6261,53 @@ async def get_conversations_v2(
         )
         if include_raw:
             fields = f"{fields},raw_payload"
-        query = supabase.table("inbox_messages").select(fields)
         if clean_business_id:
             if not can_access_business(access, clean_business_id):
                 return {"status": "ok", "count": 0, "data": []}
-            query = query.eq("business_id", clean_business_id)
         elif not access.get("is_admin"):
             allowed = access.get("business_ids") or []
             if not allowed:
                 return {"status": "ok", "count": 0, "data": []}
-            query = query.in_("business_id", allowed)
 
-        if platform != "all":
-            query = query.eq("platform", platform)
+        def build_base_query():
+            q = supabase.table("inbox_messages").select(fields)
+            if clean_business_id:
+                q = q.eq("business_id", clean_business_id)
+            elif not access.get("is_admin"):
+                q = q.in_("business_id", access.get("business_ids") or [])
+            if platform != "all":
+                q = q.eq("platform", platform)
+            return q
 
         if fast:
             recent_cutoff = (datetime.utcnow() - timedelta(days=120)).strftime("%Y-%m-%dT00:00:00Z")
-            query = query.gte("created_at", recent_cutoff).limit(80)
+            rows = (
+                build_base_query()
+                .gte("created_at", recent_cutoff)
+                .order("created_at", desc=True)
+                .limit(80)
+                .execute()
+                .data
+                or []
+            )
         else:
-            query = query.limit(450)
-
-        query = query.order("created_at", desc=True)
-
-        rows = query.execute().data or []
+            rows = []
+            page_size = 450
+            max_scan_rows = 5400
+            for offset in range(0, max_scan_rows, page_size):
+                page = (
+                    build_base_query()
+                    .order("created_at", desc=True)
+                    .range(offset, offset + page_size - 1)
+                    .execute()
+                    .data
+                    or []
+                )
+                if not page:
+                    break
+                rows.extend(page)
+                if len(page) < page_size:
+                    break
 
         conversations_map = {}
         for row in rows:
