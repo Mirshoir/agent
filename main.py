@@ -170,6 +170,10 @@ PRODUCT_MATCHER_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_M
 PRODUCT_MATCHER_WEAK_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_WEAK_MIN_SCORE", "0.10"))))
 PRODUCT_MATCHER_CONTEXT_TTL_SECONDS = max(60, min(24 * 60 * 60, int(os.getenv("PRODUCT_MATCHER_CONTEXT_TTL_SECONDS", "1800"))))
 PRODUCT_MATCHER_MAX_MEDIA_MB = max(2, min(40, int(os.getenv("PRODUCT_MATCHER_MAX_MEDIA_MB", "20"))))
+PRODUCT_MATCHER_RECENT_MEDIA_LOOKBACK_SECONDS = max(
+    60,
+    min(24 * 60 * 60, int(os.getenv("PRODUCT_MATCHER_RECENT_MEDIA_LOOKBACK_SECONDS", "1800"))),
+)
 PRODUCT_MATCHER_LOCAL_ENABLED = str(os.getenv("PRODUCT_MATCHER_LOCAL_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
 PRODUCT_MATCHER_LOCAL_ONLY = str(os.getenv("PRODUCT_MATCHER_LOCAL_ONLY", "0")).strip().lower() in {"1", "true", "yes", "on"}
 PRODUCT_MATCHER_LOCAL_CATALOG_TABLE = str(os.getenv("PRODUCT_MATCHER_LOCAL_CATALOG_TABLE", "milana_products") or "").strip() or "milana_products"
@@ -4266,6 +4270,65 @@ def load_instagram_message_media_reference(business_id: str, customer_id: str, m
         return {}
 
 
+def load_recent_instagram_media_reference(
+    business_id: str,
+    customer_id: str,
+    exclude_message_id: str = "",
+) -> dict:
+    business_id = normalize_id(business_id)
+    customer_id = normalize_id(customer_id)
+    exclude_message_id = normalize_id(exclude_message_id)
+    if not business_id or not customer_id:
+        return {}
+    try:
+        result = (
+            supabase.table("inbox_messages")
+            .select("external_message_id,created_at,media_url,media_type,raw_payload")
+            .eq("business_id", business_id)
+            .eq("platform", "instagram")
+            .eq("channel", "dm")
+            .eq("customer_id", customer_id)
+            .eq("direction", "inbound")
+            .order("created_at", desc=True)
+            .limit(20)
+            .execute()
+        )
+        rows = result.data or []
+        now_utc = datetime.utcnow()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            external_message_id = normalize_id(row.get("external_message_id"))
+            if exclude_message_id and external_message_id == exclude_message_id:
+                continue
+            created_at = normalize_id(row.get("created_at"))
+            if created_at:
+                try:
+                    dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    age_seconds = (now_utc - dt.replace(tzinfo=None)).total_seconds()
+                    if age_seconds > PRODUCT_MATCHER_RECENT_MEDIA_LOOKBACK_SECONDS:
+                        continue
+                except Exception:
+                    pass
+            media_url = normalize_id(row.get("media_url"))
+            media_type = normalize_id(row.get("media_type")).lower()
+            if not media_url:
+                media_url, payload_media_type = extract_instagram_media_url_from_payload(row.get("raw_payload") or {})
+                media_type = media_type or payload_media_type
+            if not media_url:
+                continue
+            if media_type not in {"photo", "video", "file"}:
+                media_type = "photo"
+            return {
+                "media_url": media_url,
+                "media_type": media_type,
+                "external_message_id": external_message_id,
+            }
+    except Exception as exc:
+        log("Could not load recent Instagram media reference", str(exc))
+    return {}
+
+
 def should_reuse_recent_media_match(user_text: str, media_type: str = "") -> bool:
     if media_type in {"photo", "video", "file"}:
         return False
@@ -4901,6 +4964,57 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                             "message_id": message_id,
                             "reply_to_message_id": reply_to_message_id,
                             "media_type": replied_media_type,
+                        })
+
+            if not media_match_context:
+                recent_media_ref = load_recent_instagram_media_reference(
+                    business_id=business_id,
+                    customer_id=sender_id,
+                    exclude_message_id=message_id,
+                )
+                recent_media_url = normalize_id(recent_media_ref.get("media_url"))
+                recent_media_type = normalize_id(recent_media_ref.get("media_type")).lower() or "photo"
+                if recent_media_url and recent_media_type in {"photo", "video", "file"}:
+                    log("Instagram DM recent-media matcher request", {
+                        "customer_id": sender_id,
+                        "message_id": message_id,
+                        "recent_media_message_id": normalize_id(recent_media_ref.get("external_message_id")),
+                        "media_type": recent_media_type,
+                        "source_url_host": urlparse(recent_media_url).netloc,
+                    })
+                    media_match = analyze_media_for_sales_reply(
+                        media_url=recent_media_url,
+                        user_text=message_text or "",
+                        media_type=recent_media_type,
+                        access_token=access_token,
+                    )
+                    if media_match:
+                        media_match_context = (
+                            f"{media_match.get('context', '')}\n"
+                            "- This customer follow-up likely refers to their most recent product image."
+                        )
+                        media_reply_hint = media_match.get("reply_hint", "")
+                        remember_instagram_media_match(
+                            business_id=business_id,
+                            customer_id=sender_id,
+                            context=media_match_context,
+                            reply_hint=media_reply_hint,
+                            top_match_code=media_match.get("top_match_code", ""),
+                            top_match_model=media_match.get("top_match_model", ""),
+                            top_score=media_match.get("top_score", 0.0),
+                        )
+                        log("Instagram DM recent-media matcher hit", {
+                            "customer_id": sender_id,
+                            "message_id": message_id,
+                            "top_match_code": media_match.get("top_match_code"),
+                            "top_match_model": media_match.get("top_match_model"),
+                            "top_score": media_match.get("top_score"),
+                        })
+                    else:
+                        log("Instagram DM recent-media matcher miss", {
+                            "customer_id": sender_id,
+                            "message_id": message_id,
+                            "media_type": recent_media_type,
                         })
 
         use_direct_matcher_reply = bool(media_reply_hint) and (
