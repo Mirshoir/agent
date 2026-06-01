@@ -1,7 +1,6 @@
 import os
 import re
 import time
-import asyncio
 import secrets
 import base64
 import json
@@ -12,10 +11,10 @@ import shutil
 import subprocess
 import requests
 import telegram_bot as telegram_bot_module
+import mimetypes
 from urllib.parse import urlencode, urlparse, parse_qs, unquote
 from typing import Optional
 from datetime import datetime, timedelta
-import mimetypes
 try:
     import bcrypt
 except Exception:
@@ -42,19 +41,6 @@ from telegram_bot import (
 
 def env_list(name: str, default: str = ""):
     return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
-
-
-async def run_blocking_io(func, *args, timeout: float = 20.0, label: str = "operation", **kwargs):
-    """
-    Run sync IO in a worker thread so one slow network call does not block the event loop.
-    """
-    try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(func, *args, **kwargs),
-            timeout=float(timeout),
-        )
-    except asyncio.TimeoutError as exc:
-        raise TimeoutError(f"{label} timed out after {int(timeout)}s") from exc
 
 
 app = FastAPI()
@@ -130,9 +116,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
-GEMINI_VISION_MODEL = os.getenv("GEMINI_VISION_MODEL", "gemini-3.5-flash")
-IG_VISUAL_ANALYZER_MAX_ITEMS = max(1, min(20, int(os.getenv("IG_VISUAL_ANALYZER_MAX_ITEMS", "8"))))
-IG_VISUAL_ANALYZER_MAX_IMAGE_BYTES = max(200_000, min(8_000_000, int(os.getenv("IG_VISUAL_ANALYZER_MAX_IMAGE_BYTES", "4000000"))))
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
@@ -170,12 +153,48 @@ SUPER_ADMIN_EMAILS = {
 WORKSPACE_STATE_FALLBACK: dict[str, dict] = {}
 STATS_CACHE_TTL_SECONDS = int(os.getenv("STATS_CACHE_TTL_SECONDS", "20"))
 STATS_CACHE: dict[str, dict] = {}
-INSTAGRAM_GROWTH_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_GROWTH_CACHE_TTL_SECONDS", "300"))
-INSTAGRAM_GROWTH_CACHE: dict[str, tuple[float, dict]] = {}
 INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS", str(60 * 60 * 6)))
 INSTAGRAM_PUBLIC_PREVIEW_CACHE: dict[str, tuple[float, dict]] = {}
 INSTAGRAM_CUSTOMER_PROFILE_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_CUSTOMER_PROFILE_CACHE_TTL_SECONDS", str(60 * 60 * 24)))
 INSTAGRAM_CUSTOMER_PROFILE_CACHE: dict[str, tuple[float, dict]] = {}
+PRODUCT_MATCHER_ENABLED = str(os.getenv("PRODUCT_MATCHER_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
+DEFAULT_PRODUCT_MATCHER_API_URL = "https://new-project-2-kny4.onrender.com/api/process-media"
+_product_matcher_urls = env_list("PRODUCT_MATCHER_API_URLS", "")
+if not _product_matcher_urls:
+    _legacy_matcher_url = os.getenv("PRODUCT_MATCHER_API_URL", "").strip()
+    _product_matcher_urls = [_legacy_matcher_url] if _legacy_matcher_url else [DEFAULT_PRODUCT_MATCHER_API_URL]
+PRODUCT_MATCHER_API_URLS = [str(url or "").strip() for url in _product_matcher_urls if str(url or "").strip()]
+PRODUCT_MATCHER_TIMEOUT_SECONDS = max(10, min(180, int(os.getenv("PRODUCT_MATCHER_TIMEOUT_SECONDS", "90"))))
+PRODUCT_MATCHER_TOP_K = max(1, min(10, int(os.getenv("PRODUCT_MATCHER_TOP_K", "3"))))
+PRODUCT_MATCHER_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_MIN_SCORE", "0.20"))))
+PRODUCT_MATCHER_WEAK_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_WEAK_MIN_SCORE", "0.10"))))
+PRODUCT_MATCHER_CONTEXT_TTL_SECONDS = max(60, min(24 * 60 * 60, int(os.getenv("PRODUCT_MATCHER_CONTEXT_TTL_SECONDS", "1800"))))
+PRODUCT_MATCHER_MAX_MEDIA_MB = max(2, min(40, int(os.getenv("PRODUCT_MATCHER_MAX_MEDIA_MB", "20"))))
+PRODUCT_MATCHER_LOCAL_ENABLED = str(os.getenv("PRODUCT_MATCHER_LOCAL_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
+PRODUCT_MATCHER_LOCAL_ONLY = str(os.getenv("PRODUCT_MATCHER_LOCAL_ONLY", "0")).strip().lower() in {"1", "true", "yes", "on"}
+PRODUCT_MATCHER_LOCAL_CATALOG_TABLE = str(os.getenv("PRODUCT_MATCHER_LOCAL_CATALOG_TABLE", "milana_products") or "").strip() or "milana_products"
+PRODUCT_MATCHER_LOCAL_CATALOG_CACHE_TTL_SECONDS = max(
+    30,
+    min(60 * 60, int(os.getenv("PRODUCT_MATCHER_LOCAL_CATALOG_CACHE_TTL_SECONDS", "300"))),
+)
+PRODUCT_MATCHER_LOCAL_FETCH_LIMIT = max(
+    50,
+    min(3000, int(os.getenv("PRODUCT_MATCHER_LOCAL_FETCH_LIMIT", "1200"))),
+)
+PRODUCT_MATCHER_LOCAL_MAX_KEYWORDS = max(
+    3,
+    min(40, int(os.getenv("PRODUCT_MATCHER_LOCAL_MAX_KEYWORDS", "24"))),
+)
+PRODUCT_MATCHER_OPENAI_VISION_MODEL = str(
+    os.getenv("PRODUCT_MATCHER_OPENAI_VISION_MODEL", os.getenv("OPENAI_MODEL", "gpt-4.1-mini")) or ""
+).strip() or "gpt-4.1-mini"
+PRODUCT_MATCHER_OPENAI_VISION_TIMEOUT_SECONDS = max(
+    8,
+    min(120, int(os.getenv("PRODUCT_MATCHER_OPENAI_VISION_TIMEOUT_SECONDS", "20"))),
+)
+PRODUCT_MATCHER_OPENAI_VISION_DETAIL = str(os.getenv("PRODUCT_MATCHER_OPENAI_VISION_DETAIL", "low") or "").strip().lower() or "low"
+INSTAGRAM_MEDIA_MATCH_MEMORY: dict[str, dict] = {}
+PRODUCT_MATCHER_LOCAL_CATALOG_CACHE = {"loaded_at": 0.0, "rows": []}
 WHATSAPP_EMBEDDED_REDIRECT_URI = os.getenv(
     "WHATSAPP_EMBEDDED_REDIRECT_URI",
     f"{PUBLIC_BASE_URL.rstrip('/')}/auth/whatsapp/embedded/callback",
@@ -187,28 +206,6 @@ WHATSAPP_BUSINESS_ACCOUNT_ID = os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID", "")
 WHATSAPP_FALLBACK_MODEL = os.getenv("OPENAI_MODEL", os.getenv("MISTRAL_MODEL", "gpt-4o-mini"))
 WHATSAPP_CATALOG_LINK = os.getenv("CATALOG_LINK", "Catalog link will be shared soon.")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-PRODUCT_MATCHER_ENABLED = str(os.getenv("PRODUCT_MATCHER_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
-DEFAULT_PRODUCT_MATCHER_API_URL = "https://new-project-2-kny4.onrender.com/api/process-media"
-_product_matcher_urls = env_list("PRODUCT_MATCHER_API_URLS", "")
-if not _product_matcher_urls:
-    _legacy_matcher_url = os.getenv("PRODUCT_MATCHER_API_URL", "").strip()
-    if _legacy_matcher_url:
-        _product_matcher_urls = [_legacy_matcher_url]
-    else:
-        _product_matcher_urls = [DEFAULT_PRODUCT_MATCHER_API_URL]
-PRODUCT_MATCHER_API_URLS = [str(url or "").strip() for url in _product_matcher_urls if str(url or "").strip()]
-PRODUCT_MATCHER_TIMEOUT_SECONDS = max(10, min(180, int(os.getenv("PRODUCT_MATCHER_TIMEOUT_SECONDS", "90"))))
-PRODUCT_MATCHER_TOP_K = max(1, min(10, int(os.getenv("PRODUCT_MATCHER_TOP_K", "3"))))
-PRODUCT_MATCHER_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_MIN_SCORE", "0.20"))))
-PRODUCT_MATCHER_WEAK_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_WEAK_MIN_SCORE", "0.10"))))
-PRODUCT_MATCHER_CONTEXT_TTL_SECONDS = max(
-    60,
-    min(24 * 60 * 60, int(os.getenv("PRODUCT_MATCHER_CONTEXT_TTL_SECONDS", "1800"))),
-)
-PRODUCT_MATCHER_MAX_MEDIA_MB = max(
-    2,
-    min(40, int(os.getenv("PRODUCT_MATCHER_MAX_MEDIA_MB", "20"))),
-)
 
 if not SUPABASE_URL:
     raise RuntimeError("Missing SUPABASE_URL")
@@ -226,7 +223,6 @@ DEDUP_TTL_SECONDS = 60 * 60
 WHATSAPP_CHAT_MEMORY = {}
 WHATSAPP_EMBEDDED_SESSIONS = {}
 LAST_WEBHOOK_EVENTS = []
-INSTAGRAM_MEDIA_MATCH_MEMORY: dict[str, dict] = {}
 
 
 # ============================================================================
@@ -380,12 +376,6 @@ class OperatorTaskCreateRequest(BaseModel):
     text: str
     recipients: list[str] = []
     assign_mode: str = "all"
-
-
-class InstagramPostExtraUpdate(BaseModel):
-    business_id: str
-    post_id: str
-    extra_info: str = ""
 
 
 # ============================================================================
@@ -678,402 +668,6 @@ def fetch_instagram_media_info(access_token: str, post_id: str, business: dict =
     return {"post_permalink": f"https://www.instagram.com/p/{post_id}/", "post_image_url": "", "post_media_type": ""}
 
 
-def extract_instagram_shortcode_from_permalink(permalink: str) -> str:
-    link = normalize_id(permalink)
-    if not link:
-        return ""
-    try:
-        parsed = urlparse(link)
-        parts = [segment for segment in parsed.path.split("/") if segment]
-        if len(parts) >= 2 and parts[0] in {"p", "reel", "tv"}:
-            return normalize_id(parts[1])
-        if len(parts) >= 1:
-            return normalize_id(parts[-1])
-    except Exception:
-        pass
-    return ""
-
-
-def summarize_instagram_post_for_notes(post: dict) -> str:
-    caption = normalize_id(post.get("caption"))
-    media_type = normalize_id(post.get("media_type") or post.get("media_product_type")).lower()
-    likes = _safe_int(post.get("like_count"), 0)
-    comments = _safe_int(post.get("comments_count"), 0)
-    ts = normalize_id(post.get("timestamp"))[:19].replace("T", " ")
-    short_caption = caption[:220] + ("..." if len(caption) > 220 else "")
-    return (
-        f"Media: {media_type or 'post'}\n"
-        f"Published: {ts or 'unknown'}\n"
-        f"Likes: {likes}, Comments: {comments}\n"
-        f"Caption: {short_caption or '—'}"
-    )
-
-
-def get_instagram_post_notes_state(business_id: str) -> dict:
-    state = get_workspace_state(business_id)
-    notes = state.get("instagram_post_notes") if isinstance(state, dict) else {}
-    if isinstance(notes, dict):
-        by_post = notes.get("by_post_id") if isinstance(notes.get("by_post_id"), dict) else {}
-        by_shortcode = notes.get("by_shortcode") if isinstance(notes.get("by_shortcode"), dict) else {}
-        by_permalink = notes.get("by_permalink") if isinstance(notes.get("by_permalink"), dict) else {}
-        return {
-            "by_post_id": by_post,
-            "by_shortcode": by_shortcode,
-            "by_permalink": by_permalink,
-        }
-    return {"by_post_id": {}, "by_shortcode": {}, "by_permalink": {}}
-
-
-def save_instagram_post_extra_info(business_id: str, post: dict, extra_info: str, updated_by: str = "") -> dict:
-    business_id = normalize_id(business_id)
-    post_id = normalize_id(post.get("post_id") or post.get("id"))
-    permalink = normalize_id(post.get("permalink"))
-    shortcode = normalize_id(post.get("shortcode")) or extract_instagram_shortcode_from_permalink(permalink)
-    clean_info = normalize_id(extra_info)
-    if not business_id or not post_id:
-        return {}
-
-    notes = get_instagram_post_notes_state(business_id)
-    entry = {
-        "post_id": post_id,
-        "permalink": permalink,
-        "shortcode": shortcode,
-        "extra_info": clean_info,
-        "updated_at": datetime.utcnow().isoformat() + "Z",
-        "updated_by": normalize_email(updated_by),
-        "post_summary": summarize_instagram_post_for_notes(post),
-    }
-    notes["by_post_id"][post_id] = entry
-    if shortcode:
-        notes["by_shortcode"][shortcode] = post_id
-    if permalink:
-        notes["by_permalink"][permalink] = post_id
-
-    upsert_workspace_state(
-        business_id=business_id,
-        state_key="instagram_post_notes",
-        state_value=notes,
-        updated_by=updated_by,
-    )
-    return entry
-
-
-def resolve_instagram_post_note_for_context(business_id: str, post_id: str = "", permalink: str = "") -> dict:
-    business_id = normalize_id(business_id)
-    post_id = normalize_id(post_id)
-    permalink = normalize_id(permalink)
-    if not business_id:
-        return {}
-    notes = get_instagram_post_notes_state(business_id)
-    by_post = notes.get("by_post_id") or {}
-    if post_id and isinstance(by_post.get(post_id), dict):
-        return by_post.get(post_id)
-    if permalink:
-        mapped_id = normalize_id((notes.get("by_permalink") or {}).get(permalink))
-        if mapped_id and isinstance(by_post.get(mapped_id), dict):
-            return by_post.get(mapped_id)
-        shortcode = extract_instagram_shortcode_from_permalink(permalink)
-        mapped_by_shortcode = normalize_id((notes.get("by_shortcode") or {}).get(shortcode))
-        if mapped_by_shortcode and isinstance(by_post.get(mapped_by_shortcode), dict):
-            return by_post.get(mapped_by_shortcode)
-    return {}
-
-
-def extract_latest_post_context_from_conversation(business_id: str, customer_id: str, channel: str = "dm") -> dict:
-    business_id = normalize_id(business_id)
-    customer_id = normalize_id(customer_id)
-    if not business_id or not customer_id:
-        return {}
-    try:
-        rows = (
-            supabase.table("inbox_messages")
-            .select("raw_payload,post_permalink,created_at")
-            .eq("business_id", business_id)
-            .eq("platform", "instagram")
-            .eq("customer_id", customer_id)
-            .eq("channel", standard_channel("instagram", channel))
-            .order("created_at", desc=True)
-            .limit(40)
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        return {}
-
-    for row in rows:
-        raw = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
-        post_id = normalize_id(raw.get("post_id") or raw.get("id") or raw.get("media_id"))
-        permalink = normalize_id(row.get("post_permalink") or raw.get("post_permalink") or extract_instagram_permalink_from_payload(raw))
-        if post_id or permalink:
-            return {"post_id": post_id, "permalink": permalink}
-    return {}
-
-
-def build_instagram_post_reply_context(business: dict, customer_id: str, channel: str = "dm", post_id: str = "", post_permalink: str = "") -> str:
-    business_id = normalize_id((business or {}).get("id"))
-    if not business_id:
-        return ""
-
-    effective_post_id = normalize_id(post_id)
-    effective_permalink = normalize_id(post_permalink)
-    if not effective_post_id and not effective_permalink:
-        latest = extract_latest_post_context_from_conversation(business_id, customer_id, channel)
-        effective_post_id = normalize_id(latest.get("post_id"))
-        effective_permalink = normalize_id(latest.get("permalink"))
-
-    if not effective_post_id and not effective_permalink:
-        return ""
-
-    note = resolve_instagram_post_note_for_context(
-        business_id=business_id,
-        post_id=effective_post_id,
-        permalink=effective_permalink,
-    )
-    if not note:
-        return ""
-
-    extra = normalize_id(note.get("extra_info"))
-    if not extra:
-        return ""
-
-    return (
-        "Post-specific context (very important):\n"
-        f"- post_id: {normalize_id(note.get('post_id') or effective_post_id)}\n"
-        f"- permalink: {normalize_id(note.get('permalink') or effective_permalink)}\n"
-        f"- extra_info: {extra}\n"
-        "Use this info when customer asks about this forwarded/shared post."
-    )
-
-
-def _parse_insights_values(rows: list[dict]) -> dict:
-    values = {}
-    for row in rows or []:
-        if not isinstance(row, dict):
-            continue
-        name = normalize_id(row.get("name"))
-        if not name:
-            continue
-        metric_values = row.get("values") if isinstance(row.get("values"), list) else []
-        total = 0
-        for item in metric_values:
-            if isinstance(item, dict):
-                total += _safe_int(item.get("value"), 0)
-            else:
-                total += _safe_int(item, 0)
-        values[name] = total
-    return values
-
-
-def _fetch_media_insights_for_post(access_token: str, media_id: str) -> dict:
-    media_id = normalize_id(media_id)
-    if not access_token or not media_id:
-        return {}
-    metrics = [
-        "reach",
-        "impressions",
-        "saved",
-        "video_views",
-        "total_interactions",
-        "likes",
-        "comments",
-        "shares",
-        "plays",
-    ]
-    ok, body = _graph_get_json(
-        f"{GRAPH_FACEBOOK}/{media_id}/insights",
-        access_token,
-        {"metric": ",".join(metrics)},
-        timeout=20,
-    )
-    if not ok:
-        return {}
-    rows = body.get("data") if isinstance(body.get("data"), list) else []
-    return _parse_insights_values(rows)
-
-
-def fetch_instagram_posts_for_import(business: dict, max_items: int = 300) -> list[dict]:
-    token_candidates = get_instagram_token_candidates(business)
-    if not token_candidates:
-        raise ValueError("Instagram access token is missing. Reconnect Instagram account.")
-    media_fields = (
-        "id,caption,media_type,media_product_type,media_url,thumbnail_url,permalink,timestamp,"
-        "like_count,comments_count,children{id,media_type,media_url,thumbnail_url,permalink}"
-    )
-    attempt_errors: list[str] = []
-
-    for source, access_token in token_candidates:
-        account_id, _ = _resolve_instagram_account_id_for_analysis(business, access_token)
-        if not account_id:
-            attempt_errors.append(f"{source}: Could not resolve Instagram account ID")
-            continue
-
-        raw_media, media_errors = _graph_paginated_get(
-            f"{GRAPH_FACEBOOK}/{account_id}/media",
-            access_token,
-            {"fields": media_fields, "limit": 50},
-            max_items=max_items,
-            max_pages=12,
-        )
-        if not raw_media and media_errors:
-            attempt_errors.append(f"{source}: {media_errors[0]}")
-            continue
-
-        posts = []
-        for item in raw_media:
-            if not isinstance(item, dict):
-                continue
-            post_id = normalize_id(item.get("id"))
-            if not post_id:
-                continue
-            permalink = normalize_id(item.get("permalink"))
-            shortcode = extract_instagram_shortcode_from_permalink(permalink)
-            comments, _ = _graph_paginated_get(
-                f"{GRAPH_FACEBOOK}/{post_id}/comments",
-                access_token,
-                {"fields": "id,text,timestamp,username,like_count,replies_count", "limit": 25},
-                max_items=100,
-                max_pages=5,
-            )
-            insights = _fetch_media_insights_for_post(access_token, post_id)
-            posts.append(
-                {
-                    "post_id": post_id,
-                    "shortcode": shortcode,
-                    "permalink": permalink,
-                    "caption": normalize_id(item.get("caption")),
-                    "media_type": normalize_id(item.get("media_type")).lower(),
-                    "media_product_type": normalize_id(item.get("media_product_type")).lower(),
-                    "media_url": normalize_id(item.get("media_url")),
-                    "thumbnail_url": normalize_id(item.get("thumbnail_url")),
-                    "timestamp": normalize_id(item.get("timestamp")),
-                    "like_count": _safe_int(item.get("like_count"), 0),
-                    "comments_count": _safe_int(item.get("comments_count"), 0),
-                    "children": item.get("children", {}).get("data", []) if isinstance(item.get("children"), dict) else [],
-                    "comments_preview": comments[:30],
-                    "comment_question_samples": [
-                        normalize_id(comment.get("text"))
-                        for comment in comments
-                        if isinstance(comment, dict) and normalize_id(comment.get("text"))
-                    ][:8],
-                    "insights": insights,
-                    "fetched_at": datetime.utcnow().isoformat() + "Z",
-                    "token_source": source,
-                }
-            )
-        return posts
-
-    if attempt_errors:
-        raise ValueError(f"Instagram media fetch failed: {attempt_errors[0]}")
-    raise ValueError("Instagram media fetch failed: no valid token candidates")
-
-
-def store_instagram_posts_cache(business_id: str, posts: list[dict], updated_by: str = "") -> dict:
-    business_id = normalize_id(business_id)
-    if not business_id:
-        return {"stored": 0, "mode": "none"}
-
-    clean_posts = []
-    for item in posts or []:
-        if not isinstance(item, dict):
-            continue
-        post_id = normalize_id(item.get("post_id") or item.get("id"))
-        if not post_id:
-            continue
-        clean_posts.append({**item, "post_id": post_id, "business_id": business_id})
-
-    stored = 0
-    mode = "workspace_state"
-    try:
-        rows = []
-        for post in clean_posts:
-            rows.append(
-                {
-                    "business_id": business_id,
-                    "post_id": normalize_id(post.get("post_id")),
-                    "shortcode": normalize_id(post.get("shortcode")),
-                    "permalink": normalize_id(post.get("permalink")),
-                    "caption": normalize_id(post.get("caption")),
-                    "media_type": normalize_id(post.get("media_type")),
-                    "media_product_type": normalize_id(post.get("media_product_type")),
-                    "media_url": normalize_id(post.get("media_url")),
-                    "thumbnail_url": normalize_id(post.get("thumbnail_url")),
-                    "timestamp": normalize_id(post.get("timestamp")),
-                    "like_count": _safe_int(post.get("like_count"), 0),
-                    "comments_count": _safe_int(post.get("comments_count"), 0),
-                    "insights": post.get("insights") if isinstance(post.get("insights"), dict) else {},
-                    "comments_preview": post.get("comments_preview") if isinstance(post.get("comments_preview"), list) else [],
-                    "meta": post if isinstance(post, dict) else {},
-                    "updated_at": datetime.utcnow().isoformat(),
-                }
-            )
-        if rows:
-            supabase.table("instagram_posts").upsert(rows, on_conflict="business_id,post_id").execute()
-            stored = len(rows)
-            mode = "instagram_posts_table"
-    except Exception:
-        mode = "workspace_state"
-
-    upsert_workspace_state(
-        business_id=business_id,
-        state_key="instagram_posts_cache",
-        state_value={"items": clean_posts[:500], "updated_at": datetime.utcnow().isoformat() + "Z"},
-        updated_by=updated_by,
-    )
-    stored = max(stored, len(clean_posts))
-    return {"stored": stored, "mode": mode}
-
-
-def load_instagram_posts_from_cache(business_id: str, limit: int = 300) -> list[dict]:
-    business_id = normalize_id(business_id)
-    safe_limit = max(1, min(int(limit or 300), 1000))
-    if not business_id:
-        return []
-    try:
-        rows = (
-            supabase.table("instagram_posts")
-            .select("*")
-            .eq("business_id", business_id)
-            .order("timestamp", desc=True)
-            .limit(safe_limit)
-            .execute()
-            .data
-            or []
-        )
-        if rows:
-            normalized = []
-            for row in rows:
-                meta = row.get("meta") if isinstance(row.get("meta"), dict) else {}
-                normalized.append(
-                    {
-                        "post_id": normalize_id(row.get("post_id")),
-                        "shortcode": normalize_id(row.get("shortcode")),
-                        "permalink": normalize_id(row.get("permalink")),
-                        "caption": normalize_id(row.get("caption")),
-                        "media_type": normalize_id(row.get("media_type")).lower(),
-                        "media_product_type": normalize_id(row.get("media_product_type")).lower(),
-                        "media_url": normalize_id(row.get("media_url")),
-                        "thumbnail_url": normalize_id(row.get("thumbnail_url")),
-                        "timestamp": normalize_id(row.get("timestamp")),
-                        "like_count": _safe_int(row.get("like_count"), 0),
-                        "comments_count": _safe_int(row.get("comments_count"), 0),
-                        "insights": row.get("insights") if isinstance(row.get("insights"), dict) else {},
-                        "comments_preview": row.get("comments_preview") if isinstance(row.get("comments_preview"), list) else [],
-                        "comment_question_samples": meta.get("comment_question_samples") if isinstance(meta.get("comment_question_samples"), list) else [],
-                        "children": meta.get("children") if isinstance(meta.get("children"), list) else [],
-                        "fetched_at": normalize_id(meta.get("fetched_at")) or normalize_id(row.get("updated_at")),
-                    }
-                )
-            return normalized
-    except Exception:
-        pass
-
-    state = get_workspace_state(business_id)
-    cache = state.get("instagram_posts_cache") if isinstance(state, dict) else {}
-    items = cache.get("items") if isinstance(cache, dict) and isinstance(cache.get("items"), list) else []
-    return [item for item in items if isinstance(item, dict)][:safe_limit]
-
-
 def encode_comment_scope(customer_id: str, post_id: str) -> str:
     """
     Canonical Instagram comment-thread scope.
@@ -1303,11 +897,6 @@ def parse_auth_header(authorization: str) -> str:
 
 
 def resolve_dashboard_access(authorization: str = "", x_dashboard_secret: str = "") -> Optional[dict]:
-    # When a valid dashboard secret is provided, treat the request as admin/system access.
-    # This keeps local/debug dashboard flows reliable even if the browser has a stale token.
-    if not require_dashboard_secret(x_dashboard_secret):
-        return {"email": "system", "is_admin": True, "business_ids": [], "role": "admin"}
-
     token = parse_auth_header(authorization)
     if token:
         payload = decode_dashboard_auth_token(token)
@@ -1324,9 +913,14 @@ def resolve_dashboard_access(authorization: str = "", x_dashboard_secret: str = 
                 # Always prefer current DB membership over stale token/global dashboard role.
                 role = pick_user_business_role(email) or token_role or "operator"
             return {"email": email, "is_admin": is_admin, "business_ids": business_ids, "role": role or "operator"}
+        # Fallback path for stale/invalid browser token when dashboard secret is valid.
+        if not require_dashboard_secret(x_dashboard_secret):
+            return {"email": "system", "is_admin": True, "business_ids": [], "role": "admin"}
         return None
 
-    # No bearer token and no valid dashboard secret.
+    # Backward-compatible admin/system path
+    if not require_dashboard_secret(x_dashboard_secret):
+        return {"email": "system", "is_admin": True, "business_ids": [], "role": "admin"}
     return None
 
 
@@ -2354,37 +1948,6 @@ def get_business_channel_token(business: dict, platform_aliases: list[str], toke
     return ""
 
 
-def get_instagram_token_candidates(business: dict) -> list[tuple[str, str]]:
-    """
-    Return unique token candidates in priority order for Instagram Graph calls.
-    """
-    candidates: list[tuple[str, str]] = []
-    business_id = normalize_id((business or {}).get("id"))
-    if business_id:
-        rows = get_business_channel_rows(business_id, ["instagram"])
-        for row in rows:
-            cfg = dict(row.get("config") or {})
-            for key in ("page_access_token", "access_token"):
-                value = normalize_id(cfg.get(key) or row.get(key))
-                if value:
-                    candidates.append((f"business_channels.{key}", value))
-
-    for key in ("page_access_token", "access_token"):
-        value = normalize_id((business or {}).get(key))
-        if value:
-            candidates.append((f"businesses.{key}", value))
-
-    unique: list[tuple[str, str]] = []
-    seen = set()
-    for source, token in candidates:
-        signature = hashlib.sha1(token.encode()).hexdigest()
-        if signature in seen:
-            continue
-        seen.add(signature)
-        unique.append((source, token))
-    return unique
-
-
 def is_chat_ai_enabled(platform, channel, customer_id, business_id=None):
     try:
         platform = normalize_id(platform).lower()
@@ -3398,425 +2961,6 @@ def media_matcher_language(text: str) -> str:
     return "uz"
 
 
-def product_matcher_health_url(api_url: str) -> str:
-    api_url = normalize_id(api_url)
-    if not api_url:
-        return ""
-    if api_url.endswith("/api/process-media-url"):
-        return api_url[:-len("/api/process-media-url")] + "/health"
-    if api_url.endswith("/api/process-media"):
-        return api_url[:-len("/api/process-media")] + "/health"
-    return api_url.rstrip("/") + "/health"
-
-
-def product_matcher_file_url(api_url: str) -> str:
-    api_url = normalize_id(api_url)
-    if not api_url:
-        return ""
-    if api_url.endswith("/api/process-media-url"):
-        return api_url[:-len("/api/process-media-url")] + "/api/process-media"
-    if api_url.endswith("/api/process-media"):
-        return api_url
-    return api_url.rstrip("/") + "/api/process-media"
-
-
-def product_matcher_url_url(api_url: str) -> str:
-    api_url = normalize_id(api_url)
-    if not api_url:
-        return ""
-    if api_url.endswith("/api/process-media"):
-        return api_url[:-len("/api/process-media")] + "/api/process-media-url"
-    if api_url.endswith("/api/process-media-url"):
-        return api_url
-    return api_url.rstrip("/") + "/api/process-media-url"
-
-
-def append_url_query(url: str, params: dict) -> str:
-    parsed = urlparse(url)
-    query = parse_qs(parsed.query, keep_blank_values=True)
-    for key, value in (params or {}).items():
-        clean_key = normalize_id(key)
-        clean_value = normalize_id(value)
-        if clean_key and clean_value:
-            query[clean_key] = [clean_value]
-    return parsed._replace(query=urlencode(query, doseq=True)).geturl()
-
-
-def download_media_for_matcher(media_url: str, access_token: str = "") -> tuple[bytes, str, str]:
-    media_url = normalize_id(media_url)
-    if not media_url:
-        raise ValueError("Empty media URL")
-    limit_bytes = PRODUCT_MATCHER_MAX_MEDIA_MB * 1024 * 1024
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        "Accept": "*/*",
-    }
-    clean_token = normalize_id(access_token)
-    if clean_token:
-        headers["Authorization"] = f"Bearer {clean_token}"
-
-    try:
-        response = requests.get(media_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 30), stream=True, headers=headers)
-        response.raise_for_status()
-    except requests.HTTPError as exc:
-        response = getattr(exc, "response", None)
-        if not clean_token or response is None or response.status_code != 403:
-            raise
-        token_url = append_url_query(media_url, {"access_token": clean_token})
-        token_headers = {key: value for key, value in headers.items() if key.lower() != "authorization"}
-        response = requests.get(token_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 30), stream=True, headers=token_headers)
-        response.raise_for_status()
-
-    content_type = normalize_id(response.headers.get("content-type")).split(";")[0].strip() or "application/octet-stream"
-    chunks = []
-    total = 0
-    for chunk in response.iter_content(chunk_size=64 * 1024):
-        if not chunk:
-            continue
-        total += len(chunk)
-        if total > limit_bytes:
-            raise ValueError(f"Media is too large (> {PRODUCT_MATCHER_MAX_MEDIA_MB} MB)")
-        chunks.append(chunk)
-    data = b"".join(chunks)
-    if not data:
-        raise ValueError("Downloaded media is empty")
-
-    ext = mimetypes.guess_extension(content_type) or ".bin"
-    filename = f"media{ext}"
-    return data, filename, content_type
-
-
-def _safe_score(value) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return 0.0
-
-
-def _collect_instagram_payload_urls(value, url_candidates: list[str]):
-    if isinstance(value, dict):
-        for nested in value.values():
-            _collect_instagram_payload_urls(nested, url_candidates)
-        return
-    if isinstance(value, list):
-        for nested in value:
-            _collect_instagram_payload_urls(nested, url_candidates)
-        return
-    if isinstance(value, str) and value.startswith(("http://", "https://")) and value not in url_candidates:
-        url_candidates.append(value)
-
-
-def extract_instagram_media_url_from_payload(raw_payload: dict) -> tuple[str, str]:
-    raw_payload = raw_payload or {}
-    message = raw_payload.get("message") if isinstance(raw_payload.get("message"), dict) else {}
-    attachments = message.get("attachments") if isinstance(message.get("attachments"), list) else []
-    for att in attachments:
-        if not isinstance(att, dict):
-            continue
-        payload = att.get("payload") if isinstance(att.get("payload"), dict) else {}
-        url_candidates = []
-        for key in ("url", "media_url", "image_url", "video_url", "external_url", "link", "permalink", "src"):
-            direct = payload.get(key)
-            if isinstance(direct, str) and direct.startswith(("http://", "https://")) and direct not in url_candidates:
-                url_candidates.append(direct)
-        _collect_instagram_payload_urls(payload, url_candidates)
-        _collect_instagram_payload_urls(att, url_candidates)
-        media_url = normalize_id(url_candidates[0] if url_candidates else "")
-        if not media_url:
-            continue
-        att_type = normalize_id(att.get("type")).lower()
-        if att_type in {"image", "photo"}:
-            return media_url, "photo"
-        if att_type in {"video", "ig_reel", "reel"}:
-            return media_url, "video"
-        if re.search(r"\.(jpg|jpeg|png|gif|webp|bmp|heic|heif)(\?|$)", media_url.lower()):
-            return media_url, "photo"
-        if re.search(r"\.(mp4|mov|m4v|webm|avi|mkv)(\?|$)", media_url.lower()):
-            return media_url, "video"
-        return media_url, "file"
-    return "", ""
-
-
-def build_product_match_reply(code: str, model: str, price: str, currency: str, top_score: float) -> str:
-    code = normalize_id(code)
-    model = normalize_id(model)
-    price = normalize_id(price)
-    currency = normalize_id(currency)
-    label = code or model
-    if code and model and model != code:
-        label = f"{code}, model {model}"
-    confidence_note = ""
-    if top_score < PRODUCT_MATCHER_MIN_SCORE:
-        confidence_note = " O'xshash model deb ko'rinyapti."
-    if price:
-        return f"Topdim:{confidence_note} {label or 'shu model'} narxi {price} {currency or '$'}. Qaysi razmer va nechta qop kerak?"
-    return f"Topdim:{confidence_note} {label or 'shu model'} bo'yicha aniq narxni menejerimiz tekshirib beradi. Qaysi razmer va nechta qop kerak?"
-
-
-def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: str = "", access_token: str = "") -> dict:
-    media_url = normalize_id(media_url)
-    if not PRODUCT_MATCHER_ENABLED or not PRODUCT_MATCHER_API_URLS or not media_url:
-        return {}
-
-    if media_type and media_type not in {"photo", "video", "file"}:
-        return {}
-
-    payload = {
-        "media_url": media_url,
-        "user_message": user_text or "",
-        "language": media_matcher_language(user_text),
-        "top_k": PRODUCT_MATCHER_TOP_K,
-    }
-
-    response = None
-    body = {}
-    last_upload_error = ""
-    last_url_error = ""
-
-    # Upload-first strategy: avoids frequent 403 on short-lived Instagram CDN links.
-    try:
-        media_bytes, filename, mime_type = download_media_for_matcher(media_url, access_token=access_token)
-    except Exception as exc:
-        media_bytes = b""
-        filename = ""
-        mime_type = ""
-        last_upload_error = f"download: {exc}"
-
-    if media_bytes:
-        upload_data = {
-            "user_message": user_text or "",
-            "language": media_matcher_language(user_text),
-            "top_k": str(PRODUCT_MATCHER_TOP_K),
-        }
-        upload_files = {
-            "file": (filename, media_bytes, mime_type),
-        }
-
-        for matcher_url in PRODUCT_MATCHER_API_URLS:
-            upload_url = product_matcher_file_url(matcher_url)
-            try:
-                response = requests.post(
-                    upload_url,
-                    data=upload_data,
-                    files=upload_files,
-                    timeout=max(PRODUCT_MATCHER_TIMEOUT_SECONDS, 90),
-                )
-            except Exception as exc:
-                last_upload_error = f"{upload_url}: {exc}"
-                continue
-            if not response.ok:
-                last_upload_error = f"{upload_url}: HTTP {response.status_code}"
-                continue
-            body = safe_json(response)
-            if isinstance(body, dict) and body.get("status") == "ok":
-                break
-            last_upload_error = f"{upload_url}: invalid response shape"
-        else:
-            body = {}
-
-    # Fallback to URL mode if upload mode fails.
-    if not (isinstance(body, dict) and body.get("status") == "ok"):
-        for matcher_url in PRODUCT_MATCHER_API_URLS:
-            url_endpoint = product_matcher_url_url(matcher_url)
-            try:
-                response = requests.post(
-                    url_endpoint,
-                    json=payload,
-                    timeout=max(PRODUCT_MATCHER_TIMEOUT_SECONDS, 90),
-                )
-            except Exception as exc:
-                last_url_error = f"{url_endpoint}: {exc}"
-                continue
-            if not response.ok:
-                last_url_error = f"{url_endpoint}: HTTP {response.status_code}"
-                continue
-            body = safe_json(response)
-            if isinstance(body, dict) and body.get("status") == "ok":
-                break
-            last_url_error = f"{url_endpoint}: invalid response shape"
-        else:
-            body = {}
-
-    if not (isinstance(body, dict) and body.get("status") == "ok"):
-        log(
-            "Media matcher call failed",
-            {"upload_mode": last_upload_error or "n/a", "url_mode": last_url_error or "n/a"},
-        )
-        return {}
-
-    matches = body.get("matches") if isinstance(body.get("matches"), list) else []
-    top = matches[0] if matches else {}
-    top_score = _safe_score(top.get("score"))
-    extracted_codes = body.get("extracted_codes") if isinstance(body.get("extracted_codes"), list) else []
-    code = normalize_id(top.get("product_code"))
-    model = normalize_id(top.get("model_code"))
-    price = normalize_id(top.get("price"))
-    currency = normalize_id(top.get("currency"))
-    matcher_debug = body.get("debug") if isinstance(body.get("debug"), dict) else {}
-    has_match_identity = bool(code or model or price)
-    accepted_by_score = top_score >= PRODUCT_MATCHER_MIN_SCORE
-    accepted_by_code = bool(extracted_codes)
-    accepted_weak_match = has_match_identity and top_score >= PRODUCT_MATCHER_WEAK_MIN_SCORE
-
-    log("Media matcher response summary", {
-        "match_count": len(matches),
-        "top_score": round(top_score, 4),
-        "top_product_code": code,
-        "top_model_code": model,
-        "has_price": bool(price),
-        "extracted_codes": [normalize_id(x) for x in extracted_codes[:6]],
-        "min_required_score": PRODUCT_MATCHER_MIN_SCORE,
-        "weak_min_score": PRODUCT_MATCHER_WEAK_MIN_SCORE,
-        "accepted_by_score": accepted_by_score,
-        "accepted_by_code": accepted_by_code,
-        "accepted_weak_match": accepted_weak_match,
-        "clip_available": matcher_debug.get("clip_available"),
-        "clip_loaded": matcher_debug.get("clip_loaded"),
-        "matcher_min_fusion_score": matcher_debug.get("min_fusion_score"),
-    })
-
-    if not (accepted_by_score or accepted_by_code or accepted_weak_match):
-        log("Media matcher rejected by score", {
-            "top_score": round(top_score, 4),
-            "top_product_code": code,
-            "top_model_code": model,
-            "match_count": len(matches),
-            "min_required_score": PRODUCT_MATCHER_MIN_SCORE,
-            "weak_min_score": PRODUCT_MATCHER_WEAK_MIN_SCORE,
-        })
-        return {}
-
-    parts = []
-    if code:
-        parts.append(f"code={code}")
-    if model:
-        parts.append(f"model={model}")
-    if price:
-        parts.append(f"price={price} {currency}".strip())
-
-    alternatives = []
-    for item in matches[1:3]:
-        alt_code = normalize_id(item.get("product_code"))
-        alt_model = normalize_id(item.get("model_code"))
-        alt_score = _safe_score(item.get("score"))
-        if alt_code or alt_model:
-            alternatives.append(f"{alt_code or alt_model} ({alt_score:.2f})")
-
-    context_lines = [
-        "Product media analysis (high-priority context for this customer message):",
-        f"- Top match confidence: {top_score:.2f}",
-    ]
-    if parts:
-        context_lines.append(f"- Top match details: {', '.join(parts)}")
-    if extracted_codes:
-        context_lines.append(f"- Extracted codes from media/text: {', '.join(str(x) for x in extracted_codes[:6])}")
-    if alternatives:
-        context_lines.append(f"- Alternatives: {', '.join(alternatives)}")
-    context_lines.append("- Use this to answer product/price questions for the attached media.")
-
-    return {
-        "context": "\n".join(context_lines),
-        "reply_hint": normalize_id(body.get("llm_reply")) or build_product_match_reply(code, model, price, currency, top_score),
-        "top_score": top_score,
-        "top_match_code": code,
-        "top_match_model": model,
-    }
-
-
-def _instagram_media_memory_key(business_id: str, customer_id: str) -> str:
-    business_id = normalize_id(business_id)
-    customer_id = normalize_id(customer_id)
-    if not business_id or not customer_id:
-        return ""
-    return f"{business_id}:{customer_id}"
-
-
-def remember_instagram_media_match(
-    business_id: str,
-    customer_id: str,
-    context: str,
-    reply_hint: str = "",
-    top_match_code: str = "",
-    top_match_model: str = "",
-    top_score: float = 0.0,
-):
-    key = _instagram_media_memory_key(business_id, customer_id)
-    if not key or not normalize_id(context):
-        return
-    INSTAGRAM_MEDIA_MATCH_MEMORY[key] = {
-        "saved_at": time.time(),
-        "context": normalize_id(context),
-        "reply_hint": normalize_id(reply_hint),
-        "top_match_code": normalize_id(top_match_code),
-        "top_match_model": normalize_id(top_match_model),
-        "top_score": _safe_score(top_score),
-    }
-
-
-def load_recent_instagram_media_match(business_id: str, customer_id: str) -> dict:
-    key = _instagram_media_memory_key(business_id, customer_id)
-    if not key:
-        return {}
-    payload = INSTAGRAM_MEDIA_MATCH_MEMORY.get(key)
-    if not isinstance(payload, dict):
-        return {}
-    saved_at = float(payload.get("saved_at") or 0.0)
-    if (time.time() - saved_at) > PRODUCT_MATCHER_CONTEXT_TTL_SECONDS:
-        INSTAGRAM_MEDIA_MATCH_MEMORY.pop(key, None)
-        return {}
-    return payload
-
-
-def load_instagram_message_media_reference(business_id: str, customer_id: str, message_id: str) -> dict:
-    business_id = normalize_id(business_id)
-    customer_id = normalize_id(customer_id)
-    message_id = normalize_id(message_id)
-    if not business_id or not customer_id or not message_id:
-        return {}
-    try:
-        result = (
-            supabase.table("inbox_messages")
-            .select("media_url,media_type,raw_payload")
-            .eq("business_id", business_id)
-            .eq("platform", "instagram")
-            .eq("customer_id", customer_id)
-            .eq("external_message_id", message_id)
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        row = (result.data or [None])[0]
-        if not isinstance(row, dict):
-            return {}
-        media_url = normalize_id(row.get("media_url"))
-        media_type = normalize_id(row.get("media_type")).lower()
-        if not media_url:
-            media_url, payload_media_type = extract_instagram_media_url_from_payload(row.get("raw_payload") or {})
-            media_type = media_type or payload_media_type
-        if not media_url:
-            return {}
-        return {"media_url": media_url, "media_type": media_type or "photo"}
-    except Exception as exc:
-        log("Could not load Instagram reply-to media reference", str(exc))
-        return {}
-
-
-def should_reuse_recent_media_match(user_text: str, media_type: str = "") -> bool:
-    if media_type in {"photo", "video", "file"}:
-        return False
-    text = normalize_id(user_text)
-    if not text:
-        return False
-    lower = text.lower()
-    # Typical follow-up buying messages that refer to the previously sent product image.
-    if re.search(r"\b\d+\s*(qop|meshok|ta|dona|pack|quti)\b", lower):
-        return True
-    if has_strong_milana_sales_context(lower):
-        return True
-    short_followups = {"bor", "bormi", "narxi", "qancha", "razmer", "rang", "olaman", "zakaz", "беру", "есть"}
-    return lower in short_followups
-
-
 def has_strong_milana_sales_context(text: str) -> bool:
     s = normalize_id(text).lower()
     if not s:
@@ -3984,27 +3128,12 @@ def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
     return reply_text[:1000]
 
 
-def catalog_subtitle_text(raw_text: str, business: dict) -> str:
-    text = clean_ai_reply_for_catalog(raw_text, business)
-    text = complete_sentence_reply(text, limit=78)
-    if text and len(text) <= 78:
-        return text
-
-    # Keep template subtitle short and always complete.
-    lang = detect_customer_language(text)
-    if lang == "ru":
-        return "Нажмите кнопку ниже, чтобы открыть каталог."
-    if lang == "en":
-        return "Tap the button below to open the catalog."
-    return "Quyidagi tugma orqali katalogni oching."
-
-
 def catalog_template_payload(recipient: dict, business: dict, text: str = "") -> dict:
     catalog_link = get_catalog_link(business)
     business_name = normalize_id((business or {}).get("business_name")) or "Milana Premium"
-    subtitle = catalog_subtitle_text(text, business)
-    if not subtitle:
-        subtitle = f"{business_name} katalogi shu yerda."
+    text = clean_ai_reply_for_catalog(text, business)
+    if not text:
+        text = f"{business_name} katalogi shu yerda. Qaysi mahsulotlar sizni qiziqtirmoqda?"
 
     return {
         "recipient": recipient,
@@ -4016,7 +3145,7 @@ def catalog_template_payload(recipient: dict, business: dict, text: str = "") ->
                     "elements": [
                         {
                             "title": "Katalogni ko'rish",
-                            "subtitle": subtitle,
+                            "subtitle": text[:80],
                             "default_action": {
                                 "type": "web_url",
                                 "url": catalog_link,
@@ -4366,6 +3495,792 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     return "Tushunarli 👍"
 
 
+def _safe_score(value) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+
+
+def product_matcher_file_url(api_url: str) -> str:
+    api_url = normalize_id(api_url)
+    if not api_url:
+        return ""
+    if api_url.endswith("/api/process-media-url"):
+        return api_url[:-len("/api/process-media-url")] + "/api/process-media"
+    if api_url.endswith("/api/process-media"):
+        return api_url
+    return api_url.rstrip("/") + "/api/process-media"
+
+
+def product_matcher_url_url(api_url: str) -> str:
+    api_url = normalize_id(api_url)
+    if not api_url:
+        return ""
+    if api_url.endswith("/api/process-media"):
+        return api_url[:-len("/api/process-media")] + "/api/process-media-url"
+    if api_url.endswith("/api/process-media-url"):
+        return api_url
+    return api_url.rstrip("/") + "/api/process-media-url"
+
+
+def product_matcher_health_url(api_url: str) -> str:
+    api_url = normalize_id(api_url)
+    if not api_url:
+        return ""
+    if "/api/" in api_url:
+        return api_url.split("/api/", 1)[0].rstrip("/") + "/health"
+    return api_url.rstrip("/") + "/health"
+
+
+def append_url_query(url: str, params: dict) -> str:
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query, keep_blank_values=True)
+    for key, value in (params or {}).items():
+        clean_key = normalize_id(key)
+        clean_value = normalize_id(value)
+        if clean_key and clean_value:
+            query[clean_key] = [clean_value]
+    return parsed._replace(query=urlencode(query, doseq=True)).geturl()
+
+
+def download_media_for_matcher(media_url: str, access_token: str = "") -> tuple[bytes, str, str]:
+    media_url = normalize_id(media_url)
+    if not media_url:
+        raise ValueError("Empty media URL")
+
+    limit_bytes = PRODUCT_MATCHER_MAX_MEDIA_MB * 1024 * 1024
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        "Accept": "*/*",
+    }
+    clean_token = normalize_id(access_token)
+    if clean_token:
+        headers["Authorization"] = f"Bearer {clean_token}"
+
+    try:
+        response = requests.get(media_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 30), stream=True, headers=headers)
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        response = getattr(exc, "response", None)
+        if not clean_token or response is None or response.status_code != 403:
+            raise
+        token_url = append_url_query(media_url, {"access_token": clean_token})
+        token_headers = {key: value for key, value in headers.items() if key.lower() != "authorization"}
+        response = requests.get(token_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 30), stream=True, headers=token_headers)
+        response.raise_for_status()
+
+    content_type = normalize_id(response.headers.get("content-type")).split(";")[0].strip() or "application/octet-stream"
+    chunks = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=64 * 1024):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > limit_bytes:
+            raise ValueError(f"Media is too large (> {PRODUCT_MATCHER_MAX_MEDIA_MB} MB)")
+        chunks.append(chunk)
+    data = b"".join(chunks)
+    if not data:
+        raise ValueError("Downloaded media is empty")
+
+    filename = f"media{mimetypes.guess_extension(content_type) or '.bin'}"
+    return data, filename, content_type
+
+
+def build_product_match_reply(code: str, model: str, price: str, currency: str, top_score: float) -> str:
+    code = normalize_id(code)
+    model = normalize_id(model)
+    price = normalize_id(price)
+    currency = normalize_id(currency)
+    label = code or model
+    if code and model and model != code:
+        label = f"{code}, model {model}"
+    confidence_note = " O'xshash model deb ko'rinyapti." if top_score < PRODUCT_MATCHER_MIN_SCORE else ""
+    if price:
+        return f"Topdim:{confidence_note} {label or 'shu model'} narxi {price} {currency or '$'}. Qaysi razmer va nechta qop kerak?"
+    return f"Topdim:{confidence_note} {label or 'shu model'} bo'yicha aniq narxni menejerimiz tekshirib beradi. Qaysi razmer va nechta qop kerak?"
+
+
+def normalize_product_code(value: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9-]", "", normalize_id(value).upper())
+    value = re.sub(r"-{2,}", "-", value).strip("-")
+    return value
+
+
+def extract_codes_from_text_local(text: str) -> list[str]:
+    text = normalize_id(text)
+    if not text:
+        return []
+    found = []
+    for raw in re.findall(r"\b[A-Za-z]{1,4}-?\d{2,6}\b", text):
+        code = normalize_product_code(raw)
+        if code and code not in found:
+            found.append(code)
+    return found
+
+
+def _extract_json_object_loose(text: str) -> dict:
+    raw = normalize_id(text)
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    match = re.search(r"\{[\s\S]*\}", raw)
+    if not match:
+        return {}
+    try:
+        parsed = json.loads(match.group(0))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _get_local_catalog_rows(force_refresh: bool = False) -> list[dict]:
+    now = time.time()
+    cached_rows = PRODUCT_MATCHER_LOCAL_CATALOG_CACHE.get("rows") if isinstance(PRODUCT_MATCHER_LOCAL_CATALOG_CACHE, dict) else []
+    loaded_at = PRODUCT_MATCHER_LOCAL_CATALOG_CACHE.get("loaded_at", 0.0) if isinstance(PRODUCT_MATCHER_LOCAL_CATALOG_CACHE, dict) else 0.0
+    if not force_refresh and cached_rows and (now - float(loaded_at or 0.0)) < PRODUCT_MATCHER_LOCAL_CATALOG_CACHE_TTL_SECONDS:
+        return cached_rows
+
+    fields = "product_code,model_code,price,currency,combined_text,image_url,source_pdf,page,card_index"
+    try:
+        res = (
+            supabase
+            .table(PRODUCT_MATCHER_LOCAL_CATALOG_TABLE)
+            .select(fields)
+            .limit(PRODUCT_MATCHER_LOCAL_FETCH_LIMIT)
+            .execute()
+        )
+        rows = res.data if isinstance(res.data, list) else []
+    except Exception as exc:
+        log("Local catalog fetch failed", {"table": PRODUCT_MATCHER_LOCAL_CATALOG_TABLE, "error": str(exc)})
+        return cached_rows or []
+
+    normalized_rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        product_code = normalize_product_code(row.get("product_code"))
+        model_code = normalize_product_code(row.get("model_code"))
+        combined_text = normalize_id(row.get("combined_text"))
+        if not (product_code or model_code or combined_text):
+            continue
+        normalized_rows.append({
+            "product_code": product_code,
+            "model_code": model_code,
+            "price": normalize_id(row.get("price")),
+            "currency": normalize_id(row.get("currency")),
+            "combined_text": combined_text,
+            "image_url": normalize_id(row.get("image_url")),
+            "source_pdf": normalize_id(row.get("source_pdf")),
+            "page": row.get("page"),
+            "card_index": row.get("card_index"),
+        })
+
+    PRODUCT_MATCHER_LOCAL_CATALOG_CACHE["rows"] = normalized_rows
+    PRODUCT_MATCHER_LOCAL_CATALOG_CACHE["loaded_at"] = now
+    return normalized_rows
+
+
+def _extract_output_text_from_responses(body: dict) -> str:
+    text = normalize_id(body.get("output_text"))
+    if text:
+        return text
+    output = body.get("output") if isinstance(body.get("output"), list) else []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content") if isinstance(item.get("content"), list) else []
+        for chunk in content:
+            if not isinstance(chunk, dict):
+                continue
+            value = normalize_id(chunk.get("text"))
+            if value:
+                return value
+    return ""
+
+
+def _extract_media_vision_hints_local(media_bytes: bytes, mime_type: str, user_text: str) -> dict:
+    if not OPENAI_API_KEY:
+        return {}
+    clean_mime = normalize_id(mime_type).split(";")[0].lower()
+    if not clean_mime.startswith("image/"):
+        return {}
+
+    b64 = base64.b64encode(media_bytes).decode("ascii")
+    prompt = {
+        "task": "Identify product codes/models and useful keywords from this clothing catalog image.",
+        "customer_message": normalize_id(user_text),
+        "output_format": {
+            "product_codes": ["code strings"],
+            "model_codes": ["model strings"],
+            "keywords": ["short style/product keywords"],
+            "detected_text": "short OCR-like text seen on image",
+            "confidence": "0..1",
+        },
+    }
+
+    payload = {
+        "model": PRODUCT_MATCHER_OPENAI_VISION_MODEL,
+        "input": [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            "Return ONLY JSON. Do not add markdown. "
+                            "Focus on codes, model identifiers, and concise retrieval keywords."
+                        ),
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": json.dumps(prompt, ensure_ascii=False)},
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:{clean_mime};base64,{b64}",
+                        "detail": PRODUCT_MATCHER_OPENAI_VISION_DETAIL,
+                    },
+                ],
+            },
+        ],
+        "temperature": 0.0,
+    }
+
+    try:
+        res = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=PRODUCT_MATCHER_OPENAI_VISION_TIMEOUT_SECONDS,
+        )
+        body = safe_json(res)
+        if not res.ok:
+            log("Local vision request failed", {"status": res.status_code, "body": body})
+            return {}
+    except Exception as exc:
+        log("Local vision request error", str(exc))
+        return {}
+
+    raw_text = _extract_output_text_from_responses(body)
+    parsed = _extract_json_object_loose(raw_text)
+    parsed_codes = []
+    for key in ("product_codes", "model_codes"):
+        values = parsed.get(key)
+        if isinstance(values, list):
+            parsed_codes.extend(values)
+    if isinstance(parsed.get("detected_text"), str):
+        parsed_codes.extend(extract_codes_from_text_local(parsed.get("detected_text")))
+
+    codes = []
+    for code in parsed_codes:
+        normalized = normalize_product_code(code)
+        if normalized and normalized not in codes:
+            codes.append(normalized)
+
+    keywords = []
+    raw_keywords = parsed.get("keywords")
+    if isinstance(raw_keywords, list):
+        for item in raw_keywords:
+            token = normalize_id(item).lower()
+            if token and token not in keywords:
+                keywords.append(token)
+
+    detected_text = normalize_id(parsed.get("detected_text"))
+    if detected_text:
+        for token in re.findall(r"[A-Za-z0-9'-]{3,}", detected_text.lower()):
+            if token not in keywords:
+                keywords.append(token)
+
+    return {
+        "codes": codes[:24],
+        "keywords": keywords[:PRODUCT_MATCHER_LOCAL_MAX_KEYWORDS],
+        "detected_text": detected_text,
+        "confidence": _safe_score(parsed.get("confidence")),
+        "raw_text": raw_text[:400],
+    }
+
+
+def _score_local_catalog_row(row: dict, code_set: set, keyword_set: set) -> tuple[float, dict]:
+    code = normalize_product_code(row.get("product_code"))
+    model = normalize_product_code(row.get("model_code"))
+    text_blob = " ".join(
+        [
+            normalize_id(row.get("combined_text")).upper(),
+            code,
+            model,
+        ]
+    )
+
+    code_score = 0.0
+    if code and code in code_set:
+        code_score = 1.0
+    elif model and model in code_set:
+        code_score = 0.92
+
+    keyword_hits = 0
+    if keyword_set:
+        lower_blob = text_blob.lower()
+        for kw in keyword_set:
+            if kw and kw in lower_blob:
+                keyword_hits += 1
+    keyword_score = 0.0
+    if keyword_set:
+        keyword_score = min(1.0, keyword_hits / max(1, min(6, len(keyword_set))))
+
+    text_score = 0.0
+    if code and code in text_blob:
+        text_score = 1.0
+    elif model and model in text_blob:
+        text_score = 0.9
+
+    final_score = (0.64 * code_score) + (0.26 * keyword_score) + (0.10 * text_score)
+    parts = {
+        "final": round(final_score, 6),
+        "code": round(code_score, 6),
+        "keyword": round(keyword_score, 6),
+        "text": round(text_score, 6),
+    }
+    return final_score, parts
+
+
+def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_type: str = "", access_token: str = "") -> dict:
+    if not PRODUCT_MATCHER_LOCAL_ENABLED:
+        return {}
+    media_type = normalize_id(media_type).lower()
+    if media_type and media_type not in {"photo", "file", "image"}:
+        return {}
+    if not media_url:
+        return {}
+
+    try:
+        media_bytes, _, mime_type = download_media_for_matcher(media_url, access_token=access_token)
+    except Exception as exc:
+        log("Local matcher download failed", {"error": str(exc)})
+        return {}
+
+    vision = _extract_media_vision_hints_local(media_bytes, mime_type, user_text)
+    extracted_codes = extract_codes_from_text_local(user_text)
+    for code in vision.get("codes", []):
+        if code not in extracted_codes:
+            extracted_codes.append(code)
+    code_set = {normalize_product_code(code) for code in extracted_codes if code}
+
+    keyword_set = {normalize_id(x).lower() for x in re.findall(r"[A-Za-z0-9'-]{3,}", normalize_id(user_text))}
+    for token in vision.get("keywords", []):
+        clean = normalize_id(token).lower()
+        if clean:
+            keyword_set.add(clean)
+
+    rows = _get_local_catalog_rows()
+    if not rows:
+        return {}
+
+    scored = []
+    for row in rows:
+        score, parts = _score_local_catalog_row(row, code_set, keyword_set)
+        if score <= 0:
+            continue
+        scored.append({
+            **row,
+            "score": score,
+            "components": parts,
+        })
+
+    scored.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+    matches = scored[:PRODUCT_MATCHER_TOP_K]
+    if not matches:
+        return {}
+
+    top = matches[0]
+    top_score = _safe_score(top.get("score"))
+    code = normalize_id(top.get("product_code"))
+    model = normalize_id(top.get("model_code"))
+    price = normalize_id(top.get("price"))
+    currency = normalize_id(top.get("currency"))
+
+    accepted_by_score = top_score >= PRODUCT_MATCHER_MIN_SCORE
+    accepted_by_code = bool(code_set)
+    accepted_weak_match = bool(code or model or price) and top_score >= PRODUCT_MATCHER_WEAK_MIN_SCORE
+
+    log("Local media matcher response summary", {
+        "match_count": len(matches),
+        "top_score": round(top_score, 4),
+        "top_product_code": code,
+        "top_model_code": model,
+        "has_price": bool(price),
+        "extracted_codes": list(code_set)[:8],
+        "vision_confidence": _safe_score(vision.get("confidence")),
+        "accepted_by_score": accepted_by_score,
+        "accepted_by_code": accepted_by_code,
+        "accepted_weak_match": accepted_weak_match,
+    })
+
+    if not (accepted_by_score or accepted_by_code or accepted_weak_match):
+        return {}
+
+    alternatives = []
+    for item in matches[1:3]:
+        alt_code = normalize_id(item.get("product_code"))
+        alt_model = normalize_id(item.get("model_code"))
+        alt_score = _safe_score(item.get("score"))
+        if alt_code or alt_model:
+            alternatives.append(f"{alt_code or alt_model} ({alt_score:.2f})")
+
+    parts = []
+    if code:
+        parts.append(f"code={code}")
+    if model:
+        parts.append(f"model={model}")
+    if price:
+        parts.append(f"price={price} {currency}".strip())
+
+    context_lines = [
+        "Product media analysis (high-priority context for this customer message):",
+        f"- Top match confidence: {top_score:.2f}",
+    ]
+    if parts:
+        context_lines.append(f"- Top match details: {', '.join(parts)}")
+    if code_set:
+        context_lines.append(f"- Extracted codes from media/text: {', '.join(sorted(code_set)[:8])}")
+    if alternatives:
+        context_lines.append(f"- Alternatives: {', '.join(alternatives)}")
+    context_lines.append("- Use this to answer product/price questions for the attached media.")
+
+    return {
+        "context": "\n".join(context_lines),
+        "reply_hint": build_product_match_reply(code, model, price, currency, top_score),
+        "top_score": top_score,
+        "top_match_code": code,
+        "top_match_model": model,
+        "matches": matches,
+    }
+
+
+def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: str = "", access_token: str = "") -> dict:
+    media_url = normalize_id(media_url)
+    if not PRODUCT_MATCHER_ENABLED or not PRODUCT_MATCHER_API_URLS or not media_url:
+        if PRODUCT_MATCHER_LOCAL_ENABLED and PRODUCT_MATCHER_ENABLED and media_url:
+            return analyze_media_for_sales_reply_local(
+                media_url=media_url,
+                user_text=user_text,
+                media_type=media_type,
+                access_token=access_token,
+            )
+        return {}
+    local_result = analyze_media_for_sales_reply_local(
+        media_url=media_url,
+        user_text=user_text,
+        media_type=media_type,
+        access_token=access_token,
+    )
+    if local_result:
+        return local_result
+    if PRODUCT_MATCHER_LOCAL_ONLY:
+        return {}
+    if media_type and media_type not in {"photo", "video", "file"}:
+        return {}
+
+    payload = {
+        "media_url": media_url,
+        "user_message": user_text or "",
+        "language": media_matcher_language(user_text),
+        "top_k": PRODUCT_MATCHER_TOP_K,
+    }
+    body = {}
+    last_upload_error = ""
+    last_url_error = ""
+
+    try:
+        media_bytes, filename, mime_type = download_media_for_matcher(media_url, access_token=access_token)
+    except Exception as exc:
+        media_bytes = b""
+        filename = ""
+        mime_type = ""
+        last_upload_error = f"download: {exc}"
+
+    if media_bytes:
+        upload_data = {
+            "user_message": user_text or "",
+            "language": media_matcher_language(user_text),
+            "top_k": str(PRODUCT_MATCHER_TOP_K),
+        }
+        upload_files = {"file": (filename, media_bytes, mime_type)}
+        for matcher_url in PRODUCT_MATCHER_API_URLS:
+            upload_url = product_matcher_file_url(matcher_url)
+            try:
+                response = requests.post(
+                    upload_url,
+                    data=upload_data,
+                    files=upload_files,
+                    timeout=max(PRODUCT_MATCHER_TIMEOUT_SECONDS, 90),
+                )
+            except Exception as exc:
+                last_upload_error = f"{upload_url}: {exc}"
+                continue
+            if not response.ok:
+                last_upload_error = f"{upload_url}: HTTP {response.status_code}"
+                continue
+            body = safe_json(response)
+            if isinstance(body, dict) and body.get("status") == "ok":
+                break
+            last_upload_error = f"{upload_url}: invalid response shape"
+        else:
+            body = {}
+
+    if not (isinstance(body, dict) and body.get("status") == "ok"):
+        for matcher_url in PRODUCT_MATCHER_API_URLS:
+            url_endpoint = product_matcher_url_url(matcher_url)
+            try:
+                response = requests.post(
+                    url_endpoint,
+                    json=payload,
+                    timeout=max(PRODUCT_MATCHER_TIMEOUT_SECONDS, 90),
+                )
+            except Exception as exc:
+                last_url_error = f"{url_endpoint}: {exc}"
+                continue
+            if not response.ok:
+                last_url_error = f"{url_endpoint}: HTTP {response.status_code}"
+                continue
+            body = safe_json(response)
+            if isinstance(body, dict) and body.get("status") == "ok":
+                break
+            last_url_error = f"{url_endpoint}: invalid response shape"
+        else:
+            body = {}
+
+    if not (isinstance(body, dict) and body.get("status") == "ok"):
+        log("Media matcher call failed", {"upload_mode": last_upload_error or "n/a", "url_mode": last_url_error or "n/a"})
+        return {}
+
+    matches = body.get("matches") if isinstance(body.get("matches"), list) else []
+    top = matches[0] if matches else {}
+    top_score = _safe_score(top.get("score"))
+    extracted_codes = body.get("extracted_codes") if isinstance(body.get("extracted_codes"), list) else []
+    code = normalize_id(top.get("product_code"))
+    model = normalize_id(top.get("model_code"))
+    price = normalize_id(top.get("price"))
+    currency = normalize_id(top.get("currency"))
+    matcher_debug = body.get("debug") if isinstance(body.get("debug"), dict) else {}
+    has_match_identity = bool(code or model or price)
+    accepted_by_score = top_score >= PRODUCT_MATCHER_MIN_SCORE
+    accepted_by_code = bool(extracted_codes)
+    accepted_weak_match = has_match_identity and top_score >= PRODUCT_MATCHER_WEAK_MIN_SCORE
+
+    log("Media matcher response summary", {
+        "match_count": len(matches),
+        "top_score": round(top_score, 4),
+        "top_product_code": code,
+        "top_model_code": model,
+        "has_price": bool(price),
+        "extracted_codes": [normalize_id(x) for x in extracted_codes[:6]],
+        "min_required_score": PRODUCT_MATCHER_MIN_SCORE,
+        "weak_min_score": PRODUCT_MATCHER_WEAK_MIN_SCORE,
+        "accepted_by_score": accepted_by_score,
+        "accepted_by_code": accepted_by_code,
+        "accepted_weak_match": accepted_weak_match,
+        "clip_available": matcher_debug.get("clip_available"),
+        "clip_loaded": matcher_debug.get("clip_loaded"),
+        "matcher_min_fusion_score": matcher_debug.get("min_fusion_score"),
+    })
+
+    if not (accepted_by_score or accepted_by_code or accepted_weak_match):
+        log("Media matcher rejected by score", {
+            "top_score": round(top_score, 4),
+            "top_product_code": code,
+            "top_model_code": model,
+            "match_count": len(matches),
+            "min_required_score": PRODUCT_MATCHER_MIN_SCORE,
+            "weak_min_score": PRODUCT_MATCHER_WEAK_MIN_SCORE,
+        })
+        return {}
+
+    parts = []
+    if code:
+        parts.append(f"code={code}")
+    if model:
+        parts.append(f"model={model}")
+    if price:
+        parts.append(f"price={price} {currency}".strip())
+
+    alternatives = []
+    for item in matches[1:3]:
+        alt_code = normalize_id(item.get("product_code"))
+        alt_model = normalize_id(item.get("model_code"))
+        alt_score = _safe_score(item.get("score"))
+        if alt_code or alt_model:
+            alternatives.append(f"{alt_code or alt_model} ({alt_score:.2f})")
+
+    context_lines = [
+        "Product media analysis (high-priority context for this customer message):",
+        f"- Top match confidence: {top_score:.2f}",
+    ]
+    if parts:
+        context_lines.append(f"- Top match details: {', '.join(parts)}")
+    if extracted_codes:
+        context_lines.append(f"- Extracted codes from media/text: {', '.join(str(x) for x in extracted_codes[:6])}")
+    if alternatives:
+        context_lines.append(f"- Alternatives: {', '.join(alternatives)}")
+    context_lines.append("- Use this to answer product/price questions for the attached media.")
+
+    return {
+        "context": "\n".join(context_lines),
+        "reply_hint": normalize_id(body.get("llm_reply")) or build_product_match_reply(code, model, price, currency, top_score),
+        "top_score": top_score,
+        "top_match_code": code,
+        "top_match_model": model,
+    }
+
+
+def _instagram_media_memory_key(business_id: str, customer_id: str) -> str:
+    business_id = normalize_id(business_id)
+    customer_id = normalize_id(customer_id)
+    if not business_id or not customer_id:
+        return ""
+    return f"{business_id}:{customer_id}"
+
+
+def remember_instagram_media_match(
+    business_id: str,
+    customer_id: str,
+    context: str,
+    reply_hint: str = "",
+    top_match_code: str = "",
+    top_match_model: str = "",
+    top_score: float = 0.0,
+):
+    key = _instagram_media_memory_key(business_id, customer_id)
+    if not key or not normalize_id(context):
+        return
+    INSTAGRAM_MEDIA_MATCH_MEMORY[key] = {
+        "saved_at": time.time(),
+        "context": normalize_id(context),
+        "reply_hint": normalize_id(reply_hint),
+        "top_match_code": normalize_id(top_match_code),
+        "top_match_model": normalize_id(top_match_model),
+        "top_score": _safe_score(top_score),
+    }
+
+
+def load_recent_instagram_media_match(business_id: str, customer_id: str) -> dict:
+    key = _instagram_media_memory_key(business_id, customer_id)
+    if not key:
+        return {}
+    payload = INSTAGRAM_MEDIA_MATCH_MEMORY.get(key)
+    if not isinstance(payload, dict):
+        return {}
+    saved_at = float(payload.get("saved_at") or 0.0)
+    if (time.time() - saved_at) > PRODUCT_MATCHER_CONTEXT_TTL_SECONDS:
+        INSTAGRAM_MEDIA_MATCH_MEMORY.pop(key, None)
+        return {}
+    return payload
+
+
+def _collect_instagram_payload_urls(value, url_candidates: list[str]):
+    if isinstance(value, dict):
+        for nested in value.values():
+            _collect_instagram_payload_urls(nested, url_candidates)
+        return
+    if isinstance(value, list):
+        for nested in value:
+            _collect_instagram_payload_urls(nested, url_candidates)
+        return
+    if isinstance(value, str) and value.startswith(("http://", "https://")) and value not in url_candidates:
+        url_candidates.append(value)
+
+
+def extract_instagram_media_url_from_payload(raw_payload: dict) -> tuple[str, str]:
+    raw_payload = raw_payload or {}
+    message = raw_payload.get("message") if isinstance(raw_payload.get("message"), dict) else {}
+    attachments = message.get("attachments") if isinstance(message.get("attachments"), list) else []
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        payload = att.get("payload") if isinstance(att.get("payload"), dict) else {}
+        url_candidates = []
+        for key in ("url", "media_url", "image_url", "video_url", "external_url", "link", "permalink", "src"):
+            direct = payload.get(key)
+            if isinstance(direct, str) and direct.startswith(("http://", "https://")) and direct not in url_candidates:
+                url_candidates.append(direct)
+        _collect_instagram_payload_urls(payload, url_candidates)
+        _collect_instagram_payload_urls(att, url_candidates)
+        media_url = normalize_id(url_candidates[0] if url_candidates else "")
+        if not media_url:
+            continue
+        att_type = normalize_id(att.get("type")).lower()
+        if att_type in {"image", "photo"}:
+            return media_url, "photo"
+        if att_type in {"video", "ig_reel", "reel"}:
+            return media_url, "video"
+        if re.search(r"\.(jpg|jpeg|png|gif|webp|bmp|heic|heif)(\?|$)", media_url.lower()):
+            return media_url, "photo"
+        if re.search(r"\.(mp4|mov|m4v|webm|avi|mkv)(\?|$)", media_url.lower()):
+            return media_url, "video"
+        return media_url, "file"
+    return "", ""
+
+
+def load_instagram_message_media_reference(business_id: str, customer_id: str, message_id: str) -> dict:
+    business_id = normalize_id(business_id)
+    customer_id = normalize_id(customer_id)
+    message_id = normalize_id(message_id)
+    if not business_id or not customer_id or not message_id:
+        return {}
+    try:
+        result = (
+            supabase.table("inbox_messages")
+            .select("media_url,media_type,raw_payload")
+            .eq("business_id", business_id)
+            .eq("platform", "instagram")
+            .eq("customer_id", customer_id)
+            .eq("external_message_id", message_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        row = (result.data or [None])[0]
+        if not isinstance(row, dict):
+            return {}
+        media_url = normalize_id(row.get("media_url"))
+        media_type = normalize_id(row.get("media_type")).lower()
+        if not media_url:
+            media_url, payload_media_type = extract_instagram_media_url_from_payload(row.get("raw_payload") or {})
+            media_type = media_type or payload_media_type
+        if not media_url:
+            return {}
+        return {"media_url": media_url, "media_type": media_type or "photo"}
+    except Exception as exc:
+        log("Could not load Instagram reply-to media reference", str(exc))
+        return {}
+
+
+def should_reuse_recent_media_match(user_text: str, media_type: str = "") -> bool:
+    if media_type in {"photo", "video", "file"}:
+        return False
+    text = normalize_id(user_text)
+    if not text:
+        return False
+    lower = text.lower()
+    if re.search(r"\b\d+\s*(qop|meshok|ta|dona|pack|quti)\b", lower):
+        return True
+    if has_strong_milana_sales_context(lower):
+        return True
+    short_followups = {"bor", "bormi", "narxi", "qancha", "nechpul", "razmer", "rang", "olaman", "zakaz", "беру", "есть"}
+    return lower in short_followups
+
+
 def get_recent_platform_chat_history(platform: str, business: dict, customer_id: str = "", channel: str = "", limit: int = 10) -> list:
     if not customer_id:
         return []
@@ -4401,8 +4316,6 @@ def get_ai_reply(
     platform: str = "instagram",
     customer_id: str = "",
     channel: str = "",
-    post_id: str = "",
-    post_permalink: str = "",
     media_context: str = "",
     media_reply_hint: str = "",
 ):
@@ -4412,16 +4325,6 @@ def get_ai_reply(
             return off_topic_reply
 
         messages = [{"role": "system", "content": build_sales_system_prompt(business, platform)}]
-        if platform == "instagram":
-            post_context = build_instagram_post_reply_context(
-                business=business,
-                customer_id=customer_id,
-                channel=channel or "dm",
-                post_id=post_id,
-                post_permalink=post_permalink,
-            )
-            if post_context:
-                messages.append({"role": "system", "content": post_context})
         if media_context:
             messages.append({"role": "system", "content": media_context})
         if media_reply_hint:
@@ -4469,8 +4372,14 @@ def get_ai_reply(
 # INSTAGRAM
 # ============================================================================
 def get_business_access_token(business: dict):
-    candidates = get_instagram_token_candidates(business)
-    return candidates[0][1] if candidates else ""
+    channel_token = get_business_channel_token(
+        business,
+        ["instagram"],
+        ["page_access_token", "access_token"],
+    )
+    if channel_token:
+        return channel_token
+    return business.get("page_access_token") or business.get("access_token") or ""
 
 
 def get_messages_url(business: dict):
@@ -4883,6 +4792,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         media_reply_hint = ""
         matcher_source_url = media_url or post_image_url
         business_id = normalize_id(business.get("id"))
+
         if matcher_source_url and media_type in {"photo", "video", "file"}:
             log("Instagram DM media matcher request", {
                 "customer_id": sender_id,
@@ -5007,8 +4917,6 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 "instagram",
                 sender_id,
                 "dm",
-                post_id=share_asset_id,
-                post_permalink=post_permalink,
                 media_context=media_match_context,
                 media_reply_hint=media_reply_hint,
             )
@@ -5148,15 +5056,7 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
             log("Instagram catalog private reply failed", {"comment_id": comment_id, "result": dm_raw_result})
             reply_text = "Katalogni DM orqali yuborish uchun bizga xabar yozing."
     else:
-        reply_text = get_ai_reply(
-            comment_text,
-            business,
-            "instagram",
-            commenter_id or comment_id,
-            "instagram_comment",
-            post_id=post_id,
-            post_permalink=inbound_payload.get("post_permalink", ""),
-        )
+        reply_text = get_ai_reply(comment_text, business, "instagram", commenter_id or comment_id, "instagram_comment")
         reply_text = remove_urls(reply_text)
 
     send_result = reply_to_comment(access_token, comment_id, reply_text, business)
@@ -5180,20 +5080,11 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
             platform_message_id=normalize_id(raw_result.get("id")) if isinstance(raw_result, dict) else "",
             raw_payload=outbound_payload,
             customer_name=commenter_username or f"IG User {str(commenter_id or comment_id)[-4:]}",
-                is_read=True,
-                channel="instagram_comment",
-            )
-        mark_processed(processed_comment_ids, comment_id)
-    else:
-        # Keep visibility when Meta rejects comment send; do not mark as processed
-        # so duplicate webhook deliveries can retry.
-        log("Instagram comment auto-reply failed", {
-            "comment_id": comment_id,
-            "customer_id": commenter_id,
-            "post_id": post_id,
-            "status_code": getattr(send_result, "status_code", None),
-            "result": raw_result,
-        })
+            is_read=True,
+            channel="instagram_comment",
+        )
+
+    mark_processed(processed_comment_ids, comment_id)
 
 
 # ============================================================================
@@ -5981,6 +5872,9 @@ async def api_health():
         "version": "5.1.0-telegram-voice",
         "ffmpeg": bool(shutil.which("ffmpeg")),
         "product_matcher_enabled": PRODUCT_MATCHER_ENABLED,
+        "product_matcher_local_enabled": PRODUCT_MATCHER_LOCAL_ENABLED,
+        "product_matcher_local_only": PRODUCT_MATCHER_LOCAL_ONLY,
+        "product_matcher_local_catalog_table": PRODUCT_MATCHER_LOCAL_CATALOG_TABLE,
         "product_matcher_urls": PRODUCT_MATCHER_API_URLS,
         "product_matcher_context_ttl_seconds": PRODUCT_MATCHER_CONTEXT_TTL_SECONDS,
     }
@@ -6010,6 +5904,10 @@ async def api_health_deep(
     ) else "missing_env"
     checks["whatsapp_access_token"] = "ok" if WHATSAPP_ACCESS_TOKEN else "missing"
     checks["product_matcher_enabled"] = "ok" if PRODUCT_MATCHER_ENABLED else "disabled"
+    checks["product_matcher_local_enabled"] = "ok" if PRODUCT_MATCHER_LOCAL_ENABLED else "disabled"
+    checks["product_matcher_local_catalog_rows_cached"] = len(
+        PRODUCT_MATCHER_LOCAL_CATALOG_CACHE.get("rows", []) if isinstance(PRODUCT_MATCHER_LOCAL_CATALOG_CACHE, dict) else []
+    )
     checks["product_matcher_url_count"] = len(PRODUCT_MATCHER_API_URLS)
     if PRODUCT_MATCHER_ENABLED and PRODUCT_MATCHER_API_URLS:
         matcher_url = product_matcher_health_url(PRODUCT_MATCHER_API_URLS[0])
@@ -6200,12 +6098,7 @@ async def list_operators_v2(
             if not allowed:
                 return {"status": "ok", "data": []}
             query = query.in_("business_id", allowed)
-        query_result = await run_blocking_io(
-            query.execute,
-            timeout=18,
-            label="conversations query",
-        )
-        rows = (query_result.data or []) if query_result else []
+        rows = query.execute().data or []
         return {
             "status": "ok",
             "data": [
@@ -6509,64 +6402,29 @@ async def get_conversations_v2(
         )
         if include_raw:
             fields = f"{fields},raw_payload"
+        query = supabase.table("inbox_messages").select(fields)
         if clean_business_id:
             if not can_access_business(access, clean_business_id):
                 return {"status": "ok", "count": 0, "data": []}
+            query = query.eq("business_id", clean_business_id)
         elif not access.get("is_admin"):
             allowed = access.get("business_ids") or []
             if not allowed:
                 return {"status": "ok", "count": 0, "data": []}
+            query = query.in_("business_id", allowed)
 
-        def build_base_query():
-            q = supabase.table("inbox_messages").select(fields)
-            if clean_business_id:
-                q = q.eq("business_id", clean_business_id)
-            elif not access.get("is_admin"):
-                q = q.in_("business_id", access.get("business_ids") or [])
-            if platform != "all":
-                q = q.eq("platform", platform)
-            return q
+        if platform != "all":
+            query = query.eq("platform", platform)
 
         if fast:
-            # Fast mode is used by the inbox poller; keep it lightweight but large enough
-            # to avoid hiding older active conversations.
             recent_cutoff = (datetime.utcnow() - timedelta(days=120)).strftime("%Y-%m-%dT00:00:00Z")
-            rows = []
-            page_size = 250
-            max_scan_rows = 2500
-            for offset in range(0, max_scan_rows, page_size):
-                page = (
-                    build_base_query()
-                    .gte("created_at", recent_cutoff)
-                    .order("created_at", desc=True)
-                    .range(offset, offset + page_size - 1)
-                    .execute()
-                    .data
-                    or []
-                )
-                if not page:
-                    break
-                rows.extend(page)
-                if len(page) < page_size:
-                    break
+            query = query.gte("created_at", recent_cutoff).limit(80)
         else:
-            rows = []
-            page_size = 450
-            max_scan_rows = 5400
-            for offset in range(0, max_scan_rows, page_size):
-                page = (
-                    build_base_query()
-                    .order("created_at", desc=True)
-                    .range(offset, offset + page_size - 1)
-                    .execute()
-                    .data
-                    or []
-                )
-                if not page:
-                    break
-                rows.extend(page)
-                if len(page) < page_size:
-                    break
+            query = query.limit(450)
+
+        query = query.order("created_at", desc=True)
+
+        rows = query.execute().data or []
 
         conversations_map = {}
         for row in rows:
@@ -6633,12 +6491,6 @@ async def get_conversations_v2(
                     _conversations_cache.pop(key, None)
         return response
 
-    except TimeoutError as e:
-        log("Conversations query timeout", str(e))
-        return JSONResponse(
-            {"status": "error", "message": str(e)},
-            status_code=504
-        )
     except Exception as e:
         log("Error fetching conversations", str(e))
         return JSONResponse(
@@ -7326,1155 +7178,6 @@ async def get_conversation_details_v2(
             {"status": "error", "message": str(e)},
             status_code=500
         )
-
-
-def _lang_copy(lang: str, en: str, uz: str, ru: str) -> str:
-    value = normalize_id(lang).lower()
-    if value.startswith("uz"):
-        return uz
-    if value.startswith("ru"):
-        return ru
-    return en
-
-
-def _has_any_term(text: str, terms: list[str]) -> bool:
-    lowered = normalize_id(text).lower()
-    if not lowered:
-        return False
-    return any(term in lowered for term in terms)
-
-
-def _is_instagram_story_reply_row(row: dict) -> bool:
-    raw = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
-    message = raw.get("message") if isinstance(raw.get("message"), dict) else {}
-    if message.get("is_story_reply") or message.get("story"):
-        return True
-    if raw.get("is_story_reply") or raw.get("story"):
-        return True
-    attachments = raw.get("attachments") if isinstance(raw.get("attachments"), list) else []
-    for item in attachments:
-        if not isinstance(item, dict):
-            continue
-        if normalize_id(item.get("type")).lower() in {"ig_story", "story_mention", "story"}:
-            return True
-    return False
-
-
-def _instagram_question_theme(text: str) -> str:
-    lowered = normalize_id(text).lower()
-    if not lowered:
-        return ""
-    if _has_any_term(lowered, ["price", "narx", "qancha", "цена", "сколько"]):
-        return "price"
-    if _has_any_term(lowered, ["delivery", "dostavka", "yetkaz", "карго", "доставка"]):
-        return "delivery"
-    if _has_any_term(lowered, ["wholesale", "optom", "ulgurji", "оптом"]):
-        return "wholesale"
-    if _has_any_term(lowered, ["size", "razmer", "o'lcham", "размер"]):
-        return "size"
-    if _has_any_term(lowered, ["quality", "sifat", "качество", "материал"]):
-        return "quality"
-    if _has_any_term(lowered, ["catalog", "katalog", "каталог", "model", "модель"]):
-        return "catalog"
-    return "general"
-
-
-def _instagram_product_interest(text: str) -> str:
-    lowered = normalize_id(text).lower()
-    if not lowered:
-        return ""
-    mapping = [
-        ("xalat", ["xalat", "халат"]),
-        ("pijama", ["pijama", "пижам", "pijam"]),
-        ("sumka", ["sumka", "сумка", "bag"]),
-        ("dress", ["dress", "ko'ylak", "плать", "kuylak"]),
-        ("set", ["komplekt", "set", "набор"]),
-    ]
-    for label, terms in mapping:
-        if _has_any_term(lowered, terms):
-            return label
-    return ""
-
-
-def _safe_int(value, default: int = 0) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return default
-
-
-def _parse_instagram_timestamp(value: str) -> Optional[datetime]:
-    text = normalize_id(value)
-    if not text:
-        return None
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except Exception:
-        pass
-    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S%z"):
-        try:
-            return datetime.strptime(text, fmt)
-        except Exception:
-            continue
-    return None
-
-
-def _graph_get_json(url: str, access_token: str, params: dict = None, timeout: int = 30) -> tuple[bool, dict]:
-    query = dict(params or {})
-    query["access_token"] = access_token
-    try:
-        res = requests.get(url, params=query, timeout=timeout)
-        body = safe_json(res)
-        if not isinstance(body, dict):
-            body = {"raw": body}
-        if not res.ok:
-            body.setdefault("error", {"message": f"Graph API request failed with HTTP {res.status_code}"})
-        return res.ok, body
-    except Exception as exc:
-        return False, {"error": {"message": str(exc)}}
-
-
-def _graph_paginated_get(
-    start_url: str,
-    access_token: str,
-    params: dict = None,
-    max_items: int = 120,
-    max_pages: int = 8,
-) -> tuple[list[dict], list[str]]:
-    url = start_url
-    query = dict(params or {})
-    items: list[dict] = []
-    errors: list[str] = []
-
-    for _ in range(max_pages):
-        ok, body = _graph_get_json(url, access_token, query if url == start_url else None)
-        if not ok:
-            error_message = normalize_id((((body or {}).get("error") or {}).get("message")) or "Graph API request failed")
-            if error_message:
-                errors.append(error_message)
-            break
-
-        data = body.get("data") if isinstance(body, dict) else []
-        if isinstance(data, list):
-            for row in data:
-                if isinstance(row, dict):
-                    items.append(row)
-                if len(items) >= max_items:
-                    break
-        if len(items) >= max_items:
-            break
-
-        paging = body.get("paging") if isinstance(body, dict) else {}
-        next_url = normalize_id((paging or {}).get("next"))
-        if not next_url:
-            break
-        url = next_url
-        query = {}
-
-    return items[:max_items], errors
-
-
-def _resolve_instagram_account_id_for_analysis(business: dict, access_token: str) -> tuple[str, dict]:
-    current = normalize_id((business or {}).get("instagram_business_id"))
-    if current and not current.startswith("whatsapp_"):
-        return current, {"source": "business.instagram_business_id", "id": current}
-
-    page_id = normalize_id((business or {}).get("facebook_page_id"))
-    if page_id and access_token:
-        ok, body = _graph_get_json(
-            f"{GRAPH_FACEBOOK}/{page_id}",
-            access_token,
-            {"fields": "instagram_business_account{id,username}"},
-        )
-        if ok:
-            ig = (body.get("instagram_business_account") or {}) if isinstance(body, dict) else {}
-            account_id = normalize_id(ig.get("id"))
-            if account_id:
-                return account_id, {
-                    "source": "facebook_page_lookup",
-                    "id": account_id,
-                    "username": normalize_id(ig.get("username")),
-                }
-    return "", {"source": "not_resolved"}
-
-
-def fetch_instagram_live_snapshot(business: dict, days: int = 30) -> dict:
-    access_token = normalize_id(get_business_access_token(business))
-    if not access_token:
-        raise ValueError("Instagram access token is missing. Reconnect the Instagram account.")
-
-    account_id, account_meta = _resolve_instagram_account_id_for_analysis(business, access_token)
-    if not account_id:
-        raise ValueError("Could not resolve Instagram professional account ID from connected business.")
-
-    safe_days = max(7, min(int(days or 30), 120))
-    now_utc = datetime.utcnow()
-    since_dt = now_utc - timedelta(days=safe_days)
-    since_unix = int(since_dt.timestamp())
-
-    profile_fields = "id,username,name,biography,followers_count,follows_count,media_count,website,profile_picture_url"
-    ok_profile, profile_body = _graph_get_json(
-        f"{GRAPH_FACEBOOK}/{account_id}",
-        access_token,
-        {"fields": profile_fields},
-    )
-    if not ok_profile:
-        error_message = normalize_id((((profile_body or {}).get("error") or {}).get("message")) or "Could not fetch Instagram profile")
-        raise ValueError(error_message or "Could not fetch Instagram profile")
-
-    media_fields = "id,caption,media_type,media_product_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count"
-    media, media_errors = _graph_paginated_get(
-        f"{GRAPH_FACEBOOK}/{account_id}/media",
-        access_token,
-        {"fields": media_fields, "limit": 25, "since": since_unix},
-        max_items=200,
-        max_pages=10,
-    )
-
-    filtered_media: list[dict] = []
-    for item in media:
-        ts = _parse_instagram_timestamp(item.get("timestamp"))
-        if ts and ts < since_dt:
-            continue
-        filtered_media.append(item)
-
-    comment_errors: list[str] = []
-    media_by_comments = sorted(
-        filtered_media,
-        key=lambda row: _safe_int(row.get("comments_count"), 0),
-        reverse=True,
-    )[:30]
-    all_comments: list[dict] = []
-    for media_item in media_by_comments:
-        media_id = normalize_id(media_item.get("id"))
-        if not media_id:
-            continue
-        comments, errors = _graph_paginated_get(
-            f"{GRAPH_FACEBOOK}/{media_id}/comments",
-            access_token,
-            {"fields": "id,text,timestamp,username,like_count,replies_count", "limit": 20},
-            max_items=80,
-            max_pages=4,
-        )
-        comment_errors.extend(errors)
-        for row in comments:
-            if not isinstance(row, dict):
-                continue
-            row["media_id"] = media_id
-            row["media_type"] = normalize_id(media_item.get("media_type"))
-            row["media_product_type"] = normalize_id(media_item.get("media_product_type"))
-            all_comments.append(row)
-
-    stories, story_errors = _graph_paginated_get(
-        f"{GRAPH_FACEBOOK}/{account_id}/stories",
-        access_token,
-        {"fields": "id,media_type,media_url,permalink,timestamp", "limit": 25},
-        max_items=50,
-        max_pages=3,
-    )
-
-    account_insights_ok, account_insights_body = _graph_get_json(
-        f"{GRAPH_FACEBOOK}/{account_id}/insights",
-        access_token,
-        {"metric": "impressions,reach,profile_views", "period": "day"},
-    )
-
-    insights = []
-    insight_errors: list[str] = []
-    if account_insights_ok and isinstance(account_insights_body, dict):
-        insights = account_insights_body.get("data") if isinstance(account_insights_body.get("data"), list) else []
-    else:
-        msg = normalize_id((((account_insights_body or {}).get("error") or {}).get("message")))
-        if msg:
-            insight_errors.append(msg)
-
-    return {
-        "source": "instagram_graph_api",
-        "fetched_at": now_utc.isoformat() + "Z",
-        "range_days": safe_days,
-        "account_meta": account_meta,
-        "profile": profile_body if isinstance(profile_body, dict) else {},
-        "media": filtered_media,
-        "stories": stories,
-        "comments": all_comments,
-        "account_insights": insights,
-        "fetch_errors": {
-            "media": media_errors,
-            "comments": comment_errors[:8],
-            "stories": story_errors,
-            "insights": insight_errors,
-        },
-        "api_scope_notes": {
-            "highlights_accessible": False,
-            "highlights_note": "Instagram Graph API does not provide highlights directly. Use Stories and profile checks.",
-        },
-    }
-
-
-def _extract_metric_total_from_insights(insights_rows: list[dict], metric_name: str) -> int:
-    total = 0
-    for row in insights_rows or []:
-        if normalize_id(row.get("name")) != metric_name:
-            continue
-        values = row.get("values") if isinstance(row.get("values"), list) else []
-        for value in values:
-            if isinstance(value, dict):
-                total += _safe_int(value.get("value"), 0)
-    return total
-
-
-def build_instagram_growth_analysis_from_live(snapshot: dict, business: dict, days: int = 30) -> dict:
-    lang = normalize_id((business or {}).get("language")).lower() or "uz"
-    business_name = normalize_id((business or {}).get("business_name")) or "Business"
-    safe_days = max(7, min(int(days or 30), 120))
-
-    profile = snapshot.get("profile") if isinstance(snapshot.get("profile"), dict) else {}
-    media = snapshot.get("media") if isinstance(snapshot.get("media"), list) else []
-    stories = snapshot.get("stories") if isinstance(snapshot.get("stories"), list) else []
-    comments = snapshot.get("comments") if isinstance(snapshot.get("comments"), list) else []
-    account_insights = snapshot.get("account_insights") if isinstance(snapshot.get("account_insights"), list) else []
-    fetch_errors = snapshot.get("fetch_errors") if isinstance(snapshot.get("fetch_errors"), dict) else {}
-
-    captions = [normalize_id(item.get("caption")) for item in media if normalize_id(item.get("caption"))]
-    cta_terms = ["direkt", "direct", "dm", "message", "yozing", "write", "contact", "katalog", "catalog"]
-    cta_hits = sum(1 for caption in captions if _has_any_term(caption, cta_terms))
-    cta_rate = cta_hits / max(1, len(captions))
-
-    hook_hits = 0
-    for caption in captions:
-        first_chunk = caption[:90]
-        if "?" in first_chunk or re.search(r"\d", first_chunk) or _has_any_term(first_chunk, ["how", "qanday", "nima", "necha", "сколько", "как"]):
-            hook_hits += 1
-    hook_rate = hook_hits / max(1, len(captions))
-
-    reels = [
-        row for row in media
-        if "reel" in normalize_id(row.get("media_product_type")).lower()
-        or "video" in normalize_id(row.get("media_type")).lower()
-    ]
-    reels_count = len(reels)
-    post_count = len(media)
-    reel_share = reels_count / max(1, post_count)
-
-    followers = _safe_int(profile.get("followers_count"), 0)
-    total_likes = sum(_safe_int(item.get("like_count"), 0) for item in media)
-    total_comment_counts = sum(_safe_int(item.get("comments_count"), 0) for item in media)
-    avg_engagement_rate = ((total_likes + total_comment_counts) / max(1, followers * max(1, post_count))) * 100
-
-    question_counts = {"price": 0, "delivery": 0, "wholesale": 0, "size": 0, "quality": 0, "catalog": 0, "general": 0}
-    product_counts = {}
-    for item in comments:
-        text = normalize_id(item.get("text"))
-        if not text:
-            continue
-        if "?" in text or _has_any_term(text, ["narx", "price", "qancha", "delivery", "dostavka", "wholesale", "ulgurji", "optom", "katalog", "catalog"]):
-            theme = _instagram_question_theme(text)
-            question_counts[theme] = question_counts.get(theme, 0) + 1
-        product_label = _instagram_product_interest(text)
-        if product_label:
-            product_counts[product_label] = product_counts.get(product_label, 0) + 1
-
-    top_product = ""
-    if product_counts:
-        top_product = sorted(product_counts.items(), key=lambda item: item[1], reverse=True)[0][0]
-
-    profile_score = 0
-    if normalize_id(profile.get("username")):
-        profile_score += 4
-    if normalize_id(profile.get("biography")):
-        profile_score += 4
-    if normalize_id(profile.get("website")):
-        profile_score += 3
-    if followers > 0:
-        profile_score += 4
-    if normalize_id((business or {}).get("sales_phone")):
-        profile_score += 2
-    if normalize_id((business or {}).get("catalog_link")):
-        profile_score += 3
-    profile_score = max(0, min(20, profile_score))
-
-    content_score = 0
-    content_score += min(9, post_count)
-    content_score += 6 if reel_share >= 0.4 else (4 if reel_share >= 0.2 else 2)
-    content_score += min(5, len(stories))
-    content_score += 5 if hook_rate >= 0.5 else (3 if hook_rate >= 0.25 else 1)
-    content_score = max(0, min(25, content_score))
-
-    caption_cta_score = max(0, min(20, int(round(cta_rate * 20))))
-
-    engagement_score = 0
-    if avg_engagement_rate >= 4:
-        engagement_score += 10
-    elif avg_engagement_rate >= 2:
-        engagement_score += 8
-    elif avg_engagement_rate >= 1:
-        engagement_score += 6
-    else:
-        engagement_score += 3
-    engagement_score += min(5, len(comments) // 10)
-    engagement_score += min(5, _extract_metric_total_from_insights(account_insights, "profile_views") // 100)
-    engagement_score = max(0, min(20, engagement_score))
-
-    conversion_signals = question_counts.get("price", 0) + question_counts.get("catalog", 0) + question_counts.get("wholesale", 0)
-    conversion_score = 0
-    conversion_score += min(6, conversion_signals)
-    conversion_score += min(5, int(round(cta_rate * 5)))
-    conversion_score += 2 if top_product else 0
-    conversion_score += 2 if normalize_id((business or {}).get("catalog_link")) else 0
-    conversion_score = max(0, min(15, conversion_score))
-
-    account_score = max(0, min(100, profile_score + content_score + caption_cta_score + engagement_score + conversion_score))
-
-    problems = []
-    if hook_rate < 0.35:
-        problems.append(_lang_copy(lang, "Reels/posts need stronger first-3-second hooks.", "Reel/postlarda birinchi 3 soniya hooklari kuchliroq bo'lishi kerak.", "Reels/постам нужны более сильные hooks в первые 3 секунды."))
-    if cta_rate < 0.4:
-        problems.append(_lang_copy(lang, "Captions are not consistently pushing DM conversion.", "Captionlar doimiy ravishda DM konversiyasiga undamayapti.", "Caption недостаточно стабильно ведут к конверсии в DM."))
-    if len(stories) < 3:
-        problems.append(_lang_copy(lang, "Story activity is low this period.", "Bu davrda story faolligi past.", "Активность сторис в этом периоде низкая."))
-    if question_counts.get("wholesale", 0) >= 3:
-        problems.append(_lang_copy(lang, "Wholesale expectations need clearer content explanation.", "Ulgurji kutilmalarni kontentda aniqroq tushuntirish kerak.", "Нужно яснее объяснять условия опта в контенте."))
-    if not problems:
-        problems.append(_lang_copy(lang, "Performance is stable; focus on stronger conversion CTA and scaling winning content.", "Natija barqaror; konversiya CTA va ishlagan kontentni masshtablashga urg'u bering.", "Результат стабилен; усилите CTA на конверсию и масштабируйте лучший контент."))
-
-    promote_product = top_product or _lang_copy(lang, "best seller", "eng talabgir model", "самая востребованная модель")
-    faq_sorted = sorted(question_counts.items(), key=lambda item: item[1], reverse=True)
-    common_questions = []
-    theme_copy = {
-        "price": _lang_copy(lang, "Price and discounts", "Narx va chegirmalar", "Цена и скидки"),
-        "delivery": _lang_copy(lang, "Delivery and cargo timing", "Yetkazib berish va cargo muddatlari", "Сроки доставки и карго"),
-        "wholesale": _lang_copy(lang, "Wholesale terms", "Ulgurji shartlar", "Условия опта"),
-        "size": _lang_copy(lang, "Size and fit", "Razmer va moslik", "Размер и посадка"),
-        "quality": _lang_copy(lang, "Quality and material proof", "Sifat va material isboti", "Качество и материал"),
-        "catalog": _lang_copy(lang, "Catalog request", "Katalog so'rovi", "Запрос каталога"),
-        "general": _lang_copy(lang, "General product details", "Umumiy mahsulot tafsilotlari", "Общие детали о товаре"),
-    }
-    for key, value in faq_sorted:
-        if value <= 0:
-            continue
-        common_questions.append({"theme": theme_copy.get(key, key), "count": value})
-        if len(common_questions) >= 5:
-            break
-
-    analysis_scope = _lang_copy(
-        lang,
-        "Live analysis from Instagram Graph API (profile, media, captions, comments, stories/insights when accessible). Highlights are limited by API.",
-        "Tahlil Instagram Graph API orqali live olindi (profil, media, caption, komment, stories/insights imkon bo'lsa). Highlights APIda cheklangan.",
-        "Анализ получен в live-режиме через Instagram Graph API (профиль, медиа, caption, комментарии, stories/insights при доступе). Highlights ограничены API.",
-    )
-
-    return {
-        "dashboard_section_name": "Instagram Growth Analyzer",
-        "business_name": business_name,
-        "date_range_days": safe_days,
-        "generated_at": datetime.utcnow().isoformat() + "Z",
-        "data_source": "instagram_graph_api_live",
-        "fetched_at": normalize_id(snapshot.get("fetched_at")),
-        "account_score": int(account_score),
-        "category_scores": {
-            "profile_quality": int(profile_score),
-            "content_quality": int(content_score),
-            "caption_cta_strength": int(caption_cta_score),
-            "engagement_health": int(engagement_score),
-            "conversion_readiness": int(conversion_score),
-        },
-        "problems": problems,
-        "recommended_next_content": [
-            {"type": "reel", "idea": _lang_copy(lang, f"What is inside 1 package of {promote_product}?", f"1 qopda {promote_product}dan nimalar bor?", f"Что входит в 1 упаковку {promote_product}?")},
-            {"type": "story_poll", "idea": _lang_copy(lang, "Poll: Which model do you like more?", "So'rovnoma: Qaysi model ko'proq yoqdi?", "Опрос: Какая модель нравится больше?")},
-            {"type": "post", "idea": _lang_copy(lang, "Factory/product quality proof", "Factory/sifat isboti", "Подтверждение качества фабрики/товара")},
-            {"type": "reel", "idea": _lang_copy(lang, "Cargo delivery explanation", "Cargo yetkazib berish tushuntiruvi", "Объяснение карго-доставки")},
-            {"type": "story_cta", "idea": _lang_copy(lang, "Need catalog? Write in DM.", "Katalog kerakmi? Direktga yozing.", "Нужен каталог? Напишите в DM.")},
-        ],
-        "product_to_promote_this_week": promote_product,
-        "first_3_seconds_hooks": [
-            _lang_copy(lang, "Show product result in second 1, then package detail in second 2.", "1-soniyada natija, 2-soniyada qadoq detali ko'rsating.", "В 1-й секунде результат, во 2-й детали упаковки."),
-            _lang_copy(lang, "Use a direct subtitle question in first frame.", "Birinchi freymda to'g'ridan-to'g'ri savol subtitle ishlating.", "Используйте прямой вопрос в субтитре с первого кадра."),
-            _lang_copy(lang, "Finish with one clear DM CTA.", "Oxirini bitta aniq DM CTA bilan tugating.", "Завершайте одним четким CTA в DM."),
-        ],
-        "story_ideas": [
-            _lang_copy(lang, "Poll: favorite model", "Poll: sevimli model", "Опрос: любимая модель"),
-            _lang_copy(lang, "Q&A: delivery + wholesale", "Q&A: yetkazib berish + ulgurji", "Q&A: доставка + опт"),
-            _lang_copy(lang, "Customer reaction screenshot + CTA", "Mijoz fikri screenshot + CTA", "Скрин отзыва клиента + CTA"),
-        ],
-        "common_customer_questions": common_questions,
-        "content_gaps": [
-            _lang_copy(lang, "Need more hook-driven reels.", "Hookga asoslangan reel soni ko'paytirilsin.", "Нужно больше reels с сильным hook."),
-            _lang_copy(lang, "Need consistent CTA in captions.", "Captionlarda CTA izchil bo'lishi kerak.", "Нужен стабильный CTA в caption."),
-            _lang_copy(lang, "Need more interactive stories.", "Interaktiv storylar ko'paytirilsin.", "Нужно больше интерактивных сторис."),
-        ],
-        "weekly_content_plan": [
-            _lang_copy(lang, "Mon: Reel with strong opening hook + DM CTA.", "Du: kuchli opening hookli reel + DM CTA.", "Пн: Reel с сильным opening hook + CTA в DM."),
-            _lang_copy(lang, "Tue: Story poll and quick response sticker.", "Se: Story poll va tezkor javob stikeri.", "Вт: Опрос в сторис и стикер быстрых ответов."),
-            _lang_copy(lang, "Wed: Quality proof post.", "Cho: sifat isboti posti.", "Ср: Пост с доказательством качества."),
-            _lang_copy(lang, "Thu: Delivery process reel.", "Pa: yetkazib berish jarayoni reeli.", "Чт: Reel про процесс доставки."),
-            _lang_copy(lang, "Fri: FAQ carousel from comment questions.", "Ju: komment savollaridan FAQ karusel.", "Пт: FAQ-карусель из вопросов в комментариях."),
-        ],
-        "monthly_content_plan": [
-            _lang_copy(lang, "Week 1: Product and visual trust.", "1-hafta: mahsulot va vizual ishonch.", "1 неделя: доверие к товару и визуалу."),
-            _lang_copy(lang, "Week 2: Pricing and wholesale clarity.", "2-hafta: narx va ulgurji aniqlik.", "2 неделя: ясность цен и опта."),
-            _lang_copy(lang, "Week 3: Delivery and social proof.", "3-hafta: yetkazib berish va social proof.", "3 неделя: доставка и социальное доказательство."),
-            _lang_copy(lang, "Week 4: Conversion CTA campaign.", "4-hafta: konversiya CTA kampaniyasi.", "4 неделя: кампания CTA на конверсию."),
-        ],
-        "account_improvement_tasks": [
-            _lang_copy(lang, "Prepare 10 caption CTA templates.", "10 ta caption CTA shabloni tayyorlang.", "Подготовьте 10 шаблонов CTA для caption."),
-            _lang_copy(lang, "Prepare 5 first-3-second hook templates.", "5 ta birinchi-3-soniya hook shabloni tayyorlang.", "Подготовьте 5 шаблонов hooks на первые 3 секунды."),
-            _lang_copy(lang, "Publish 3+ interactive stories per week.", "Haftasiga kamida 3 ta interaktiv story chiqaring.", "Публикуйте минимум 3 интерактивные сторис в неделю."),
-        ],
-        "analysis_scope": analysis_scope,
-        "metrics": {
-            "profile_followers": followers,
-            "profile_media_count": _safe_int(profile.get("media_count"), 0),
-            "fetched_media_count": post_count,
-            "fetched_reels_count": reels_count,
-            "fetched_story_count": len(stories),
-            "fetched_comments_count": len(comments),
-            "caption_cta_rate": round(cta_rate, 3),
-            "hook_rate": round(hook_rate, 3),
-            "avg_engagement_rate_percent": round(avg_engagement_rate, 3),
-            "impressions_24h_total": _extract_metric_total_from_insights(account_insights, "impressions"),
-            "reach_24h_total": _extract_metric_total_from_insights(account_insights, "reach"),
-            "profile_views_24h_total": _extract_metric_total_from_insights(account_insights, "profile_views"),
-        },
-        "live_fetch_summary": {
-            "account_id": normalize_id(profile.get("id")) or normalize_id((snapshot.get("account_meta") or {}).get("id")),
-            "username": normalize_id(profile.get("username")) or normalize_id((snapshot.get("account_meta") or {}).get("username")),
-            "fetch_errors": fetch_errors,
-            "api_scope_notes": snapshot.get("api_scope_notes") or {},
-        },
-    }
-
-
-def save_instagram_growth_report_history(business_id: str, report: dict, updated_by: str = ""):
-    business_id = normalize_id(business_id)
-    if not business_id or not isinstance(report, dict):
-        return
-
-    state = get_workspace_state(business_id)
-    existing = state.get("instagram_growth_reports") if isinstance(state, dict) else {}
-    items = []
-    if isinstance(existing, dict):
-        items = existing.get("items") if isinstance(existing.get("items"), list) else []
-    elif isinstance(existing, list):
-        items = existing
-
-    entry = {
-        "generated_at": report.get("generated_at"),
-        "fetched_at": report.get("fetched_at"),
-        "date_range_days": report.get("date_range_days"),
-        "account_score": report.get("account_score"),
-        "data_source": report.get("data_source", "instagram_graph_api_live"),
-        "business_name": report.get("business_name", ""),
-        "metrics": report.get("metrics", {}),
-        "summary": {
-            "problems": (report.get("problems") or [])[:4],
-            "product_to_promote_this_week": report.get("product_to_promote_this_week", ""),
-        },
-        "report": report,
-    }
-    next_items = [entry] + [item for item in items if isinstance(item, dict)]
-    next_items = next_items[:30]
-
-    upsert_workspace_state(
-        business_id=business_id,
-        state_key="instagram_growth_latest",
-        state_value=entry,
-        updated_by=updated_by,
-    )
-    upsert_workspace_state(
-        business_id=business_id,
-        state_key="instagram_growth_reports",
-        state_value={"items": next_items},
-        updated_by=updated_by,
-    )
-
-
-def build_instagram_growth_analysis(rows: list[dict], business: dict, days: int = 30) -> dict:
-    lang = normalize_id((business or {}).get("language")).lower() or "uz"
-    business_name = normalize_id((business or {}).get("business_name")) or "Business"
-    safe_days = max(7, min(int(days or 30), 120))
-
-    if not rows:
-        return {
-            "dashboard_section_name": "Instagram Growth Analyzer",
-            "business_name": business_name,
-            "date_range_days": safe_days,
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-            "account_score": 52,
-            "category_scores": {
-                "profile_quality": 12,
-                "content_quality": 10,
-                "caption_cta_strength": 8,
-                "engagement_health": 12,
-                "conversion_readiness": 10,
-            },
-            "problems": [
-                _lang_copy(
-                    lang,
-                    "Not enough recent Instagram data to evaluate reels/hooks.",
-                    "Reels/hooklarni baholash uchun oxirgi ma'lumotlar yetarli emas.",
-                    "Недостаточно данных для оценки reels и первых секунд.",
-                ),
-                _lang_copy(
-                    lang,
-                    "CTA quality is unknown because outbound Instagram copy is limited.",
-                    "CTA sifati noaniq, chunki Instagram outbound matnlar kam.",
-                    "Сила CTA неясна: мало исходящих текстов Instagram.",
-                ),
-            ],
-            "recommended_next_content": [
-                {"type": "reel", "idea": "1 qopda qanday mahsulotlar bor?"},
-                {"type": "story_poll", "idea": "Qaysi model yoqdi: xalat yoki pijama?"},
-                {"type": "post", "idea": "Factory / product quality proof"},
-                {"type": "story_cta", "idea": "Katalog kerakmi? Direktga yozing."},
-            ],
-            "product_to_promote_this_week": _lang_copy(lang, "Best seller set", "Eng ko'p so'raladigan set", "Самый часто спрашиваемый комплект"),
-            "first_3_seconds_hooks": [
-                _lang_copy(lang, "Show result first, then explain price and quality.", "Natijani birinchi ko'rsating, keyin narx va sifatni ayting.", "Сначала покажите результат, затем цену и качество."),
-                _lang_copy(lang, "Use close-up in second 1 and subtitle in second 2.", "1-soniyada close-up, 2-soniyada subtitle qo'ying.", "Крупный план в 1-й секунде, субтитр во 2-й."),
-            ],
-            "story_ideas": [
-                _lang_copy(lang, "Story poll about favorite model", "Model bo'yicha story so'rovnoma", "Опрос в сторис по любимой модели"),
-                _lang_copy(lang, "Story Q&A: delivery and wholesale rules", "Yetkazib berish va ulgurji qoidalar bo'yicha Q&A", "Q&A в сторис по доставке и опту"),
-            ],
-            "common_customer_questions": [],
-            "content_gaps": [
-                _lang_copy(lang, "Need stronger reel hooks", "Reels uchun kuchliroq hook kerak", "Нужны более сильные hooks для reels"),
-                _lang_copy(lang, "Need regular story reply collection", "Story reply yig'ishni muntazam qilish kerak", "Нужно регулярно собирать ответы в сторис"),
-            ],
-            "weekly_content_plan": [
-                _lang_copy(lang, "Mon: Reel with product close-up and clear CTA", "Du: Mahsulot close-up reel + aniq CTA", "Пн: Reel с крупным планом и четким CTA"),
-                _lang_copy(lang, "Wed: Story poll + follow-up story", "Chor: Story so'rovnoma + follow-up", "Ср: Опрос в сторис + follow-up"),
-                _lang_copy(lang, "Fri: Quality proof post with caption CTA", "Juma: Sifat isboti posti + CTA", "Пт: Пост с доказательством качества + CTA"),
-            ],
-            "monthly_content_plan": [
-                _lang_copy(lang, "Week 1: Product showcase reels", "1-hafta: mahsulot showcase reels", "1 неделя: reels-витрина товаров"),
-                _lang_copy(lang, "Week 2: Delivery + trust content", "2-hafta: yetkazib berish + ishonch kontenti", "2 неделя: доставка + доверие"),
-                _lang_copy(lang, "Week 3: FAQ-driven content", "3-hafta: FAQ asosida kontent", "3 неделя: контент по FAQ"),
-                _lang_copy(lang, "Week 4: Offer + conversion push", "4-hafta: taklif + konversiya push", "4 неделя: оффер + конверсия"),
-            ],
-            "account_improvement_tasks": [
-                _lang_copy(lang, "Create 5 reusable first-3-second reel hooks.", "5 ta birinchi-3-soniya reel hook tayyorlang.", "Подготовьте 5 готовых hooks для первых 3 секунд."),
-                _lang_copy(lang, "Add CTA template at the end of every caption.", "Har caption oxiriga CTA shablon qo'shing.", "Добавляйте CTA-шаблон в конец каждого caption."),
-            ],
-            "analysis_scope": _lang_copy(
-                lang,
-                "Based on CRM message history. Direct profile elements (bio/logo/highlights) should be reviewed manually in Instagram app.",
-                "Tahlil CRM xabarlariga asoslangan. Bio/logo/highlights kabi profil elementlarini Instagram ilovasida qo'lda tekshirish kerak.",
-                "Анализ основан на истории CRM. Элементы профиля (bio/logo/highlights) нужно проверить вручную в Instagram.",
-            ),
-            "metrics": {"total_instagram_messages": 0},
-        }
-
-    inbound_rows = [row for row in rows if normalize_id(row.get("direction")).lower() == "inbound"]
-    outbound_rows = [row for row in rows if normalize_id(row.get("direction")).lower() == "outbound"]
-    comment_inbound = [
-        row for row in inbound_rows
-        if "comment" in standard_channel("instagram", row.get("channel")).lower()
-    ]
-    dm_inbound = [
-        row for row in inbound_rows
-        if standard_channel("instagram", row.get("channel")) in {"dm", "instagram_dm", "instagram_private", ""}
-    ]
-
-    outbound_texts = [normalize_id(row.get("content")) for row in outbound_rows if normalize_id(row.get("content"))]
-    inbound_texts = [normalize_id(row.get("content")) for row in inbound_rows if normalize_id(row.get("content"))]
-    story_reply_count = sum(1 for row in inbound_rows if _is_instagram_story_reply_row(row))
-
-    cta_terms = ["direkt", "direct", "dm", "message", "yozing", "write", "contact", "katalog", "catalog"]
-    cta_hits = sum(1 for text in outbound_texts if _has_any_term(text, cta_terms))
-    cta_rate = cta_hits / max(1, len(outbound_texts))
-
-    question_counts = {"price": 0, "delivery": 0, "wholesale": 0, "size": 0, "quality": 0, "catalog": 0, "general": 0}
-    product_counts = {}
-    wholesale_outbound_mentions = 0
-    for text in inbound_texts:
-        if "?" in text or _has_any_term(text, ["narx", "price", "qancha", "delivery", "dostavka", "wholesale", "optom", "ulgurji"]):
-            theme = _instagram_question_theme(text)
-            question_counts[theme] = question_counts.get(theme, 0) + 1
-        product_label = _instagram_product_interest(text)
-        if product_label:
-            product_counts[product_label] = product_counts.get(product_label, 0) + 1
-    for text in outbound_texts:
-        if _has_any_term(text, ["wholesale", "optom", "ulgurji", "оптом"]):
-            wholesale_outbound_mentions += 1
-
-    post_engagement = {}
-    for row in comment_inbound:
-        post_id = extract_instagram_comment_post_id(row)
-        if not post_id:
-            continue
-        info = post_engagement.setdefault(post_id, {"count": 0, "media_type": "", "sample": ""})
-        info["count"] += 1
-        media_type = normalize_id(
-            row.get("post_media_type")
-            or (row.get("raw_payload") or {}).get("post_media_type")
-        ).lower()
-        if media_type and not info["media_type"]:
-            info["media_type"] = media_type
-        if not info["sample"]:
-            info["sample"] = normalize_id(row.get("content"))[:120]
-
-    post_count = len(post_engagement)
-    reel_post_count = sum(
-        1 for item in post_engagement.values()
-        if "reel" in normalize_id(item.get("media_type")).lower()
-        or "video" in normalize_id(item.get("media_type")).lower()
-    )
-    reel_share = (reel_post_count / post_count) if post_count else 0.0
-
-    active_days = {
-        normalize_id(row.get("created_at"))[:10]
-        for row in rows
-        if normalize_id(row.get("created_at"))
-    }
-    active_day_count = len(active_days)
-
-    top_product = ""
-    if product_counts:
-        top_product = sorted(product_counts.items(), key=lambda item: item[1], reverse=True)[0][0]
-
-    profile_score = 0
-    if normalize_id((business or {}).get("business_name")):
-        profile_score += 4
-    if normalize_id((business or {}).get("catalog_link")):
-        profile_score += 4
-    if normalize_id((business or {}).get("sales_phone")):
-        profile_score += 3
-    if normalize_id((business or {}).get("products")) or normalize_id((business or {}).get("knowledge")):
-        profile_score += 4
-    if normalize_id((business or {}).get("faq")) or normalize_id((business or {}).get("delivery_info")):
-        profile_score += 3
-    if (business or {}).get("auto_reply_dms") is True:
-        profile_score += 1
-    if (business or {}).get("auto_reply_comments") is True:
-        profile_score += 1
-    profile_score = max(0, min(20, profile_score))
-
-    content_score = 0
-    content_score += min(8, post_count * 2)
-    if reel_share >= 0.45:
-        content_score += 7
-    elif reel_share >= 0.25:
-        content_score += 5
-    else:
-        content_score += 2
-    if story_reply_count >= 8:
-        content_score += 4
-    elif story_reply_count >= 3:
-        content_score += 2
-    if active_day_count >= 16:
-        content_score += 6
-    elif active_day_count >= 8:
-        content_score += 4
-    else:
-        content_score += 2
-    content_score = max(0, min(25, content_score))
-
-    caption_cta_score = max(0, min(20, int(round(cta_rate * 20))))
-
-    inbound_outbound_balance = len(outbound_rows) / max(1, len(inbound_rows))
-    engagement_score = 0
-    if 0.45 <= inbound_outbound_balance <= 1.6:
-        engagement_score += 8
-    elif 0.25 <= inbound_outbound_balance <= 2.2:
-        engagement_score += 6
-    else:
-        engagement_score += 3
-    engagement_score += min(6, story_reply_count)
-    engagement_score += min(6, sum(question_counts.values()) // 2)
-    engagement_score = max(0, min(20, engagement_score))
-
-    conversion_signals = question_counts.get("price", 0) + question_counts.get("catalog", 0) + question_counts.get("wholesale", 0)
-    conversion_score = 0
-    conversion_score += min(7, conversion_signals)
-    conversion_score += min(5, int(round(cta_rate * 5)))
-    if top_product:
-        conversion_score += 3
-    conversion_score = max(0, min(15, conversion_score))
-
-    account_score = profile_score + content_score + caption_cta_score + engagement_score + conversion_score
-    account_score = max(0, min(100, account_score))
-
-    problems = []
-    if reel_share < 0.25:
-        problems.append(_lang_copy(
-            lang,
-            "Reels do not have strong first 3 seconds.",
-            "Reels birinchi 3 soniyada kuchli hook bermayapti.",
-            "В reels нет сильного хука в первые 3 секунды.",
-        ))
-    if cta_rate < 0.35:
-        problems.append(_lang_copy(
-            lang,
-            "Captions do not push customers to DM.",
-            "Captionlar mijozni Direktga undamayapti.",
-            "Caption не подталкивает клиента написать в DM.",
-        ))
-    if story_reply_count < 3:
-        problems.append(_lang_copy(
-            lang,
-            "Stories are not collecting enough replies.",
-            "Stories yetarli reply yig'mayapti.",
-            "Stories собирают мало ответов.",
-        ))
-    if question_counts.get("wholesale", 0) >= 2 and wholesale_outbound_mentions == 0:
-        problems.append(_lang_copy(
-            lang,
-            "Wholesale rules are not explained clearly.",
-            "Ulgurji qoidalar kontentda aniq tushuntirilmagan.",
-            "Правила опта объяснены недостаточно ясно.",
-        ))
-    if not problems:
-        problems.append(_lang_copy(
-            lang,
-            "Keep improving CTA consistency and hook quality.",
-            "CTA izchilligi va hook sifatini doimiy kuchaytiring.",
-            "Продолжайте усиливать CTA и качество hooks.",
-        ))
-
-    promote_product = top_product or _lang_copy(lang, "best-seller set", "eng talab yuqori model", "самая востребованная модель")
-    faq_sorted = sorted(question_counts.items(), key=lambda item: item[1], reverse=True)
-    common_questions = []
-    theme_copy = {
-        "price": _lang_copy(lang, "Price and discounts", "Narx va chegirmalar", "Цена и скидки"),
-        "delivery": _lang_copy(lang, "Delivery time and cargo", "Yetkazib berish va cargo", "Сроки доставки и карго"),
-        "wholesale": _lang_copy(lang, "Wholesale minimum order", "Ulgurji minimal buyurtma", "Минимальный оптовый заказ"),
-        "size": _lang_copy(lang, "Size and fit", "Razmer va o'lcham", "Размер и посадка"),
-        "quality": _lang_copy(lang, "Quality proof", "Sifat isboti", "Подтверждение качества"),
-        "catalog": _lang_copy(lang, "Catalog request", "Katalog so'rovi", "Запрос каталога"),
-        "general": _lang_copy(lang, "General product details", "Umumiy mahsulot ma'lumoti", "Общие детали о товаре"),
-    }
-    for key, value in faq_sorted:
-        if value <= 0:
-            continue
-        common_questions.append({"theme": theme_copy.get(key, key), "count": value})
-        if len(common_questions) >= 5:
-            break
-
-    return {
-        "dashboard_section_name": "Instagram Growth Analyzer",
-        "business_name": business_name,
-        "date_range_days": safe_days,
-        "generated_at": datetime.utcnow().isoformat() + "Z",
-        "account_score": int(account_score),
-        "category_scores": {
-            "profile_quality": int(profile_score),
-            "content_quality": int(content_score),
-            "caption_cta_strength": int(caption_cta_score),
-            "engagement_health": int(engagement_score),
-            "conversion_readiness": int(conversion_score),
-        },
-        "problems": problems,
-        "recommended_next_content": [
-            {"type": "reel", "idea": _lang_copy(lang, f"What is inside 1 package of {promote_product}?", f"1 qopda {promote_product}dan nimalar bor?", f"Что входит в 1 упаковку {promote_product}?")},
-            {"type": "story_poll", "idea": _lang_copy(lang, "Poll: Which model do you like more?", "So'rovnoma: Qaysi model ko'proq yoqdi?", "Опрос: Какая модель нравится больше?")},
-            {"type": "post", "idea": _lang_copy(lang, "Factory/product quality proof post", "Factory/sifat isboti posti", "Пост с подтверждением качества фабрики/товара")},
-            {"type": "reel", "idea": _lang_copy(lang, "Cargo delivery explanation reel", "Cargo yetkazib berish tushuntirish reel", "Reel с объяснением карго-доставки")},
-            {"type": "story_cta", "idea": _lang_copy(lang, "Need catalog? Write in DM.", "Katalog kerakmi? Direktga yozing.", "Нужен каталог? Напишите в DM.")},
-        ],
-        "product_to_promote_this_week": promote_product,
-        "first_3_seconds_hooks": [
-            _lang_copy(lang, "Start with a close-up result shot, then show packaging in second 2.", "1-soniyada mahsulot close-up natijasi, 2-soniyada qadoqni ko'rsating.", "В 1-й секунде покажите крупный результат, во 2-й упаковку."),
-            _lang_copy(lang, "Use subtitle immediately: \"How much profit from 1 package?\"", "Darhol subtitle qo'ying: \"1 qopdan qancha foyda?\"", "Сразу дайте субтитр: «Сколько прибыли с 1 упаковки?»"),
-            _lang_copy(lang, "End with a clear CTA to DM for catalog.", "Oxirida aniq CTA: katalog uchun Direktga yozing.", "Закончите четким CTA: напишите в DM за каталогом."),
-        ],
-        "story_ideas": [
-            _lang_copy(lang, "Story poll on model preference", "Model tanlovi bo'yicha story poll", "Опрос в сторис по выбору модели"),
-            _lang_copy(lang, "Story Q&A: price + delivery", "Story Q&A: narx + yetkazib berish", "Сторис Q&A: цена + доставка"),
-            _lang_copy(lang, "Story: customer review screenshot + CTA", "Story: mijoz fikri screenshot + CTA", "Сторис: отзыв клиента + CTA"),
-        ],
-        "common_customer_questions": common_questions,
-        "content_gaps": [
-            _lang_copy(lang, "Need stronger reel hooks in first 3 seconds.", "Birinchi 3 soniyada kuchliroq reel hook kerak.", "Нужны более сильные hooks в первые 3 секунды."),
-            _lang_copy(lang, "Need more story formats that force replies (polls/Q&A).", "Reply yig'adigan story formatlar (poll/Q&A) ko'paytirilsin.", "Нужно больше форматов сторис, которые собирают ответы (опросы/Q&A)."),
-            _lang_copy(lang, "Need clearer wholesale explanation content.", "Ulgurji qoidalarni aniq tushuntiradigan kontent kerak.", "Нужен более понятный контент про правила опта."),
-        ],
-        "weekly_content_plan": [
-            _lang_copy(lang, "Monday: Reel with close-up + profit hook + DM CTA.", "Dushanba: close-up reel + foyda hook + DM CTA.", "Понедельник: Reel с close-up + hook про прибыль + CTA в DM."),
-            _lang_copy(lang, "Tuesday: Story poll and quick answer sticker.", "Seshanba: Story poll va tezkor javob stikeri.", "Вторник: Опрос в сторис и стикер быстрых ответов."),
-            _lang_copy(lang, "Wednesday: Post with quality/material proof.", "Chorshanba: sifat/material isboti posti.", "Среда: Пост с доказательством качества/материала."),
-            _lang_copy(lang, "Thursday: Reel on delivery/cargo process.", "Payshanba: yetkazib berish/cargo jarayoni reel.", "Четверг: Reel про процесс доставки/карго."),
-            _lang_copy(lang, "Friday: FAQ carousel for top customer questions.", "Juma: eng ko'p savollar bo'yicha FAQ karusel.", "Пятница: FAQ-карусель по частым вопросам."),
-        ],
-        "monthly_content_plan": [
-            _lang_copy(lang, "Week 1: Product trust and quality proof.", "1-hafta: mahsulot ishonchi va sifat isboti.", "1 неделя: доверие к товару и доказательство качества."),
-            _lang_copy(lang, "Week 2: Pricing clarity + wholesale rules.", "2-hafta: narx aniqligi + ulgurji qoidalar.", "2 неделя: ясность по ценам + правила опта."),
-            _lang_copy(lang, "Week 3: Delivery speed and geography proof.", "3-hafta: yetkazish tezligi va geografiya isboti.", "3 неделя: скорость и география доставки."),
-            _lang_copy(lang, "Week 4: Conversion push with limited offer CTA.", "4-hafta: cheklangan taklif CTA bilan konversiya push.", "4 неделя: push на конверсию с CTA ограниченного оффера."),
-        ],
-        "account_improvement_tasks": [
-            _lang_copy(lang, "Prepare 10 reusable CTA endings for captions.", "Captionlar uchun 10 ta tayyor CTA oxiri yozing.", "Подготовьте 10 готовых CTA-окончаний для caption."),
-            _lang_copy(lang, "Create 5 hook templates for first 3 seconds of reels.", "Reelsning birinchi 3 soniyasi uchun 5 ta hook shablon yarating.", "Создайте 5 hook-шаблонов для первых 3 секунд reels."),
-            _lang_copy(lang, "Publish at least 3 story polls every week.", "Har hafta kamida 3 ta story poll chiqaring.", "Публикуйте минимум 3 опроса в сторис каждую неделю."),
-            _lang_copy(lang, "Make one dedicated post explaining wholesale rules.", "Ulgurji qoidalarni tushuntiradigan alohida post chiqaring.", "Сделайте отдельный пост с объяснением правил опта."),
-        ],
-        "analysis_scope": _lang_copy(
-            lang,
-            "Analysis is based on CRM Instagram messages and configured business fields. Bio/logo/highlights need direct in-app review.",
-            "Tahlil CRM Instagram xabarlari va biznes sozlamalariga asoslangan. Bio/logo/highlights uchun Instagram ichida alohida audit kerak.",
-            "Анализ основан на Instagram-сообщениях в CRM и настройках бизнеса. Bio/logo/highlights нужно проверять отдельно в Instagram.",
-        ),
-        "metrics": {
-            "total_instagram_messages": len(rows),
-            "inbound_messages": len(inbound_rows),
-            "outbound_messages": len(outbound_rows),
-            "dm_inbound_messages": len(dm_inbound),
-            "comment_inbound_messages": len(comment_inbound),
-            "story_replies": story_reply_count,
-            "posts_with_comments": post_count,
-            "reel_share_by_commented_posts": round(reel_share, 3),
-            "cta_rate": round(cta_rate, 3),
-            "active_days": active_day_count,
-        },
-    }
-
-
-@app.get("/api/v2/instagram-growth-analyzer")
-async def get_instagram_growth_analyzer_v2(
-    business_id: str,
-    days: int = 30,
-    no_cache: bool = False,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    clean_business_id = normalize_id(business_id)
-    if not clean_business_id:
-        return JSONResponse({"error": "Missing business_id"}, status_code=400)
-    if not can_access_business(access, clean_business_id):
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
-
-    business = get_business_by_id(clean_business_id)
-    if not business:
-        return JSONResponse({"error": "Business not found"}, status_code=404)
-
-    safe_days = max(7, min(int(days or 30), 120))
-    cache_key = f"{clean_business_id}:{safe_days}:{normalize_email(access.get('email', ''))}:{int(bool(access.get('is_admin')))}"
-    now_ts = time.time()
-    cached = INSTAGRAM_GROWTH_CACHE.get(cache_key)
-    if (not no_cache) and cached and (now_ts - cached[0]) < INSTAGRAM_GROWTH_CACHE_TTL_SECONDS:
-        return {"status": "ok", "data": cached[1]}
-
-    try:
-        snapshot = fetch_instagram_live_snapshot(business=business, days=safe_days)
-        payload = build_instagram_growth_analysis_from_live(
-            snapshot=snapshot,
-            business=business,
-            days=safe_days,
-        )
-        save_instagram_growth_report_history(
-            business_id=clean_business_id,
-            report=payload,
-            updated_by=access.get("email", ""),
-        )
-        if len(INSTAGRAM_GROWTH_CACHE) > 300:
-            for stale_key in sorted(INSTAGRAM_GROWTH_CACHE, key=lambda item: INSTAGRAM_GROWTH_CACHE[item][0])[:120]:
-                INSTAGRAM_GROWTH_CACHE.pop(stale_key, None)
-        INSTAGRAM_GROWTH_CACHE[cache_key] = (time.time(), payload)
-        return {"status": "ok", "data": payload}
-    except Exception as exc:
-        message = normalize_id(str(exc)) or "Could not fetch live Instagram data"
-        history = get_workspace_state(clean_business_id).get("instagram_growth_latest") or {}
-        if isinstance(history, dict) and isinstance(history.get("report"), dict):
-            fallback_report = dict(history.get("report") or {})
-            fallback_report["data_source"] = "cached_previous_live_report"
-            fallback_note = _lang_copy(
-                normalize_id((business or {}).get("language")).lower() or "uz",
-                "Live fetch failed, showing latest cached live report.",
-                "Live fetch muvaffaqiyatsiz, oxirgi saqlangan live hisobot ko'rsatildi.",
-                "Live-запрос не удался, показан последний сохраненный live-отчет.",
-            )
-            fallback_report["analysis_scope"] = f"{fallback_report.get('analysis_scope', '')} {fallback_note}".strip()
-            return {
-                "status": "ok",
-                "data": fallback_report,
-                "warning": message,
-            }
-        log("Error generating Instagram growth analysis", message)
-        return JSONResponse(
-            {
-                "status": "error",
-                "message": message,
-                "hint": "Reconnect Instagram account and ensure instagram_basic + instagram_manage_insights permissions.",
-            },
-            status_code=503,
-        )
-
-
-@app.post("/api/v2/instagram-posts/import")
-async def import_instagram_posts_v2(
-    request: Request,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    payload = await request.json()
-    business_id = normalize_id(payload.get("business_id"))
-    max_items = max(10, min(int(payload.get("max_items") or 300), 1000))
-
-    if not business_id:
-        return JSONResponse({"status": "error", "message": "Missing business_id"}, status_code=400)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    business = get_business_by_id(business_id)
-    if not business:
-        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-
-    try:
-        posts = await run_blocking_io(
-            fetch_instagram_posts_for_import,
-            business,
-            max_items=max_items,
-            timeout=170,
-            label="instagram posts import",
-        )
-        store_info = store_instagram_posts_cache(
-            business_id=business_id,
-            posts=posts,
-            updated_by=access.get("email", ""),
-        )
-        notes_state = get_instagram_post_notes_state(business_id)
-        by_post = notes_state.get("by_post_id") if isinstance(notes_state.get("by_post_id"), dict) else {}
-        enriched = []
-        for item in posts:
-            post_id = normalize_id(item.get("post_id"))
-            extra = normalize_id((by_post.get(post_id) or {}).get("extra_info"))
-            enriched.append({**item, "extra_info": extra})
-        return {
-            "status": "ok",
-            "count": len(enriched),
-            "store": store_info,
-            "data": enriched,
-        }
-    except TimeoutError as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=504)
-    except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-
-@app.get("/api/v2/instagram-posts")
-async def list_instagram_posts_v2(
-    business_id: str,
-    refresh: int = 0,
-    limit: int = 300,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    business_id = normalize_id(business_id)
-    if not business_id:
-        return JSONResponse({"status": "error", "message": "Missing business_id"}, status_code=400)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    safe_limit = max(1, min(int(limit or 300), 1000))
-    if int(refresh or 0) == 1:
-        business = get_business_by_id(business_id)
-        if not business:
-            return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-        try:
-            posts = await run_blocking_io(
-                fetch_instagram_posts_for_import,
-                business,
-                max_items=safe_limit,
-                timeout=170,
-                label="instagram posts refresh",
-            )
-            store_instagram_posts_cache(
-                business_id=business_id,
-                posts=posts,
-                updated_by=access.get("email", ""),
-            )
-        except TimeoutError as exc:
-            return JSONResponse({"status": "error", "message": str(exc)}, status_code=504)
-        except Exception as exc:
-            return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-    posts = load_instagram_posts_from_cache(business_id, limit=safe_limit)
-    notes_state = get_instagram_post_notes_state(business_id)
-    by_post = notes_state.get("by_post_id") if isinstance(notes_state.get("by_post_id"), dict) else {}
-    merged = []
-    for item in posts:
-        post_id = normalize_id(item.get("post_id"))
-        note = by_post.get(post_id) if isinstance(by_post.get(post_id), dict) else {}
-        merged.append({
-            **item,
-            "extra_info": normalize_id(note.get("extra_info")),
-            "extra_updated_at": normalize_id(note.get("updated_at")),
-        })
-    return {"status": "ok", "count": len(merged), "data": merged}
-
-
-@app.get("/api/v2/instagram-posts/{post_id}")
-async def get_instagram_post_details_v2(
-    post_id: str,
-    business_id: str,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-    business_id = normalize_id(business_id)
-    post_id = normalize_id(post_id)
-    if not business_id or not post_id:
-        return JSONResponse({"status": "error", "message": "Missing business_id or post_id"}, status_code=400)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    posts = load_instagram_posts_from_cache(business_id, limit=1000)
-    row = next((item for item in posts if normalize_id(item.get("post_id")) == post_id), None)
-    if not row:
-        return JSONResponse({"status": "error", "message": "Post not found in cache. Run import first."}, status_code=404)
-
-    note = resolve_instagram_post_note_for_context(
-        business_id=business_id,
-        post_id=post_id,
-        permalink=normalize_id(row.get("permalink")),
-    )
-    return {"status": "ok", "data": {**row, "extra_info": normalize_id(note.get("extra_info")), "note_meta": note}}
-
-
-@app.post("/api/v2/instagram-posts/extra-info")
-async def set_instagram_post_extra_info_v2(
-    body: InstagramPostExtraUpdate,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    business_id = normalize_id(body.business_id)
-    post_id = normalize_id(body.post_id)
-    if not business_id or not post_id:
-        return JSONResponse({"status": "error", "message": "business_id and post_id are required"}, status_code=400)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    posts = load_instagram_posts_from_cache(business_id, limit=1000)
-    row = next((item for item in posts if normalize_id(item.get("post_id")) == post_id), None)
-    if not row:
-        row = {"post_id": post_id, "permalink": "", "caption": "", "media_type": ""}
-
-    note = save_instagram_post_extra_info(
-        business_id=business_id,
-        post=row,
-        extra_info=body.extra_info,
-        updated_by=access.get("email", ""),
-    )
-    return {"status": "ok", "data": note}
 
 
 @app.get("/api/v2/stats")
@@ -9545,14 +8248,7 @@ async def api_get_businesses(
         if not allowed:
             return {"status": "ok", "count": 0, "data": []}
         query = query.in_("id", allowed)
-    try:
-        result = await run_blocking_io(
-            query.execute,
-            timeout=12,
-            label="businesses query",
-        )
-    except TimeoutError as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=504)
+    result = query.execute()
     rows = [sanitize_business_row(row) for row in (result.data or [])]
     return {"status": "ok", "count": len(rows), "data": rows}
 
