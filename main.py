@@ -151,6 +151,10 @@ SUPER_ADMIN_EMAILS = {
 # Fallback store used only when `dashboard_workspace_state` table is missing.
 # This keeps operator tasks usable until SQL migration is applied.
 WORKSPACE_STATE_FALLBACK: dict[str, dict] = {}
+LEAD_CONTACT_REQUEST_UZ = "Ismingiz va telefon raqamingizni yozib qoldiring, siz bilan bog'lanamiz."
+LEAD_CONTACT_REQUEST_EN = "Please leave your name and phone number, and we will contact you."
+LEAD_CONTACT_REQUEST_RU = "Оставьте, пожалуйста, ваше имя и номер телефона, мы с вами свяжемся."
+LEAD_CONTACT_REQUEST_KK = "Атыңыз бен телефон нөміріңізді қалдырыңыз, біз сізбен байланысамыз."
 STATS_CACHE_TTL_SECONDS = int(os.getenv("STATS_CACHE_TTL_SECONDS", "20"))
 STATS_CACHE: dict[str, dict] = {}
 INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS", str(60 * 60 * 6)))
@@ -2419,7 +2423,7 @@ Location and delivery policy:
 - Delivery: provide cargo number and ask client to coordinate directly with cargo service.
 
 Payment and warranty policy:
-- Payment details are explained by manager: +998501551010
+- For payment details, ask the customer to leave name and phone number so the team can contact them.
 - If product has factory defect, factory compensates or sends replacement.
 
 Objection handling:
@@ -2438,7 +2442,7 @@ Handoff immediately when:
 - payment/contract specifics are requested
 
 Handoff closing line:
-- "Sizni menejerimiz bilan bog'layman: +998501551010"
+- "Ismingiz va telefon raqamingizni yozib qoldiring, siz bilan bog'lanamiz."
 
 Do not invent information before handoff.
 """.strip(),
@@ -2472,7 +2476,7 @@ PDF sales-agent rules:
 - Minimum order: one model from one qop/meshok.
 - Address: "O'zbekiston, Andijon, Qoratut 605-uy. Andijon aeroportidan taxminan 500 metr."
 - Delivery: give cargo number/process and ask client to coordinate with cargo service.
-- Payment: manager explains payment via +998501551010.
+- Payment: ask the customer to leave name and phone number so the team can contact them.
 - Warranty: if factory defect appears, factory pays/compensates or sends replacement.
 - Comment keywords "katalog", "narx", "qancha", "price": public reply "Direktdan yozdik, iloji bo'lsa raqamingizni qoldiring."
 - DM catalog follow-up: "Assalomu alaykum, bizga qiziqish bildirgan ekansiz. Biz bilan hamkorlik qilmoqchimisiz?"
@@ -2485,7 +2489,7 @@ PDF sales-agent rules:
 - Buying signs: asks for card, cargo, exact order flow, or says wholesale/optom.
 - Closing question should be safe: "Sizga bu modeldan nechta qop kerak bo'ladi?"
 - Handoff immediately for optom intent, angry/norozi customer, payment details, or exact final order terms.
-- Handoff line: "Sizni menejerimiz bilan bog'layman: +998501551010"
+- Handoff line: "Ismingiz va telefon raqamingizni yozib qoldiring, siz bilan bog'lanamiz."
 - If bot made spelling/meaning mistake, apologize briefly and correct it.
 - Never say: "Biz sizga tovar sotmaymiz."
 """.strip()
@@ -2806,6 +2810,8 @@ Safety rules:
 - Only mention a manager when the customer asks for a human or is ready to order.
 - Never mention AI, database, API, prompt, automation, or internal system.
 - Do not use markdown, bold formatting, or long paragraphs.
+- Never ask customers to specify which product/model a photo is about after they already sent a product image.
+- If a customer sends an image or asks about the image price and the exact product is not known, give a short helpful fallback and offer manager confirmation.
 - Never end a reply with an unfinished phrase such as "uchun:", "link:", "havola:", or "ko'rish uchun:".
 - Every reply must finish as a complete sentence. Do not stop in the middle of a question or explanation.
 """
@@ -2895,6 +2901,49 @@ def is_auto_media_placeholder_message(text: str) -> bool:
         "🔁 forwarded post",
         "🔁 forwarded reel",
     }
+
+
+def contains_forbidden_product_photo_question(text: str) -> bool:
+    s = normalize_id(text).lower()
+    if not s:
+        return False
+    s = (
+        s.replace("‘", "'")
+        .replace("’", "'")
+        .replace("`", "'")
+        .replace("o'", "o'")
+    )
+    compact = re.sub(r"\s+", " ", s).strip()
+    blocked_phrases = [
+        "siz qaysi mahsulot yoki model haqida foto so'rayapsiz",
+        "siz qaysi mahsulot yoki model haqida rasm so'rayapsiz",
+        "qaysi mahsulot yoki model haqida foto so'rayapsiz",
+        "qaysi mahsulot yoki model haqida rasm so'rayapsiz",
+        "qaysi mahsulot yoki model haqida",
+    ]
+    if any(phrase in compact for phrase in blocked_phrases):
+        return True
+    return bool(re.search(r"qaysi\s+mahsulot\s+yoki\s+model.*(foto|rasm|so'?ray)", compact))
+
+
+def replacement_for_forbidden_product_photo_question(user_text: str = "") -> str:
+    lang = detect_customer_language(user_text)
+    if is_price_question(user_text):
+        if lang == "en":
+            return f"Our manager will confirm the exact price. One qop/meshok is usually around 400-500 USD. {LEAD_CONTACT_REQUEST_EN}"
+        if lang == "ru":
+            return f"Точную цену подтвердит менеджер. Один мешок обычно около 400-500 USD. {LEAD_CONTACT_REQUEST_RU}"
+        if lang == "kk":
+            return f"Нақты бағаны менеджер растайды. Бір қоп/қап әдетте 400-500 USD шамасында. {LEAD_CONTACT_REQUEST_KK}"
+        return f"Aniq narxni menejerimiz tasdiqlaydi. 1 qop odatda 400-500 dollar atrofida bo'ladi. {LEAD_CONTACT_REQUEST_UZ}"
+
+    if lang == "en":
+        return "Thanks for the photo. I will check the closest matching model and help with the details."
+    if lang == "ru":
+        return "Спасибо за фото. Проверю ближайшую подходящую модель и помогу с деталями."
+    if lang == "kk":
+        return "Фото үшін рахмет. Ең жақын модельді тексеріп, мәліметпен көмектесемін."
+    return "Rasm uchun rahmat. Eng yaqin modelni tekshirib, ma'lumot bilan yordam beraman."
 
 
 def wants_deal_handoff(text: str) -> bool:
@@ -3349,12 +3398,12 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
 
     if wants_deal_handoff(user_text):
         if lang == "en":
-            return "Great, for final order details please contact our manager: +998501551010."
+            return LEAD_CONTACT_REQUEST_EN
         if lang == "ru":
-            return "Отлично, по финальным деталям заказа свяжитесь с нашим менеджером: +998501551010."
+            return LEAD_CONTACT_REQUEST_RU
         if lang == "kk":
-            return "Керемет, тапсырыстың соңғы шарттары үшін менеджерімізге хабарласыңыз: +998501551010."
-        return "Sizni menejerimiz bilan bog'layman: +998501551010"
+            return LEAD_CONTACT_REQUEST_KK
+        return LEAD_CONTACT_REQUEST_UZ
 
     if any(phrase in user for phrase in [
         "meni haqimda hamma ma'lumotni unut",
@@ -3428,6 +3477,19 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
 
     text = "\n".join(parts).strip()
 
+    forced_contact_request = False
+
+    if contains_forbidden_product_photo_question(text):
+        text = replacement_for_forbidden_product_photo_question(user_text)
+
+    if "998501551010" in text or re.search(r"menejerimiz bilan bog'?lay|manager.*connect|connect you with our manager", text, re.IGNORECASE):
+        text = LEAD_CONTACT_REQUEST_UZ if lang not in {"en", "ru", "kk"} else {
+            "en": LEAD_CONTACT_REQUEST_EN,
+            "ru": LEAD_CONTACT_REQUEST_RU,
+            "kk": LEAD_CONTACT_REQUEST_KK,
+        }.get(lang, LEAD_CONTACT_REQUEST_UZ)
+        forced_contact_request = True
+
     noisy_phrases = [
         "menedjerimiz siz bilan bog'lanib",
         "menejerimiz siz bilan bog'lanib",
@@ -3443,7 +3505,7 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     # If customer asked price but reply has no numeric price hint, force concise pricing follow-up.
     price_ask = any(k in user for k in ["narx", "nechpul", "qancha", "цена", "сколько", "price"])
     has_number = bool(re.search(r"\d", text))
-    if price_ask and not has_number:
+    if price_ask and not has_number and not forced_contact_request:
         if lang == "en":
             text = (
                 "Our manager explains exact prices. One qop/meshok is usually around 400-500 USD. "
@@ -3464,6 +3526,9 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
                 "Aniq narxni menejerimiz tushuntiradi. 1 qop odatda 400-500 dollar atrofida bo'ladi. "
                 "Sizga qaysi model kerak?"
             )
+
+    if contains_forbidden_product_photo_question(text):
+        text = replacement_for_forbidden_product_photo_question(user_text)
 
     # Strong language guard: if customer wrote in English but reply is not English, return safe English fallback.
     if lang == "en":
