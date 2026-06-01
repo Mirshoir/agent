@@ -764,6 +764,10 @@ CONVERSATIONS_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATIONS_CACHE_TTL_SECON
 _conversations_cache: dict[str, tuple[float, dict]] = {}
 CONVERSATION_MESSAGES_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATION_MESSAGES_CACHE_TTL_SECONDS", "12"))
 _conversation_messages_cache: dict[str, tuple[float, dict]] = {}
+CONVERSATIONS_FAST_LOOKBACK_DAYS = max(7, min(365, int(os.getenv("CONVERSATIONS_FAST_LOOKBACK_DAYS", "120"))))
+CONVERSATIONS_FAST_FETCH_LIMIT = max(80, min(5000, int(os.getenv("CONVERSATIONS_FAST_FETCH_LIMIT", "800"))))
+CONVERSATIONS_MAX_FETCH_ROWS = max(200, min(20000, int(os.getenv("CONVERSATIONS_MAX_FETCH_ROWS", "5000"))))
+CONVERSATIONS_FETCH_BATCH_SIZE = max(100, min(1000, int(os.getenv("CONVERSATIONS_FETCH_BATCH_SIZE", "1000"))))
 BUSINESS_ADMIN_ROLES = {"owner", "admin", "super_admin"}
 
 
@@ -6531,14 +6535,26 @@ async def get_conversations_v2(
             query = query.eq("platform", platform)
 
         if fast:
-            recent_cutoff = (datetime.utcnow() - timedelta(days=120)).strftime("%Y-%m-%dT00:00:00Z")
-            query = query.gte("created_at", recent_cutoff).limit(80)
+            recent_cutoff = (datetime.utcnow() - timedelta(days=CONVERSATIONS_FAST_LOOKBACK_DAYS)).strftime("%Y-%m-%dT00:00:00Z")
+            query = query.gte("created_at", recent_cutoff)
+            target_rows = CONVERSATIONS_FAST_FETCH_LIMIT
         else:
-            query = query.limit(450)
+            target_rows = CONVERSATIONS_MAX_FETCH_ROWS
 
         query = query.order("created_at", desc=True)
 
-        rows = query.execute().data or []
+        rows = []
+        offset = 0
+        while len(rows) < target_rows:
+            remaining = target_rows - len(rows)
+            page_size = min(CONVERSATIONS_FETCH_BATCH_SIZE, remaining)
+            page = query.range(offset, offset + page_size - 1).execute().data or []
+            if not page:
+                break
+            rows.extend(page)
+            if len(page) < page_size:
+                break
+            offset += len(page)
 
         conversations_map = {}
         for row in rows:
