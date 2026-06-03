@@ -401,6 +401,69 @@ def normalize_id(value) -> str:
     return str(value or "").strip()
 
 
+def normalize_bool(value, default: bool = True) -> bool:
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    text = normalize_id(value).lower()
+    if text in {"1", "true", "yes", "y", "on", "enabled", "enable", "full_auto"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disabled", "disable", "manual", "human_only", "human"}:
+        return False
+    return default
+
+
+def get_business_automation_mode(business: dict = None) -> str:
+    return normalize_id((business or {}).get("automation_mode")).upper()
+
+
+def business_memory_limit(business: dict = None, default: int = 8) -> int:
+    business = business or {}
+    if not normalize_bool(business.get("memory_enabled"), True):
+        return 0
+    raw_limit = business.get("memory_limit")
+    try:
+        limit = int(raw_limit if raw_limit not in (None, "") else default)
+    except Exception:
+        limit = default
+    return max(0, min(20, limit))
+
+
+def business_allows_auto_reply(business: dict, platform: str, channel: str = "") -> bool:
+    business = business or {}
+    if not normalize_bool(business.get("bot_enabled"), True):
+        return False
+
+    mode = get_business_automation_mode(business)
+    if mode in {"OFF", "DISABLED", "MANUAL", "HUMAN_ONLY"}:
+        return False
+
+    platform = normalize_id(platform).lower()
+    channel = normalize_id(channel).lower()
+
+    if platform == "instagram":
+        if channel == "dm":
+            return normalize_bool(business.get("auto_reply_dms"), True)
+        if "comment" in channel:
+            return normalize_bool(business.get("auto_reply_comments"), True)
+        return True
+
+    if platform == "telegram":
+        if channel in {"bot", "telegram_bot"}:
+            return normalize_bool(business.get("telegram_bot_enabled"), True)
+        return True
+
+    if platform == "whatsapp":
+        return normalize_bool(business.get("whatsapp_enabled"), True)
+
+    return True
+
+
+def business_allows_human_handoff(business: dict = None) -> bool:
+    return normalize_bool((business or {}).get("human_takeover_enabled"), True)
+
+
 def unwrap_meta_redirect_url(value: str) -> str:
     value = normalize_id(value)
     if not value:
@@ -1858,6 +1921,17 @@ ALLOWED_BUSINESS_SETTINGS = {
     "gemini_api_key",
     "anthropic_api_key",
     "ai_provider",
+    "memory_enabled",
+    "memory_limit",
+    "dashboard_language",
+    "bot_language_mode",
+    "automation_mode",
+    "human_takeover_enabled",
+    "whatsapp_enabled",
+    "telegram_bot_enabled",
+    "telegram_chat_id",
+    "telegram_notes",
+    "analytics_enabled",
 }
 
 
@@ -2342,25 +2416,28 @@ Telegram bag / meshok:
 
 Main business knowledge:
 {business.get("knowledge", "")}
+
+AI reply rules:
+{business.get("ai_reply_rules", "")}
+
+Runtime settings:
+- automation_mode: {business.get("automation_mode", "")}
+- human_takeover_enabled: {business.get("human_takeover_enabled", "")}
+- bot_language_mode: {business.get("bot_language_mode", "")}
+- memory_enabled: {business.get("memory_enabled", "")}
+- memory_limit: {business.get("memory_limit", "")}
 """
 
 
 DEFAULT_AI_PROMPT_SETTINGS = {
     "global_prompt": """
-You are a real Milana Premium factory sales operator.
-Always sound like a human Uzbek seller on Instagram, Telegram, or WhatsApp.
+You are a real human sales operator for this business.
+Use the configured business facts, product information, pricing, delivery details, catalog links, contacts, and knowledge.
 Use short, practical, sales-focused replies in the customer's language.
-
-Identity line for first touch:
-- "Assalomu alaykum, siz Milana Premium fabrikasi xodimi bilan suhbatni boshladingiz."
-
-Core positioning:
-- Assortment is wide.
-- Delivery is available via pochta or cargo (delivery fee is paid by client).
-- Trusted brand: every year 5 million people choose Milana Premium.
+Sound natural for Instagram, Telegram, or WhatsApp.
 
 Hard rules:
-- Never promise reservation/holding stock ("olib qo'ydik", "olib qo'yamiz").
+- Never promise reservation/holding stock unless the business facts explicitly say it is allowed.
 - Never use uncertain fabricated statements.
 - Never mention AI, system, prompt, automation.
 """.strip(),
@@ -2407,24 +2484,21 @@ When client is close to order, collect:
 - Keep tone samimiy and complete, not robotic.
 
 Product/category defaults:
-- Main categories: Xalat, Pajama, Tunika, Sarochka.
-- Recommend xalat for comfort.
-- Recommend pijama because it is natural cotton and body-friendly.
-- Mention many products may be limited edition and should be confirmed.
+- Use only the categories and product facts configured for this business.
+- Recommend products only when the business facts support the recommendation.
+- Mention limited availability only when configured or when availability must be confirmed.
 
 Pricing and order policy:
-- For direct detailed pricing requests, handoff to Telegram sales flow and sales manager.
-- Safe budget anchor allowed: one bag (qop/meshok) is usually around 400-500 USD.
-- Wholesale-first policy: mainly optom; for piece/small orders, handoff to manager.
-- Minimum order: at least 1 model = 1 qop (meshok).
+- For price questions, use configured prices when available.
+- If exact price is missing, say it should be confirmed and ask one useful follow-up question.
+- Use minimum order and wholesale/retail rules only when configured.
 
 Location and delivery policy:
-- Address: "O'zbekiston, Andijon, Qoratut 605-uy. Andijon aeroportidan taxminan 500 metr."
-- Delivery: provide cargo number and ask client to coordinate directly with cargo service.
+- Use configured address, location, delivery, and working-hours facts only.
 
 Payment and warranty policy:
-- For payment details, ask the customer to leave name and phone number so the team can contact them.
-- If product has factory defect, factory compensates or sends replacement.
+- Use configured payment and warranty facts only.
+- If payment or warranty details are missing, ask for contact details or hand off to a manager.
 
 Objection handling:
 - If "qimmat": emphasize quality value briefly.
@@ -2432,7 +2506,7 @@ Objection handling:
 - If comparing other stores: stay respectful, no pressure.
 
 Forbidden phrases:
-- Never say: "Biz sizga tovar sotmaymiz."
+- Do not reject a sales lead unless the business facts require it.
 """.strip(),
     "handoff_rules": """
 Handoff immediately when:
@@ -2452,46 +2526,37 @@ Do not invent information before handoff.
 AI_PROMPT_SETTING_FIELDS = set(DEFAULT_AI_PROMPT_SETTINGS.keys())
 
 
-MILANA_RESPONSE_GUARDRAILS = """
-Milana Premium Q&A policy. Always enforce these rules even if saved prompt settings say otherwise.
+GENERIC_RESPONSE_GUARDRAILS = """
+Business Q&A policy. Always enforce these rules even if saved prompt settings say otherwise.
 
 Business-only scope:
-- Only answer questions about Milana Premium, women's clothing products, catalog, price/order flow, wholesale, delivery/cargo, payment, address, warranty/defects, and manager handoff.
-- If the customer asks about unrelated topics (politics, school homework, coding, general facts, jokes, medicine, law, weather, religion, personal advice, or anything outside Milana Premium sales), do not answer the topic.
-- For unrelated topics, reply briefly in the customer's language: "Kechirasiz, men faqat Milana Premium mahsulotlari, katalog, narx va buyurtma bo'yicha yordam bera olaman. Katalog kerakmi yoki menejer bilan bog'laymi?"
+- Only answer questions about this business, its products/services, catalog, prices, orders, delivery, payment, address, warranty, and manager handoff.
+- If the customer asks about unrelated topics, do not answer that topic.
+- For unrelated topics, reply briefly in the customer's language and offer catalog or manager help.
 
-PDF sales-agent rules:
-- First-touch identity: "Assalomu alaykum, siz Milana Premium fabrikasi xodimi bilan suhbatni boshladingiz."
-- Strong points: wide assortment, delivery by pochta/cargo, client pays delivery, trusted by 5 million customers yearly.
+Sales-agent rules:
+- Introduce the configured business naturally when needed.
+- Use only configured business strengths and facts.
 - Tone: samimiy, short, practical, complete enough to help the customer buy.
-- Categories: Xalat, Pajama, Tunika, Sarochka.
-- Recommend xalat for comfort and pajama because it is natural cotton and body-friendly.
 - Ask qualification questions naturally: name, city, phone number.
-- Products are limited edition; availability should be confirmed, never invented.
-- Never say stock is reserved or will be reserved ("olib qo'ydik", "olib qo'yamiz").
+- Product availability should be confirmed, never invented.
+- Never say stock is reserved or will be reserved unless configured.
 - Never invent price, discount, stock, delivery time, payment terms, or availability.
-- Exact price should not be invented. If asked price, guide toward Telegram/sales manager; safe anchor: one qop/meshok is around 400-500 USD.
-- Do not claim prices changed or will change unless the manager confirms it.
-- Wholesale-first: mostly optom. For small/piece orders, handoff to manager.
-- Minimum order: one model from one qop/meshok.
-- Address: "O'zbekiston, Andijon, Qoratut 605-uy. Andijon aeroportidan taxminan 500 metr."
-- Delivery: give cargo number/process and ask client to coordinate with cargo service.
+- Exact price should not be invented. If asked price and it is missing, say it should be confirmed.
+- Do not claim prices changed or will change unless configured.
+- Use wholesale/retail/minimum-order rules only when configured.
+- Use configured address and delivery process only.
 - Payment: ask the customer to leave name and phone number so the team can contact them.
-- Warranty: if factory defect appears, factory pays/compensates or sends replacement.
-- Comment keywords "katalog", "narx", "qancha", "price": public reply "Direktdan yozdik, iloji bo'lsa raqamingizni qoldiring."
-- DM catalog follow-up: "Assalomu alaykum, bizga qiziqish bildirgan ekansiz. Biz bilan hamkorlik qilmoqchimisiz?"
 - When customer asks for photo/video/catalog, answer warmly with one light smile/emoji-style touch; do not over-explain.
 - Reply separately to each commenter; do not combine multiple customers into one response.
 - Sticker-only/simple reactions: answer with a simple friendly emoji/sticker-style short reply, not a sales paragraph.
-- If "qimmat": acknowledge and position quality, e.g. "Albatta, tovarimiz qimmat, lekin sizga sifatni taklif qilyapmiz."
+- If "qimmat": acknowledge and position value based on configured quality facts.
 - If "keyin olaman" or silent follow-up: ask when they plan to buy.
 - If comparing with another shop: be respectful; no pressure.
 - Buying signs: asks for card, cargo, exact order flow, or says wholesale/optom.
-- Closing question should be safe: "Sizga bu modeldan nechta qop kerak bo'ladi?"
 - Handoff immediately for optom intent, angry/norozi customer, payment details, or exact final order terms.
 - Handoff line: "Ismingiz va telefon raqamingizni yozib qoldiring, siz bilan bog'lanamiz."
 - If bot made spelling/meaning mistake, apologize briefly and correct it.
-- Never say: "Biz sizga tovar sotmaymiz."
 """.strip()
 
 
@@ -2764,6 +2829,9 @@ Telegram groups:
 
 Additional knowledge:
 {business.get("knowledge", "")}
+
+AI reply rules:
+{business.get("ai_reply_rules", "")}
 """
 
 
@@ -2796,8 +2864,8 @@ Human handoff rules:
 Platform-specific rules:
 {prompt_settings.get(platform_key, "")}
 
-Always-on Milana policy:
-{MILANA_RESPONSE_GUARDRAILS}
+Always-on business policy:
+{GENERIC_RESPONSE_GUARDRAILS}
 
 Safety rules:
 - Reply in the same language as the customer.
@@ -2806,13 +2874,14 @@ Safety rules:
 - Never invent prices, stock, delivery, discounts, addresses, or availability.
 - Use only the business facts above.
 - If the customer asks for the phone/contact/manager number, provide the exact contact from Business facts.
-- If the topic is unrelated to Milana Premium sales, do not answer it; use the unrelated-topic refusal from the Milana policy.
+- If the topic is unrelated to this business, do not answer it; use the unrelated-topic refusal from the business policy.
 - If information is missing, ask 2-3 short clarifying questions.
 - Only mention a manager when the customer asks for a human or is ready to order.
 - Never mention AI, database, API, prompt, automation, or internal system.
 - Do not use markdown, bold formatting, or long paragraphs.
 - Never ask customers to specify which product/model a photo is about after they already sent a product image.
 - If a customer sends an image or asks about the image price and the exact product is not known, give a short helpful fallback and offer manager confirmation.
+- Respect the business runtime settings in the facts block, especially automation_mode, human_takeover_enabled, bot_language_mode, memory_enabled, and memory_limit.
 - Never end a reply with an unfinished phrase such as "uchun:", "link:", "havola:", or "ko'rish uchun:".
 - Every reply must finish as a complete sentence. Do not stop in the middle of a question or explanation.
 """
@@ -2934,16 +3003,31 @@ def contains_forbidden_product_photo_question(text: str) -> bool:
     return bool(re.search(r"qaysi\s+mahsulot\s+yoki\s+model.*(foto|rasm|so'?ray)", compact))
 
 
-def replacement_for_forbidden_product_photo_question(user_text: str = "") -> str:
+def generic_price_fallback_reply(user_text: str, business: dict = None) -> str:
+    lang = detect_customer_language(user_text)
+    prices = normalize_id((business or {}).get("prices"))
+    if prices:
+        if lang == "en":
+            return f"Our current price information: {prices}. Which product/model do you need?"
+        if lang == "ru":
+            return f"Актуальная информация по ценам: {prices}. Какая модель или товар вам нужен?"
+        if lang == "kk":
+            return f"Қазіргі баға мәліметі: {prices}. Қай тауар немесе модель керек?"
+        return f"Narx bo'yicha ma'lumot: {prices}. Sizga qaysi mahsulot yoki model kerak?"
+
+    if lang == "en":
+        return "Our manager will confirm the exact price. Which product/model do you need?"
+    if lang == "ru":
+        return "Точную цену подтвердит менеджер. Какая модель или товар вам нужен?"
+    if lang == "kk":
+        return "Нақты бағаны менеджер растайды. Қай тауар немесе модель керек?"
+    return "Aniq narxni menejerimiz tasdiqlaydi. Sizga qaysi mahsulot yoki model kerak?"
+
+
+def replacement_for_forbidden_product_photo_question(user_text: str = "", business: dict = None) -> str:
     lang = detect_customer_language(user_text)
     if is_price_question(user_text):
-        if lang == "en":
-            return f"Our manager will confirm the exact price. One qop/meshok is usually around 400-500 USD. {LEAD_CONTACT_REQUEST_EN}"
-        if lang == "ru":
-            return f"Точную цену подтвердит менеджер. Один мешок обычно около 400-500 USD. {LEAD_CONTACT_REQUEST_RU}"
-        if lang == "kk":
-            return f"Нақты бағаны менеджер растайды. Бір қоп/қап әдетте 400-500 USD шамасында. {LEAD_CONTACT_REQUEST_KK}"
-        return f"Aniq narxni menejerimiz tasdiqlaydi. 1 qop odatda 400-500 dollar atrofida bo'ladi. {LEAD_CONTACT_REQUEST_UZ}"
+        return generic_price_fallback_reply(user_text, business)
 
     if lang == "en":
         return "Thanks for the photo. I will check the closest matching model and help with the details."
@@ -3090,19 +3174,39 @@ def media_matcher_language(text: str) -> str:
     return "uz"
 
 
-def has_strong_milana_sales_context(text: str) -> bool:
+def business_scope_terms(business: dict = None) -> set[str]:
+    business = business or {}
+    terms = set()
+    for field in (
+        "business_name",
+        "business_type",
+        "products",
+        "prices",
+        "delivery_info",
+        "faq",
+        "catalog_link",
+        "sales_phone",
+        "knowledge",
+    ):
+        value = normalize_id(business.get(field))
+        for word in re.findall(r"[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ0-9']{3,}", value.lower()):
+            terms.add(word)
+    return terms
+
+
+def has_strong_business_sales_context(text: str, business: dict = None) -> bool:
     s = normalize_id(text).lower()
     if not s:
         return False
     if mentions_catalog(s):
         return True
+    business_terms = business_scope_terms(business)
+    if business_terms and any(term in s for term in business_terms):
+        return True
     markers = [
-        "milana", "premium", "fabrika", "factory", "фабрика",
-        "xalat", "halat", "robe", "халат", "pijama", "pajama", "пижама",
-        "tunika", "туника", "sarochka", "сорочка", "kiyim", "clothes", "одежда",
-        "ayollar", "women", "женск", "model", "модель", "rang", "color", "цвет",
-        "razmer", "size", "размер", "sifat", "quality", "качество",
-        "qop", "meshok", "мешок", "sumka", "pack", "bag",
+        "product", "products", "service", "services", "mahsulot", "mahsulotlar", "товар", "товары",
+        "model", "модель", "rang", "color", "цвет", "size", "razmer", "размер",
+        "sifat", "quality", "качество", "pack", "bag", "qop", "meshok", "quti",
         "optom", "optima", "ulgurji", "wholesale", "оптом", "опт",
         "dostavka", "delivery", "yetkaz", "yetqaz", "доставка", "pochta", "почта",
         "cargo", "kargo", "карго", "manzil", "address", "адрес", "qayerdasiz",
@@ -3118,11 +3222,11 @@ def has_strong_milana_sales_context(text: str) -> bool:
     return any(marker in s for marker in markers)
 
 
-def has_milana_sales_context(text: str) -> bool:
+def has_business_sales_context(text: str, business: dict = None) -> bool:
     s = normalize_id(text).lower()
     if not s:
         return False
-    if has_strong_milana_sales_context(s) or wants_catalog(s) or wants_deal_handoff(s):
+    if has_strong_business_sales_context(s, business) or wants_catalog(s) or wants_deal_handoff(s):
         return True
     generic_sales_markers = [
         "kerak", "need", "want", "хочу", "interested", "qiziq", "интерес",
@@ -3131,13 +3235,13 @@ def has_milana_sales_context(text: str) -> bool:
     return any(marker in s for marker in generic_sales_markers)
 
 
-def is_obviously_unrelated_topic(text: str) -> bool:
+def is_obviously_unrelated_topic(text: str, business: dict = None) -> bool:
     s = normalize_id(text).lower()
     if not s:
         return False
     if is_greeting_only(s) or is_low_signal_message(s):
         return False
-    if has_strong_milana_sales_context(s):
+    if has_strong_business_sales_context(s, business):
         return False
 
     unrelated_markers = [
@@ -3163,23 +3267,24 @@ def is_obviously_unrelated_topic(text: str) -> bool:
     if re.search(r"\b\d+\s*[\+\-\*/]\s*\d+\b", s):
         return True
 
-    if has_milana_sales_context(s):
+    if has_business_sales_context(s, business):
         return False
 
     return False
 
 
-def unrelated_topic_reply(text: str) -> str:
-    if not is_obviously_unrelated_topic(text):
+def unrelated_topic_reply(text: str, business: dict = None) -> str:
+    if not is_obviously_unrelated_topic(text, business):
         return ""
     lang = detect_customer_language(text)
+    business_name = normalize_id((business or {}).get("business_name")) or "this business"
     if lang == "en":
-        return "Sorry, I can only help with Milana Premium products, catalog, prices, and orders. Do you need the catalog or should I connect you with a manager?"
+        return f"Sorry, I can only help with {business_name} products/services, catalog, prices, and orders. Do you need the catalog or should I connect you with a manager?"
     if lang == "ru":
-        return "Извините, я могу помочь только с товарами Milana Premium, каталогом, ценами и заказом. Нужен каталог или связать вас с менеджером?"
+        return f"Извините, я могу помочь только с товарами/услугами {business_name}, каталогом, ценами и заказом. Нужен каталог или связать вас с менеджером?"
     if lang == "kk":
-        return "Кешіріңіз, мен тек Milana Premium тауарлары, каталог, баға және тапсырыс бойынша көмектесе аламын. Каталог керек пе әлде менеджермен байланыстырайын ба?"
-    return "Kechirasiz, men faqat Milana Premium mahsulotlari, katalog, narx va buyurtma bo'yicha yordam bera olaman. Katalog kerakmi yoki menejer bilan bog'laymi?"
+        return f"Кешіріңіз, мен тек {business_name} тауарлары/қызметтері, каталог, баға және тапсырыс бойынша көмектесе аламын. Каталог керек пе әлде менеджермен байланыстырайын ба?"
+    return f"Kechirasiz, men faqat {business_name} mahsulotlari/xizmatlari, katalog, narx va buyurtma bo'yicha yordam bera olaman. Katalog kerakmi yoki menejer bilan bog'laymi?"
 
 
 def get_catalog_link(business: dict) -> str:
@@ -3258,15 +3363,15 @@ def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
 
 
 def catalog_card_subtitle(business: dict) -> str:
-    business_name = normalize_id((business or {}).get("business_name")) or "Milana Premium"
+    business_name = normalize_id((business or {}).get("business_name"))
     if len(business_name) <= 22:
-        return f"{business_name} katalogi tayyor."
+        return f"{business_name} katalogi tayyor." if business_name else "Katalog tayyor."
     return "Katalog tayyor. Tugmani bosing."
 
 
 def catalog_template_payload(recipient: dict, business: dict, text: str = "") -> dict:
     catalog_link = get_catalog_link(business)
-    business_name = normalize_id((business or {}).get("business_name")) or "Milana Premium"
+    business_name = normalize_id((business or {}).get("business_name")) or "Bizning katalog"
     text = clean_ai_reply_for_catalog(text, business)
     if not text:
         text = f"{business_name} katalogi shu yerda. Qaysi mahsulotlar sizni qiziqtirmoqda?"
@@ -3471,11 +3576,12 @@ def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
 
 
 
-def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
+def clean_sales_reply(reply_text: str, user_text: str = "", business: dict = None) -> str:
     user = normalize_id(user_text).lower()
     lang = detect_customer_language(user_text)
+    allow_handoff = business_allows_human_handoff(business)
 
-    if wants_deal_handoff(user_text):
+    if wants_deal_handoff(user_text) and allow_handoff:
         if lang == "en":
             return LEAD_CONTACT_REQUEST_EN
         if lang == "ru":
@@ -3559,7 +3665,7 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     forced_contact_request = False
 
     if contains_forbidden_product_photo_question(text):
-        text = replacement_for_forbidden_product_photo_question(user_text)
+        text = replacement_for_forbidden_product_photo_question(user_text, business)
 
     if re.search(r"menejerimiz bilan bog'?lay|manager.*connect|connect you with our manager", text, re.IGNORECASE):
         text = LEAD_CONTACT_REQUEST_UZ if lang not in {"en", "ru", "kk"} else {
@@ -3585,29 +3691,10 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     price_ask = any(k in user for k in ["narx", "nechpul", "qancha", "цена", "сколько", "price"])
     has_number = bool(re.search(r"\d", text))
     if price_ask and not has_number and not forced_contact_request:
-        if lang == "en":
-            text = (
-                "Our manager explains exact prices. One qop/meshok is usually around 400-500 USD. "
-                "Which model do you need?"
-            )
-        elif lang == "kk":
-            text = (
-                "Нақты бағаны менеджеріміз түсіндіреді. Бір қоп/қап әдетте 400-500 USD шамасында. "
-                "Қай модель керек?"
-            )
-        elif lang == "ru":
-            text = (
-                "Точную цену объяснит наш менеджер. Один мешок обычно около 400-500 USD. "
-                "Какая модель нужна?"
-            )
-        else:
-            text = (
-                "Aniq narxni menejerimiz tushuntiradi. 1 qop odatda 400-500 dollar atrofida bo'ladi. "
-                "Sizga qaysi model kerak?"
-            )
+        text = generic_price_fallback_reply(user_text, business)
 
     if contains_forbidden_product_photo_question(text):
-        text = replacement_for_forbidden_product_photo_question(user_text)
+        text = replacement_for_forbidden_product_photo_question(user_text, business)
 
     # Strong language guard: if customer wrote in English but reply is not English, return safe English fallback.
     if lang == "en":
@@ -3616,10 +3703,7 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
         low = text.lower()
         if has_cyr or any(m in low for m in uz_markers):
             if price_ask:
-                text = (
-                    "Our manager explains exact prices. One qop/meshok is usually around 400-500 USD. "
-                    "Which model do you need?"
-                )
+                text = generic_price_fallback_reply(user_text, business)
             else:
                 text = "Hello! Of course. Which products are you interested in?"
 
@@ -4477,7 +4561,7 @@ def load_recent_instagram_media_reference(
     return {}
 
 
-def should_reuse_recent_media_match(user_text: str, media_type: str = "") -> bool:
+def should_reuse_recent_media_match(user_text: str, media_type: str = "", business: dict = None) -> bool:
     if media_type in {"photo", "video", "file"}:
         return False
     text = normalize_id(user_text)
@@ -4486,7 +4570,7 @@ def should_reuse_recent_media_match(user_text: str, media_type: str = "") -> boo
     lower = text.lower()
     if re.search(r"\b\d+\s*(qop|meshok|ta|dona|pack|quti)\b", lower):
         return True
-    if has_strong_milana_sales_context(lower):
+    if has_strong_business_sales_context(lower, business):
         return True
     short_followups = {"bor", "bormi", "narxi", "qancha", "nechpul", "razmer", "rang", "olaman", "zakaz", "беру", "есть"}
     return lower in short_followups
@@ -4494,6 +4578,9 @@ def should_reuse_recent_media_match(user_text: str, media_type: str = "") -> boo
 
 def get_recent_platform_chat_history(platform: str, business: dict, customer_id: str = "", channel: str = "", limit: int = 10) -> list:
     if not customer_id:
+        return []
+    limit = min(limit, business_memory_limit(business, default=limit))
+    if limit <= 0:
         return []
 
     try:
@@ -4536,7 +4623,7 @@ def get_ai_reply(
             if direct_phone_reply:
                 return direct_phone_reply
 
-        off_topic_reply = unrelated_topic_reply(user_text)
+        off_topic_reply = unrelated_topic_reply(user_text, business)
         if off_topic_reply:
             return off_topic_reply
 
@@ -4548,7 +4635,7 @@ def get_ai_reply(
                 "role": "system",
                 "content": f"Suggested product answer from media matcher: {media_reply_hint}. Keep the answer in the customer's language and do not ask which model if the matcher already found one.",
             })
-        messages.extend(get_recent_platform_chat_history(platform, business, customer_id, channel, limit=8))
+        messages.extend(get_recent_platform_chat_history(platform, business, customer_id, channel, limit=20))
         language_instruction = language_instruction_for(user_text)
         if language_instruction:
             messages.append({"role": "system", "content": language_instruction})
@@ -4560,9 +4647,9 @@ def get_ai_reply(
             "AI response",
         )
         if reply:
-            return clean_sales_reply(reply.strip(), user_text)
+            return clean_sales_reply(reply.strip(), user_text, business)
         if media_reply_hint:
-            return clean_sales_reply(media_reply_hint, user_text)
+            return clean_sales_reply(media_reply_hint, user_text, business)
         lang = detect_customer_language(user_text)
         if lang == "en":
             return "Your message has been received."
@@ -4709,7 +4796,7 @@ def send_catalog_private_reply(access_token: str, comment_id: str, business: dic
         return None
 
     business = business or {}
-    business_name = normalize_id(business.get("business_name")) or "Milana Premium"
+    business_name = normalize_id(business.get("business_name")) or "Bizning katalog"
     text = f"Assalomu alaykum! {business_name} katalogi shu yerda. Qaysi mahsulotlar sizni qiziqtirmoqda?"
     payload = catalog_template_payload({"comment_id": comment_id}, business, text)
 
@@ -4985,11 +5072,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             post_media_type=post_media_type,
         )
 
-        if not business.get("bot_enabled", True):
-            mark_processed(processed_message_ids, message_id)
-            return
-
-        if business.get("auto_reply_dms") is False:
+        if not business_allows_auto_reply(business, "instagram", "dm"):
             mark_processed(processed_message_ids, message_id)
             return
 
@@ -5059,7 +5142,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                     "media_type": media_type,
                     "source_url_host": urlparse(matcher_source_url).netloc if matcher_source_url else "",
                 })
-        elif should_reuse_recent_media_match(message_text or "", media_type or ""):
+        elif should_reuse_recent_media_match(message_text or "", media_type or "", business):
             cached_match = load_recent_instagram_media_match(business_id=business_id, customer_id=sender_id)
             if cached_match:
                 cached_context = normalize_id(cached_match.get("context"))
@@ -5186,7 +5269,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             or (media_type in {"photo", "video"} and not message.get("text"))
         )
         if use_direct_matcher_reply:
-            reply_text = clean_sales_reply(media_reply_hint, message_text or "photo")
+            reply_text = clean_sales_reply(media_reply_hint, message_text or "photo", business)
         else:
             reply_text = get_ai_reply(
                 message_text or "Photo/Video received",
@@ -5289,11 +5372,7 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
         channel="instagram_comment",
     )
 
-    if not business.get("bot_enabled", True):
-        mark_processed(processed_comment_ids, comment_id)
-        return
-
-    if business.get("auto_reply_comments") is False:
+    if not business_allows_auto_reply(business, "instagram", "instagram_comment"):
         mark_processed(processed_comment_ids, comment_id)
         return
 
@@ -5605,11 +5684,8 @@ def add_whatsapp_memory(phone: str, role: str, content: str, limit: int = 12):
 
 def first_whatsapp_intro_message(business: dict = None):
     settings = get_ai_prompt_settings((business or {}).get("id", ""))
-    return settings.get("opening_message") or (
-        "Assalomu alaykum. Men Milana Premium virtual assistentiman.\n\n"
-        "Sizga tezroq yordam berishimiz uchun ism, telefon raqam, manzil, qaysi mahsulot kerakligi va miqdorini qoldiring.\n\n"
-        "Vakilimiz tez orada siz bilan bog'lanadi."
-    )
+    business_name = normalize_id((business or {}).get("business_name")) or "bizning kompaniya"
+    return settings.get("opening_message") or f"Assalomu alaykum. Men {business_name} vakiliman. Qanday yordam bera olaman?"
 
 
 def build_whatsapp_system_prompt(business: dict, intro_sent: bool):
@@ -5630,7 +5706,7 @@ Fallback catalog link:
 def get_whatsapp_ai_reply(phone: str, user_text: str, business: dict) -> str:
     chat = get_whatsapp_chat(phone)
 
-    off_topic_reply = unrelated_topic_reply(user_text)
+    off_topic_reply = unrelated_topic_reply(user_text, business)
     if off_topic_reply:
         add_whatsapp_memory(phone, "user", user_text)
         add_whatsapp_memory(phone, "assistant", off_topic_reply)
@@ -5651,7 +5727,7 @@ def get_whatsapp_ai_reply(phone: str, user_text: str, business: dict) -> str:
         business_with_fallback_model.setdefault("ai_model", WHATSAPP_FALLBACK_MODEL)
         reply = call_ai_chat(messages, business_with_fallback_model, "WhatsApp AI response")
         if reply:
-            return clean_sales_reply(reply[:1500], user_text)
+            return clean_sales_reply(reply[:1500], user_text, business)
         return "Xabaringiz qabul qilindi 😊 Qanday yordam kerak?"
     except Exception as e:
         log("WhatsApp AI error", str(e))
@@ -5764,7 +5840,7 @@ async def process_whatsapp_message(change: dict):
                 whatsapp_media_id=whatsapp_media_id,
             )
 
-            if not business.get("bot_enabled", True):
+            if not business_allows_auto_reply(business, "whatsapp", "whatsapp"):
                 mark_processed(processed_message_ids, message_id)
                 continue
 
@@ -6020,6 +6096,14 @@ def persist_whatsapp_embedded_business(owner_email: str, waba_id: str, phone_num
         "bot_enabled": True,
         "auto_reply_dms": True,
         "auto_reply_comments": True,
+        "human_takeover_enabled": True,
+        "telegram_bot_enabled": True,
+        "whatsapp_enabled": True,
+        "analytics_enabled": True,
+        "automation_mode": "FULL_AUTO",
+        "bot_language_mode": "auto",
+        "memory_enabled": True,
+        "memory_limit": 8,
         "language": "uz",
     }
 
@@ -6089,6 +6173,14 @@ def upsert_business(
         "bot_enabled": True,
         "auto_reply_dms": True,
         "auto_reply_comments": True,
+        "human_takeover_enabled": True,
+        "telegram_bot_enabled": True,
+        "whatsapp_enabled": False,
+        "analytics_enabled": True,
+        "automation_mode": "FULL_AUTO",
+        "bot_language_mode": "auto",
+        "memory_enabled": True,
+        "memory_limit": 8,
     }
 
     if existing:
@@ -6110,6 +6202,7 @@ def upsert_business(
         "telegram_single": "",
         "telegram_package": "",
         "telegram_bag": "",
+        "ai_reply_rules": "",
     }
 
     return supabase.table("businesses").upsert(insert_data, on_conflict="instagram_business_id").execute().data
