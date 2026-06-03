@@ -445,282 +445,6 @@ def business_memory_limit(business: dict = None, default: int = 8) -> int:
     return max(0, min(20, limit))
 
 
-def lead_state_workspace_key(platform: str, customer_id: str, channel: str = "") -> str:
-    platform = normalize_id(platform).lower()
-    customer_id = normalize_id(customer_id)
-    channel = normalize_id(channel).lower()
-    if not platform or not customer_id:
-        return ""
-    if channel:
-        return f"lead_state:{platform}:{channel}:{customer_id}"
-    return f"lead_state:{platform}:{customer_id}"
-
-
-def normalize_phone_number(value: str) -> str:
-    digits = re.sub(r"\D+", "", normalize_id(value))
-    if not digits:
-        return ""
-    if digits.startswith("00"):
-        digits = digits[2:]
-    if digits.startswith("8") and len(digits) == 10:
-        return f"998{digits[1:]}"
-    if digits.startswith("998") and len(digits) >= 12:
-        return digits[:12]
-    return digits
-
-
-def extract_phone_candidates(text: str) -> list[str]:
-    source = normalize_id(text)
-    if not source:
-        return []
-
-    candidates = []
-    patterns = [
-        r"(?<!\d)(?:\+?\d[\d\s().-]{6,}\d)(?!\d)",
-        r"(?<!\d)\d{7,15}(?!\d)",
-    ]
-    for pattern in patterns:
-        for match in re.finditer(pattern, source):
-            digits = normalize_phone_number(match.group(0))
-            if 7 <= len(digits) <= 15 and digits not in candidates:
-                candidates.append(digits)
-    return candidates
-
-
-def _looks_like_customer_name(value: str) -> bool:
-    text = normalize_id(value)
-    if not text or len(text) > 60:
-        return False
-    if re.search(r"\d", text):
-        return False
-    if is_greeting_only(text.lower()) or is_low_signal_message(text.lower()):
-        return False
-    if has_business_sales_context(text):
-        return False
-    tokens = [token for token in re.split(r"\s+", text.strip()) if token]
-    if not 1 <= len(tokens) <= 4:
-        return False
-    return all(re.fullmatch(r"[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼ'`-]{2,}", token) for token in tokens)
-
-
-def extract_customer_name_candidate(text: str) -> str:
-    source = normalize_id(text).strip()
-    if not source:
-        return ""
-
-    explicit_patterns = [
-        r"(?:ismim|mening ismim|mening adim|mening ism|my name is|name is|меня зовут|менің атым|mening ismim[:\-]?)\s+([A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼ'`-]{2,}(?:\s+[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼ'`-]{2,}){0,3})",
-    ]
-    for pattern in explicit_patterns:
-        match = re.search(pattern, source, flags=re.IGNORECASE)
-        if match:
-            candidate = normalize_id(match.group(1)).strip(" ,.!?:;")
-            if _looks_like_customer_name(candidate):
-                return candidate
-
-    if _looks_like_customer_name(source):
-        return source
-    return ""
-
-
-def normalize_lead_state(state: dict = None) -> dict:
-    state = dict(state or {})
-    phone = normalize_phone_number(state.get("phone"))
-    customer_name = normalize_id(state.get("customer_name"))
-    phone_collected = bool(state.get("phone_collected")) or bool(phone)
-    name_collected = bool(state.get("name_collected")) or bool(customer_name and not _looks_like_generated_instagram_name(customer_name))
-    last_lead_update = normalize_id(state.get("last_lead_update"))
-    last_message_id = normalize_id(state.get("last_message_id"))
-    return {
-        "phone": phone,
-        "customer_name": customer_name,
-        "phone_collected": phone_collected,
-        "name_collected": name_collected,
-        "last_lead_update": last_lead_update,
-        "last_message_id": last_message_id,
-    }
-
-
-def lead_state_missing_fields(state: dict = None) -> list[str]:
-    normalized = normalize_lead_state(state)
-    missing = []
-    if not normalized.get("name_collected"):
-        missing.append("name")
-    if not normalized.get("phone_collected"):
-        missing.append("phone")
-    return missing
-
-
-def build_known_customer_information_block(lead_state: dict = None) -> str:
-    state = normalize_lead_state(lead_state)
-    missing = lead_state_missing_fields(state)
-    return f"""
-Known customer information:
-- Name: {state.get("customer_name") or "unknown"}
-- Phone: {state.get("phone") or "unknown"}
-- Phone collected: {"yes" if state.get("phone_collected") else "no"}
-- Name collected: {"yes" if state.get("name_collected") else "no"}
-- Last lead update: {state.get("last_lead_update") or "unknown"}
-- Missing fields: {", ".join(missing) if missing else "none"}
-
-Lead handling rules:
-- Before asking for the customer's name or phone number, always check the known customer information and conversation history.
-- If the customer has already sent a phone number in any valid format, never ask for the phone number again.
-- If the customer has already sent their name, never ask for the name again.
-- If only the phone number is missing, ask only for the phone number.
-- If only the name is missing, ask only for the name.
-- If both name and phone number are already collected, confirm briefly and move to the next sales step.
-- Do not repeat the same lead-collection question more than once in the same conversation.
-""".strip()
-
-
-def extract_lead_state_from_text(
-    text: str,
-    current_state: dict = None,
-    customer_name_hint: str = "",
-    message_id: str = "",
-) -> dict:
-    state = normalize_lead_state(current_state)
-    text = normalize_id(text)
-
-    phone_candidates = extract_phone_candidates(text)
-    if phone_candidates:
-        state["phone"] = phone_candidates[0]
-        state["phone_collected"] = True
-
-    name_candidate = extract_customer_name_candidate(text)
-    if not name_candidate:
-        hinted_name = normalize_id(customer_name_hint)
-        if hinted_name and not _looks_like_generated_instagram_name(hinted_name):
-            if _looks_like_customer_name(hinted_name):
-                name_candidate = hinted_name
-
-    if name_candidate:
-        state["customer_name"] = name_candidate
-        state["name_collected"] = True
-
-    if message_id:
-        state["last_message_id"] = normalize_id(message_id)
-    if text:
-        state["last_lead_update"] = datetime.utcnow().isoformat()
-
-    return normalize_lead_state(state)
-
-
-def get_customer_lead_state(platform: str, business_id: str, customer_id: str, channel: str = "") -> dict:
-    platform = normalize_id(platform).lower()
-    business_id = normalize_id(business_id)
-    customer_id = normalize_id(customer_id)
-    channel = normalize_id(channel).lower()
-    if not platform or not business_id or not customer_id:
-        return normalize_lead_state({})
-
-    state_key = lead_state_workspace_key(platform, customer_id, channel)
-    if not state_key:
-        return normalize_lead_state({})
-
-    try:
-        rows = (
-            supabase.table("dashboard_workspace_state")
-            .select("state_value")
-            .eq("business_id", business_id)
-            .eq("state_key", state_key)
-            .limit(1)
-            .execute()
-            .data
-            or []
-        )
-        if rows:
-            value = rows[0].get("state_value")
-            if isinstance(value, dict):
-                return normalize_lead_state(value)
-    except Exception as exc:
-        log("Could not load customer lead state", {"business_id": business_id, "customer_id": customer_id, "error": str(exc)})
-
-    return normalize_lead_state({})
-
-
-def upsert_customer_lead_state(
-    business_id: str,
-    platform: str,
-    customer_id: str,
-    lead_state: dict,
-    channel: str = "",
-    updated_by: str = "instagram_bot",
-) -> dict:
-    business_id = normalize_id(business_id)
-    platform = normalize_id(platform).lower()
-    customer_id = normalize_id(customer_id)
-    channel = normalize_id(channel).lower()
-    state_key = lead_state_workspace_key(platform, customer_id, channel)
-    state_value = normalize_lead_state(lead_state)
-
-    if not business_id or not state_key:
-        return state_value
-
-    try:
-        supabase.table("dashboard_workspace_state").upsert(
-            {
-                "business_id": business_id,
-                "state_key": state_key,
-                "state_value": state_value,
-                "updated_by": normalize_id(updated_by),
-            },
-            on_conflict="business_id,state_key",
-        ).execute()
-    except Exception as exc:
-        log("Could not upsert customer lead state", {"business_id": business_id, "customer_id": customer_id, "error": str(exc)})
-
-    return state_value
-
-
-def derive_customer_lead_state(
-    platform: str,
-    business: dict,
-    customer_id: str,
-    channel: str = "",
-    recent_rows: list = None,
-    current_text: str = "",
-    customer_name_hint: str = "",
-    message_id: str = "",
-) -> dict:
-    state = get_customer_lead_state(platform, business.get("id", ""), customer_id, channel)
-    rows = list(recent_rows or [])
-
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        if normalize_id(row.get("direction")).lower() != "inbound":
-            continue
-        row_text = normalize_id(row.get("content"))
-        row_name = normalize_id(row.get("customer_name"))
-        row_state = {
-            "phone": state.get("phone", ""),
-            "customer_name": state.get("customer_name", ""),
-            "phone_collected": state.get("phone_collected", False),
-            "name_collected": state.get("name_collected", False),
-            "last_lead_update": state.get("last_lead_update", ""),
-            "last_message_id": normalize_id(row.get("external_message_id")),
-        }
-        if row_text:
-            row_state = extract_lead_state_from_text(row_text, row_state, row_name, row.get("external_message_id"))
-            if row_name and not _looks_like_generated_instagram_name(row_name) and _looks_like_customer_name(row_name):
-                row_state["customer_name"] = row_name
-                row_state["name_collected"] = True
-        state = normalize_lead_state({
-            **state,
-            **row_state,
-        })
-
-    if current_text or customer_name_hint:
-        state = extract_lead_state_from_text(current_text, state, customer_name_hint, message_id)
-
-    if state.get("customer_name") and _looks_like_generated_instagram_name(state.get("customer_name")):
-        state["name_collected"] = False
-
-    return normalize_lead_state(state)
-
-
 def business_allows_auto_reply(business: dict, platform: str, channel: str = "") -> bool:
     business = business or {}
     if not normalize_bool(business.get("bot_enabled"), True):
@@ -2854,10 +2578,6 @@ Hard rules:
 - Never promise reservation/holding stock unless the business facts explicitly say it is allowed.
 - Never use uncertain fabricated statements.
 - Never mention AI, system, prompt, automation.
-- Before asking for the customer's name or phone number, check the conversation history and known lead state first.
-- If the customer has already shared a phone number in any valid format, never ask for it again in the same conversation.
-- If the customer has already shared their name, never ask for it again in the same conversation.
-- If both name and phone are already known, confirm briefly and move to the next sales step instead of repeating the same question.
 """.strip(),
     "instagram_prompt": """
 Instagram rules:
@@ -2895,10 +2615,6 @@ When client is close to order, collect:
 - name
 - phone
 - city/address
-
-Never repeat the same lead-collection question more than once in the same conversation.
-If phone is already collected, do not ask for phone again.
-If name is already collected, do not ask for name again.
 """.strip(),
     "sales_rules": """
 - Answer the exact question first.
@@ -2940,9 +2656,6 @@ Handoff immediately when:
 Handoff closing line:
 - "Ismingiz va telefon raqamingizni yozib qoldiring, siz bilan bog'lanamiz."
 
-If the customer already sent a phone number, do not use the full name+phone request again.
-Ask only for the missing field.
-
 Do not invent information before handoff.
 """.strip(),
 }
@@ -2964,9 +2677,6 @@ Sales-agent rules:
 - Use only configured business strengths and facts.
 - Tone: samimiy, short, practical, complete enough to help the customer buy.
 - Ask qualification questions naturally: name, city, phone number.
-- Never ask for a phone number again if the customer already sent one in the current conversation.
-- Never ask for a name again if the customer already sent one in the current conversation.
-- If both name and phone are already collected, confirm briefly and continue the sale.
 - Product availability should be confirmed, never invented.
 - Never say stock is reserved or will be reserved unless configured.
 - Never invent price, discount, stock, delivery time, payment terms, or availability.
@@ -3299,11 +3009,6 @@ Safety rules:
 - Reply in the same language as the customer.
 - Understand Uzbek Latin, Uzbek Cyrillic, Russian, English, slang, typos, and mixed messages.
 - Answer the exact question first.
-- Check the known customer information block before asking for name or phone.
-- Never repeat the same lead-collection question after it has already been answered.
-- If the lead state shows the phone is already collected, do not ask for it again.
-- If the lead state shows the name is already collected, do not ask for it again.
-- If both are collected, acknowledge and move to the next sales step.
 - Never invent prices, stock, delivery, discounts, addresses, or availability.
 - Use only the business facts above.
 - If the customer asks for the phone/contact/manager number, provide the exact contact from Business facts.
@@ -3800,120 +3505,6 @@ def complete_sentence_reply(text: str, limit: int = 950) -> str:
     return text.rstrip(" :：,;-").strip() + "."
 
 
-LEAD_PHONE_ASK_MARKERS = (
-    "telefon raqamingizni",
-    "telefon raqamingiz",
-    "telefon nomeringizni",
-    "raqamingizni yozib qoldiring",
-    "nomer qoldiring",
-    "phone number",
-    "leave your name and phone number",
-    "please leave your name and phone number",
-    "номер телефона",
-    "оставьте, пожалуйста, ваше имя и номер телефона",
-)
-
-
-LEAD_NAME_ASK_MARKERS = (
-    "ismingizni",
-    "ismingiz nima",
-    "ismingiz va telefon raqamingizni",
-    "your name",
-    "what is your name",
-    "ваше имя",
-    "как вас зовут",
-    "атыңызды",
-)
-
-
-def _reply_mentions_phone_request(text: str) -> bool:
-    lower = normalize_id(text).lower()
-    return any(marker in lower for marker in LEAD_PHONE_ASK_MARKERS)
-
-
-def _reply_mentions_name_request(text: str) -> bool:
-    lower = normalize_id(text).lower()
-    return any(marker in lower for marker in LEAD_NAME_ASK_MARKERS)
-
-
-def lead_followup_reply(user_text: str, business: dict = None, lead_state: dict = None) -> str:
-    lang = detect_customer_language(user_text)
-    state = normalize_lead_state(lead_state)
-    has_phone = bool(state.get("phone_collected"))
-    has_name = bool(state.get("name_collected"))
-
-    if has_phone and has_name:
-        if lang == "en":
-            return "Thanks, we have your details. Our manager will contact you."
-        if lang == "ru":
-            return "Спасибо, мы получили ваши данные. Наш менеджер свяжется с вами."
-        if lang == "kk":
-            return "Рақмет, мәліметтеріңізді алдық. Менеджеріміз сізбен байланысады."
-        return "Rahmat, ma'lumotlaringizni oldik. Menejerimiz siz bilan bog'lanadi."
-
-    if has_phone and not has_name:
-        if lang == "en":
-            return "Thanks, we got your phone number. Please leave your name too, and our manager will contact you."
-        if lang == "ru":
-            return "Спасибо, ваш номер мы получили. Пожалуйста, оставьте еще имя, и наш менеджер свяжется с вами."
-        if lang == "kk":
-            return "Рақмет, телефон нөміріңізді алдық. Атыңызды да жазып жіберсеңіз, менеджеріміз хабарласады."
-        return "Rahmat, telefon raqamingizni oldik. Ismingizni ham yozib qoldirsangiz, menejerimiz siz bilan bog'lanadi."
-
-    if has_name and not has_phone:
-        if lang == "en":
-            return "Thanks, we got your name. Please leave your phone number too, and our manager will contact you."
-        if lang == "ru":
-            return "Спасибо, ваше имя мы получили. Пожалуйста, оставьте еще номер телефона, и наш менеджер свяжется с вами."
-        if lang == "kk":
-            return "Рақмет, атыңызды алдық. Телефон нөміріңізді де жіберсеңіз, менеджеріміз хабарласады."
-        return "Rahmat, ismingizni oldik. Telefon raqamingizni ham yozib qoldirsangiz, menejerimiz siz bilan bog'lanadi."
-
-    return ""
-
-
-def enforce_lead_reply_guardrails(reply_text: str, user_text: str, business: dict = None, lead_state: dict = None) -> str:
-    reply = normalize_id(reply_text)
-    if not reply:
-        return ""
-
-    state = normalize_lead_state(lead_state)
-    user_has_phone = bool(extract_phone_candidates(user_text))
-    user_has_name = bool(extract_customer_name_candidate(user_text))
-    phone_collected = bool(state.get("phone_collected") or user_has_phone)
-    name_collected = bool(state.get("name_collected") or user_has_name)
-
-    phone_request = _reply_mentions_phone_request(reply)
-    name_request = _reply_mentions_name_request(reply)
-
-    if phone_collected and phone_request:
-        fallback = lead_followup_reply(user_text, business, {**state, "phone_collected": True, "name_collected": name_collected})
-        if fallback:
-            return fallback
-
-    if name_collected and name_request and phone_collected:
-        fallback = lead_followup_reply(user_text, business, {**state, "phone_collected": True, "name_collected": True})
-        if fallback:
-            return fallback
-
-    if phone_collected and name_collected and (phone_request or name_request):
-        fallback = lead_followup_reply(user_text, business, {**state, "phone_collected": True, "name_collected": True})
-        if fallback:
-            return fallback
-
-    if phone_collected and not name_collected and phone_request and not name_request:
-        fallback = lead_followup_reply(user_text, business, {**state, "phone_collected": True, "name_collected": False})
-        if fallback:
-            return fallback
-
-    if name_collected and not phone_collected and name_request and not phone_request:
-        fallback = lead_followup_reply(user_text, business, {**state, "phone_collected": False, "name_collected": True})
-        if fallback:
-            return fallback
-
-    return reply
-
-
 def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
     catalog_link = get_catalog_link(business)
     if catalog_link and catalog_link in (reply_text or ""):
@@ -4144,7 +3735,7 @@ def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
 
 
 
-def clean_sales_reply(reply_text: str, user_text: str = "", business: dict = None, lead_state: dict = None) -> str:
+def clean_sales_reply(reply_text: str, user_text: str = "", business: dict = None) -> str:
     user = normalize_id(user_text).lower()
     lang = detect_customer_language(user_text)
     allow_handoff = business_allows_human_handoff(business)
@@ -4287,13 +3878,9 @@ def clean_sales_reply(reply_text: str, user_text: str = "", business: dict = Non
             text = "Assalomu alaykum 😊 Qanday yordam kerak?"
 
     text = complete_sentence_reply(text, limit=900)
-    text = enforce_lead_reply_guardrails(text, user_text, business, lead_state)
 
     if text:
         return text
-    lead_fallback = lead_followup_reply(user_text, business, lead_state)
-    if lead_fallback:
-        return lead_fallback
     if lang == "en":
         return "Understood."
     if lang == "kk":
@@ -5344,40 +4931,6 @@ def get_recent_platform_chat_history(platform: str, business: dict, customer_id:
         log("Could not load recent chat history", str(e))
         return []
 
-
-def get_recent_platform_message_rows(
-    platform: str,
-    business: dict,
-    customer_id: str = "",
-    channel: str = "",
-    limit: int = 20,
-) -> list:
-    platform = normalize_id(platform).lower()
-    customer_id = normalize_id(customer_id)
-    channel = normalize_id(channel)
-    if not platform or not customer_id:
-        return []
-
-    limit = min(max(1, limit), 50)
-
-    try:
-        query = (
-            supabase.table("inbox_messages")
-            .select("*")
-            .eq("platform", platform)
-            .eq("customer_id", customer_id)
-        )
-        if business and business.get("id"):
-            query = query.eq("business_id", business.get("id"))
-        if channel:
-            query = query.eq("channel", channel)
-
-        rows = query.order("created_at", desc=True).limit(limit).execute().data or []
-        return list(reversed(rows))
-    except Exception as e:
-        log("Could not load recent platform message rows", str(e))
-        return []
-
 def get_ai_reply(
     user_text: str,
     business: dict,
@@ -5386,7 +4939,6 @@ def get_ai_reply(
     channel: str = "",
     media_context: str = "",
     media_reply_hint: str = "",
-    lead_state: dict = None,
 ):
     try:
         if wants_business_phone_number(user_text):
@@ -5399,10 +4951,6 @@ def get_ai_reply(
             return off_topic_reply
 
         messages = [{"role": "system", "content": build_sales_system_prompt(business, platform)}]
-        normalized_lead_state = normalize_lead_state(lead_state)
-        lead_context = build_known_customer_information_block(normalized_lead_state)
-        if lead_context:
-            messages.append({"role": "system", "content": lead_context})
         if media_context:
             messages.append({"role": "system", "content": media_context})
         if media_reply_hint:
@@ -5422,9 +4970,9 @@ def get_ai_reply(
             "AI response",
         )
         if reply:
-            return clean_sales_reply(reply.strip(), user_text, business, normalized_lead_state)
+            return clean_sales_reply(reply.strip(), user_text, business)
         if media_reply_hint:
-            return clean_sales_reply(media_reply_hint, user_text, business, normalized_lead_state)
+            return clean_sales_reply(media_reply_hint, user_text, business)
         lang = detect_customer_language(user_text)
         if lang == "en":
             return "Your message has been received."
@@ -5784,17 +5332,6 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 **messaging,
                 "sender_profile": sender_profile,
             }
-        recent_lead_rows = get_recent_platform_message_rows("instagram", business, sender_id, "dm", limit=20)
-        lead_state = derive_customer_lead_state(
-            "instagram",
-            business,
-            sender_id,
-            "dm",
-            recent_rows=recent_lead_rows,
-            current_text=message_text,
-            customer_name_hint=customer_display_name,
-            message_id=message_id,
-        )
         if share_asset_id and access_token:
             try:
                 share_media_info = fetch_instagram_media_info(access_token, share_asset_id, business) or {}
@@ -5857,14 +5394,6 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             post_image_url=post_image_url,
             post_media_type=post_media_type,
         )
-        upsert_customer_lead_state(
-            business_id=business.get("id"),
-            platform="instagram",
-            customer_id=sender_id,
-            lead_state=lead_state,
-            channel="dm",
-            updated_by="instagram_bot",
-        )
 
         if not claim_instagram_message_processing(business.get("id"), message_id, sender_id, "dm"):
             log("Instagram DM reply skipped: already claimed in database", {
@@ -5882,24 +5411,6 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
 
         if not is_chat_ai_enabled("instagram", "dm", sender_id, business.get("id")):
             mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_ai_disabled")
-            mark_processed(processed_message_ids, message_id)
-            return
-
-        existing_inbound = load_inbox_message_by_external_id(
-            business.get("id"),
-            "instagram",
-            sender_id,
-            message_id,
-            direction="inbound",
-        )
-        if existing_inbound and has_outbound_reply_after(
-            business.get("id"),
-            "instagram",
-            sender_id,
-            normalize_id(existing_inbound.get("created_at")),
-            "dm",
-        ):
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="duplicate_skipped")
             mark_processed(processed_message_ids, message_id)
             return
 
@@ -6123,7 +5634,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             or (media_type in {"photo", "video"} and not message.get("text"))
         )
         if use_direct_matcher_reply:
-            reply_text = clean_sales_reply(media_reply_hint, message_text or "photo", business, lead_state)
+            reply_text = clean_sales_reply(media_reply_hint, message_text or "photo", business)
         else:
             reply_text = get_ai_reply(
                 message_text or "Photo/Video received",
@@ -6133,7 +5644,6 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 "dm",
                 media_context=media_match_context,
                 media_reply_hint=media_reply_hint,
-                lead_state=lead_state,
             )
 
         should_send_catalog = (
