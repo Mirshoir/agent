@@ -120,10 +120,18 @@ DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-CATALOG_SUPABASE_URL = os.getenv("CATALOG_SUPABASE_URL") or os.getenv("PRODUCT_CATALOG_SUPABASE_URL") or SUPABASE_URL
+CATALOG_SUPABASE_URL = (
+    os.getenv("CATALOG_SUPABASE_URL")
+    or os.getenv("PRODUCT_CATALOG_SUPABASE_URL")
+    or os.getenv("PRODUCT_MATCHER_SUPABASE_URL")
+    or os.getenv("MILANA_CATALOG_SUPABASE_URL")
+    or SUPABASE_URL
+)
 CATALOG_SUPABASE_SERVICE_KEY = (
     os.getenv("CATALOG_SUPABASE_SERVICE_KEY")
     or os.getenv("PRODUCT_CATALOG_SUPABASE_SERVICE_KEY")
+    or os.getenv("PRODUCT_MATCHER_SUPABASE_SERVICE_KEY")
+    or os.getenv("MILANA_CATALOG_SUPABASE_SERVICE_KEY")
     or SUPABASE_SERVICE_KEY
 )
 
@@ -4045,9 +4053,12 @@ def _get_local_catalog_rows(force_refresh: bool = False) -> list[dict]:
         )
         rows = res.data if isinstance(res.data, list) else []
     except Exception as exc:
+        same_database = normalize_id(CATALOG_SUPABASE_URL).rstrip("/") == normalize_id(SUPABASE_URL).rstrip("/")
         log("Local catalog fetch failed", {
             "table": PRODUCT_MATCHER_LOCAL_CATALOG_TABLE,
             "catalog_supabase_url": normalize_id(CATALOG_SUPABASE_URL).split("//")[-1].split(".")[0] if CATALOG_SUPABASE_URL else "",
+            "same_as_business_database": same_database,
+            "fix": "Set CATALOG_SUPABASE_URL and CATALOG_SUPABASE_SERVICE_KEY in Render." if same_database else "",
             "error": str(exc),
         })
         return cached_rows or []
