@@ -4,3 +4,5 @@ requests
 python-dotenv
 supabase
 telethon
+pillow
+numpy
