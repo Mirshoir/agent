@@ -120,6 +120,12 @@ DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+CATALOG_SUPABASE_URL = os.getenv("CATALOG_SUPABASE_URL") or os.getenv("PRODUCT_CATALOG_SUPABASE_URL") or SUPABASE_URL
+CATALOG_SUPABASE_SERVICE_KEY = (
+    os.getenv("CATALOG_SUPABASE_SERVICE_KEY")
+    or os.getenv("PRODUCT_CATALOG_SUPABASE_SERVICE_KEY")
+    or SUPABASE_SERVICE_KEY
+)
 
 META_APP_ID = os.getenv("META_APP_ID")
 META_APP_SECRET = os.getenv("META_APP_SECRET")
@@ -222,6 +228,7 @@ if not SUPABASE_SERVICE_KEY:
     raise RuntimeError("Missing SUPABASE_SERVICE_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+catalog_supabase = create_client(CATALOG_SUPABASE_URL, CATALOG_SUPABASE_SERVICE_KEY)
 
 processed_message_ids = {}
 processed_comment_ids = {}
@@ -4030,7 +4037,7 @@ def _get_local_catalog_rows(force_refresh: bool = False) -> list[dict]:
     fields = "product_code,model_code,price,currency,combined_text,image_url,image_sha256,image_fingerprint,embedding_model,embedding_preview,source_pdf,page,card_index"
     try:
         res = (
-            supabase
+            catalog_supabase
             .table(PRODUCT_MATCHER_LOCAL_CATALOG_TABLE)
             .select(fields)
             .limit(PRODUCT_MATCHER_LOCAL_FETCH_LIMIT)
@@ -4038,7 +4045,11 @@ def _get_local_catalog_rows(force_refresh: bool = False) -> list[dict]:
         )
         rows = res.data if isinstance(res.data, list) else []
     except Exception as exc:
-        log("Local catalog fetch failed", {"table": PRODUCT_MATCHER_LOCAL_CATALOG_TABLE, "error": str(exc)})
+        log("Local catalog fetch failed", {
+            "table": PRODUCT_MATCHER_LOCAL_CATALOG_TABLE,
+            "catalog_supabase_url": normalize_id(CATALOG_SUPABASE_URL).split("//")[-1].split(".")[0] if CATALOG_SUPABASE_URL else "",
+            "error": str(exc),
+        })
         return cached_rows or []
 
     normalized_rows = []
@@ -6619,6 +6630,7 @@ async def api_health():
         "product_matcher_local_enabled": PRODUCT_MATCHER_LOCAL_ENABLED,
         "product_matcher_local_only": PRODUCT_MATCHER_LOCAL_ONLY,
         "product_matcher_local_catalog_table": PRODUCT_MATCHER_LOCAL_CATALOG_TABLE,
+        "product_matcher_catalog_database": normalize_id(CATALOG_SUPABASE_URL).split("//")[-1].split(".")[0] if CATALOG_SUPABASE_URL else "",
         "product_matcher_urls": PRODUCT_MATCHER_API_URLS,
         "product_matcher_context_ttl_seconds": PRODUCT_MATCHER_CONTEXT_TTL_SECONDS,
     }
