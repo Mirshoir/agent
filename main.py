@@ -3025,18 +3025,37 @@ def generic_price_fallback_reply(user_text: str, business: dict = None) -> str:
     return "Aniq narxni menejerimiz tasdiqlaydi. Sizga qaysi mahsulot yoki model kerak?"
 
 
+def business_products_summary(business: dict = None, limit: int = 4) -> str:
+    business = business or {}
+    raw = normalize_id(business.get("products"))
+    if not raw:
+        return ""
+
+    parts = []
+    for chunk in re.split(r"[,;\n/]+", raw):
+        clean = re.sub(r"\s+", " ", normalize_id(chunk)).strip(" .:-")
+        if clean and clean.lower() not in {item.lower() for item in parts}:
+            parts.append(clean)
+        if len(parts) >= limit:
+            break
+    return ", ".join(parts)
+
+
 def replacement_for_forbidden_product_photo_question(user_text: str = "", business: dict = None) -> str:
     lang = detect_customer_language(user_text)
     if is_price_question(user_text):
         return generic_price_fallback_reply(user_text, business)
 
+    products = business_products_summary(business)
+    product_hint = f" Bizda asosan {products} bor." if products else ""
+
     if lang == "en":
-        return "Thanks for the photo. I will check the closest matching model and help with the details."
+        return f"Thanks for the photo.{product_hint} Which model or size are you interested in?".strip()
     if lang == "ru":
-        return "Спасибо за фото. Проверю ближайшую подходящую модель и помогу с деталями."
+        return f"Спасибо за фото.{product_hint} Какая модель или размер вас интересует?".strip()
     if lang == "kk":
-        return "Фото үшін рахмет. Ең жақын модельді тексеріп, мәліметпен көмектесемін."
-    return "Rasm uchun rahmat. Eng yaqin modelni tekshirib, ma'lumot bilan yordam beraman."
+        return f"Фото үшін рахмет.{product_hint} Қай модель немесе өлшем керек?".strip()
+    return f"Rasm uchun rahmat.{product_hint} Qaysi model yoki o'lcham kerak?".strip()
 
 
 def get_sales_phone(business: dict) -> str:
@@ -4724,6 +4743,8 @@ def should_reuse_recent_media_match(user_text: str, media_type: str = "", busine
     if not text:
         return False
     lower = text.lower()
+    if is_greeting_only(lower):
+        return True
     if re.search(r"\b\d+\s*(qop|meshok|ta|dona|pack|quti)\b", lower):
         return True
     if has_strong_business_sales_context(lower, business):
@@ -5251,12 +5272,21 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             return
 
         if not access_token:
+            log("Instagram DM reply skipped: missing access token", {
+                "customer_id": sender_id,
+                "message_id": message_id,
+                "media_type": media_type,
+                "post_permalink": post_permalink,
+                "has_media_url": bool(media_url),
+                "has_post_image_url": bool(post_image_url),
+            })
             return
 
         media_match_context = ""
         media_reply_hint = ""
         matcher_source_url = media_url or post_image_url
         business_id = normalize_id(business.get("id"))
+        recent_media_context_found = False
 
         if matcher_source_url and media_type in {"photo", "video", "file"}:
             log("Instagram DM media matcher request", {
@@ -5301,6 +5331,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         elif should_reuse_recent_media_match(message_text or "", media_type or "", business):
             cached_match = load_recent_instagram_media_match(business_id=business_id, customer_id=sender_id)
             if cached_match:
+                recent_media_context_found = True
                 cached_context = normalize_id(cached_match.get("context"))
                 if cached_context:
                     media_match_context = (
@@ -5324,6 +5355,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 replied_media_url = normalize_id(media_ref.get("media_url"))
                 replied_media_type = normalize_id(media_ref.get("media_type")).lower() or "photo"
                 if replied_media_url and replied_media_type in {"photo", "video", "file"}:
+                    recent_media_context_found = True
                     log("Instagram DM reply-to media matcher request", {
                         "customer_id": sender_id,
                         "message_id": message_id,
@@ -5377,6 +5409,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 recent_media_url = normalize_id(recent_media_ref.get("media_url"))
                 recent_media_type = normalize_id(recent_media_ref.get("media_type")).lower() or "photo"
                 if recent_media_url and recent_media_type in {"photo", "video", "file"}:
+                    recent_media_context_found = True
                     log("Instagram DM recent-media matcher request", {
                         "customer_id": sender_id,
                         "message_id": message_id,
@@ -5419,23 +5452,37 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                             "media_type": recent_media_type,
                         })
 
-        use_direct_matcher_reply = bool(media_reply_hint) and (
-            is_auto_media_placeholder_message(message_text)
-            or not normalize_id(message_text)
-            or (media_type in {"photo", "video"} and not message.get("text"))
-        )
-        if use_direct_matcher_reply:
-            reply_text = clean_sales_reply(media_reply_hint, message_text or "photo", business)
-        else:
-            reply_text = get_ai_reply(
-                message_text or "Photo/Video received",
-                business,
-                "instagram",
-                sender_id,
-                "dm",
-                media_context=media_match_context,
-                media_reply_hint=media_reply_hint,
+        needs_photo_fallback = (
+            (media_type in {"photo", "video", "file"} or recent_media_context_found)
+            and not media_match_context
+            and not media_reply_hint
+            and (
+                is_greeting_only(message_text or "")
+                or is_low_signal_message(message_text or "", messaging)
+                or not normalize_id(message_text)
+                or is_auto_media_placeholder_message(message_text or "")
             )
+        )
+        if needs_photo_fallback:
+            reply_text = replacement_for_forbidden_product_photo_question(message_text or "", business)
+        else:
+            use_direct_matcher_reply = bool(media_reply_hint) and (
+                is_auto_media_placeholder_message(message_text)
+                or not normalize_id(message_text)
+                or (media_type in {"photo", "video"} and not message.get("text"))
+            )
+            if use_direct_matcher_reply:
+                reply_text = clean_sales_reply(media_reply_hint, message_text or "photo", business)
+            else:
+                reply_text = get_ai_reply(
+                    message_text or "Photo/Video received",
+                    business,
+                    "instagram",
+                    sender_id,
+                    "dm",
+                    media_context=media_match_context,
+                    media_reply_hint=media_reply_hint,
+                )
 
         should_send_catalog = (
             bool(get_catalog_link(business))
@@ -5471,6 +5518,14 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 channel="dm",
             )
             mark_processed(processed_message_ids, message_id)
+        elif send_result is not None:
+            log("Instagram DM send failed", {
+                "customer_id": sender_id,
+                "message_id": message_id,
+                "media_type": media_type,
+                "reply_preview": reply_text[:180],
+                "result": raw_result,
+            })
 
     except Exception as e:
         log("Instagram DM processing error", str(e))
