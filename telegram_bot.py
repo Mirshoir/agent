@@ -7,6 +7,7 @@ import requests
 from fastapi import APIRouter, Request, Header
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from supabase import create_client
+from catalog_matcher import analyze_media_for_sales_reply_local as analyze_catalog_media
 
 try:
     from telethon import TelegramClient, events
@@ -1611,6 +1612,7 @@ async def telegram_webhook(request: Request):
             largest_photo = photos[-1] if photos else {}
             file_id = largest_photo.get("file_id")
             caption = normalize_text(message.get("caption") or "📸 Photo")
+            media_url = get_file_url(file_id, business)
 
             save_telegram_message(
                 business=business,
@@ -1623,8 +1625,46 @@ async def telegram_webhook(request: Request):
                 customer_name=customer_name,
                 chat_id=chat_id,
                 media_type="photo",
-                media_url=get_file_url(file_id, business),
+                media_url=media_url,
                 media_file_id=file_id,
+            )
+
+            if not business_allows_auto_reply(business, "telegram_bot"):
+                return JSONResponse({"status": "automation_disabled"})
+
+            if not is_chat_ai_enabled("telegram", channel, customer_id, business.get("id")):
+                return JSONResponse({"status": "ai_disabled"})
+
+            media_match = analyze_catalog_media(
+                media_url or "",
+                caption or "📸 Photo",
+                media_type="photo",
+            )
+            reply = get_ai_reply(
+                user_text=caption or "📸 Photo",
+                business=business,
+                customer_id=customer_id,
+                channel=channel,
+                media_context=media_match.get("context", "") if media_match else "",
+                media_reply_hint=media_match.get("reply_hint", "") if media_match else "",
+            )
+
+            send_result = send_telegram_bot_message(
+                chat_id=chat_id,
+                text=reply,
+                reply_to_message_id=message_id if chat_type in ["group", "supergroup"] else None,
+                business=business,
+            )
+            save_telegram_message(
+                business=business,
+                customer_id=customer_id,
+                text=reply,
+                direction="outbound",
+                message_id=safe_json(send_result).get("result", {}).get("message_id", ""),
+                raw_payload=safe_json(send_result),
+                channel=channel,
+                customer_name=conversation_name or customer_name,
+                chat_id=chat_id,
             )
 
         elif message.get("video"):
@@ -1747,6 +1787,7 @@ async def process_telegram_user_event(event):
         if event.media:
             media_type = None
             caption = text or "📎 Media sent"
+            media_url = ""
 
             if hasattr(event.media, "photo"):
                 media_type = "photo"
@@ -1764,6 +1805,10 @@ async def process_telegram_user_event(event):
                     media_type = "file"
 
             if media_type:
+                if hasattr(event.media, "photo") or media_type == "file":
+                    base_url = normalize_text(PUBLIC_BASE_URL).rstrip("/")
+                    media_url = f"{base_url}/api/telegram-user-media/{sender_id}/{message_id}" if base_url else f"/api/telegram-user-media/{sender_id}/{message_id}"
+
                 save_telegram_message(
                     business=business,
                     customer_id=sender_id,
@@ -1775,13 +1820,41 @@ async def process_telegram_user_event(event):
                         "sender_id": sender_id,
                         "message_id": message_id,
                         "source": "telethon_user_account",
-                        "media_proxy": f"/api/telegram-user-media/{sender_id}/{message_id}",
+                        "media_proxy": media_url,
                     },
                     channel="telegram_user_private",
                     customer_name=customer_name,
                     chat_id=chat_id,
                     media_type=media_type,
+                    media_url=media_url,
                 )
+
+                if media_type == "photo" and business_allows_auto_reply(business, "telegram_bot") and is_chat_ai_enabled("telegram", "telegram_user_private", sender_id, business.get("id")):
+                    media_match = analyze_catalog_media(media_url or "", caption or "📸 Photo", media_type="photo")
+                    reply = get_ai_reply(
+                        user_text=caption or "📸 Photo",
+                        business=business,
+                        customer_id=sender_id,
+                        channel="telegram_user_private",
+                        media_context=media_match.get("context", "") if media_match else "",
+                        media_reply_hint=media_match.get("reply_hint", "") if media_match else "",
+                    )
+                    sent = await event.respond(reply)
+
+                    save_telegram_message(
+                        business=business,
+                        customer_id=sender_id,
+                        text=reply,
+                        direction="outbound",
+                        message_id=getattr(sent, "id", ""),
+                        raw_payload={
+                            "chat_id": chat_id,
+                            "source": "telethon_user_account",
+                        },
+                        channel="telegram_user_private",
+                        customer_name=customer_name,
+                        chat_id=chat_id,
+                    )
 
         elif text:
             buffer_key = f"user:{chat_id}:{sender_id}"
