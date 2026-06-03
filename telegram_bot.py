@@ -24,7 +24,7 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "")
 
 TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID", "")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
-TELEGRAM_USER_SESSION = os.getenv("TELEGRAM_USER_SESSION", "milana_user_session")
+TELEGRAM_USER_SESSION = os.getenv("TELEGRAM_USER_SESSION", "telegram_user_session")
 ENABLE_TELEGRAM_USER_CLIENT = os.getenv("ENABLE_TELEGRAM_USER_CLIENT", "false").lower() == "true"
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -67,6 +67,45 @@ def log(title, data=None):
     if data is not None:
         print(data)
     print("=" * 80 + "\n")
+
+
+def normalize_bool(value, default=True):
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "enabled", "enable", "full_auto"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disabled", "disable", "manual", "human_only", "human"}:
+        return False
+    return default
+
+
+def business_memory_limit(business: dict = None, default: int = 8) -> int:
+    business = business or {}
+    if not normalize_bool(business.get("memory_enabled"), True):
+        return 0
+    try:
+        return max(0, min(20, int(business.get("memory_limit") or default)))
+    except Exception:
+        return default
+
+
+def business_allows_human_handoff(business: dict = None) -> bool:
+    return normalize_bool((business or {}).get("human_takeover_enabled"), True)
+
+
+def business_allows_auto_reply(business: dict = None, channel: str = "") -> bool:
+    business = business or {}
+    if not normalize_bool(business.get("bot_enabled"), True):
+        return False
+    mode = str(business.get("automation_mode") or "").strip().upper()
+    if mode in {"OFF", "DISABLED", "MANUAL", "HUMAN_ONLY"}:
+        return False
+    if normalize_text(channel).lower() in {"telegram_bot", "bot"}:
+        return normalize_bool(business.get("telegram_bot_enabled"), True)
+    return True
 
 
 def normalize_text(value):
@@ -190,14 +229,35 @@ def wants_deal_handoff(text: str) -> bool:
     return any(k in s for k in keywords)
 
 
-def deal_handoff_text(lang: str) -> str:
+def business_contact_text(business: dict = None) -> str:
+    business = business or {}
+    return normalize_text(
+        business.get("telegram_admin")
+        or business.get("telegram_single")
+        or business.get("sales_phone")
+        or business.get("catalog_link")
+        or ""
+    )
+
+
+def deal_handoff_text(lang: str, business: dict = None) -> str:
+    contact = business_contact_text(business)
+    if not contact:
+        if lang == "en":
+            return "Great. Please leave your name and phone number, and our manager will contact you."
+        if lang == "ru":
+            return "Отлично. Оставьте, пожалуйста, имя и номер телефона, менеджер свяжется с вами."
+        if lang == "kk":
+            return "Керемет. Атыңыз бен телефон нөміріңізді қалдырыңыз, менеджер сізбен байланысады."
+        return "Zo'r. Ismingiz va telefon raqamingizni qoldiring, menejerimiz siz bilan bog'lanadi."
+
     if lang == "en":
-        return "Great. To finalize the deal, please contact our admin on Telegram: @milana_admin25."
+        return f"Great. To finalize the deal, please contact us here: {contact}."
     if lang == "ru":
-        return "Отлично. Чтобы оформить сделку, пожалуйста, свяжитесь с нашим админом в Telegram: @milana_admin25."
+        return f"Отлично. Чтобы оформить сделку, свяжитесь с нами здесь: {contact}."
     if lang == "kk":
-        return "Керемет. Мәмілені рәсімдеу үшін Telegram-дағы әкімшіге жазыңыз: @milana_admin25."
-    return "Zo'r. Kelishuvni yakunlash uchun Telegramdagi adminimizga yozing: @milana_admin25."
+        return f"Керемет. Мәмілені рәсімдеу үшін бізге осы жерге жазыңыз: {contact}."
+    return f"Zo'r. Kelishuvni yakunlash uchun shu yerga yozing: {contact}."
 
 
 def detect_customer_language(text: str) -> str:
@@ -511,13 +571,13 @@ def get_active_business():
 def build_business_context(business):
     return f"""
 Business name:
-{business.get("business_name", "Milana Premium")}
+{business.get("business_name", "")}
 
 Business type:
-{business.get("business_type", "Textile and Clothing")}
+{business.get("business_type", "")}
 
 Language:
-{business.get("language", "uz")}
+{business.get("language", "")}
 
 Products:
 {business.get("products", "")}
@@ -539,6 +599,16 @@ Phone:
 
 Knowledge:
 {business.get("knowledge", "")}
+
+AI reply rules:
+{business.get("ai_reply_rules", "")}
+
+Runtime settings:
+- automation_mode: {business.get("automation_mode", "")}
+- human_takeover_enabled: {business.get("human_takeover_enabled", "")}
+- bot_language_mode: {business.get("bot_language_mode", "")}
+- memory_enabled: {business.get("memory_enabled", "")}
+- memory_limit: {business.get("memory_limit", "")}
 """
 
 
@@ -556,7 +626,7 @@ DEFAULT_AI_PROMPT_SETTINGS = {
         "- In groups, answer only when mentioned or replied to.\n"
         "- Avoid long lists unless the customer asks for a list.\n"
         "- Share Telegram catalog/group links only when relevant.\n"
-        "- If customer is ready to make a deal/order, direct them to @milana_admin25."
+        "- If customer is ready to make a deal/order, use the configured business contact or ask for their name and phone."
     ),
     "opening_message": "Assalomu alaykum 😊 Qanday yordam kerak?",
     "lead_collection_rules": (
@@ -656,8 +726,11 @@ Knowledge:
 """
 
 
-def get_recent_chat_history(customer_id, platform="telegram", channel=None, limit=10):
+def get_recent_chat_history(customer_id, platform="telegram", channel=None, limit=10, business: dict = None):
     try:
+        limit = min(limit, business_memory_limit(business, default=limit))
+        if limit <= 0:
+            return []
         query = (
             supabase.table("inbox_messages")
             .select("role,content,media_type,media_url")
@@ -735,6 +808,13 @@ Human handoff rules:
 
 Platform-specific rules:
 {settings.get("telegram_prompt", "")}
+
+Business runtime settings:
+- automation_mode: {business.get("automation_mode", "")}
+- human_takeover_enabled: {business.get("human_takeover_enabled", "")}
+- bot_language_mode: {business.get("bot_language_mode", "")}
+- memory_enabled: {business.get("memory_enabled", "")}
+- memory_limit: {business.get("memory_limit", "")}
 
 Safety rules:
 - Reply in the same language as the customer.
@@ -862,12 +942,12 @@ def call_ai_chat(messages, business, log_label):
 
 
 
-def clean_sales_reply(reply_text, user_text=""):
+def clean_sales_reply(reply_text, user_text="", business=None):
     user = normalize_text(user_text).lower()
     lang = detect_customer_language(user_text)
 
-    if wants_deal_handoff(user_text):
-        return deal_handoff_text(lang)
+    if wants_deal_handoff(user_text) and business_allows_human_handoff(business):
+        return deal_handoff_text(lang, business)
 
     if any(phrase in user for phrase in [
         "meni haqimda hamma ma'lumotni unut",
@@ -997,7 +1077,8 @@ def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private
         customer_id=customer_id,
         platform="telegram",
         channel=channel,
-        limit=8,
+        limit=20,
+        business=business,
     )
 
     messages = [{"role": "system", "content": build_telegram_system_prompt(business)}]
@@ -1016,7 +1097,7 @@ def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private
     try:
         reply = call_ai_chat(messages, business, "Telegram AI response")
         if reply:
-            return clean_sales_reply(reply[:1500], user_text)
+            return clean_sales_reply(reply[:1500], user_text, business)
         lang = detect_customer_language(user_text)
         if lang == "en":
             return "Your message has been received."
@@ -1478,6 +1559,9 @@ async def telegram_webhook(request: Request):
                 if reply_from_id and is_group_admin(chat_id, reply_from_id, business):
                     return JSONResponse({"status": "ignored_admin_thread"})
 
+            if not business_allows_auto_reply(business, "telegram_bot"):
+                return JSONResponse({"status": "automation_disabled"})
+
             if not is_chat_ai_enabled("telegram", channel, customer_id, business.get("id")):
                 return JSONResponse({"status": "ai_disabled"})
 
@@ -1909,7 +1993,7 @@ async def start_telegram_user_client():
         if not await TELEGRAM_USER_CLIENT.is_user_authorized():
             log(
                 "Telegram private user session is not authorized. "
-                "Create milana_user_session.session locally first, then deploy it."
+                "Create telegram_user_session.session locally first, then deploy it."
             )
             await TELEGRAM_USER_CLIENT.disconnect()
             TELEGRAM_USER_CLIENT = None
