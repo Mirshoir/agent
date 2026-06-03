@@ -2175,6 +2175,77 @@ def save_inbox_message(
         log("Could not save inbox message", str(e))
 
 
+def load_inbox_message_by_external_id(
+    business_id: str,
+    platform: str,
+    customer_id: str,
+    external_message_id: str,
+    direction: str = "",
+) -> dict:
+    business_id = normalize_id(business_id)
+    platform = normalize_id(platform)
+    customer_id = normalize_id(customer_id)
+    external_message_id = normalize_id(external_message_id)
+    direction = normalize_id(direction)
+    if not business_id or not platform or not customer_id or not external_message_id:
+        return {}
+
+    try:
+        query = (
+            supabase.table("inbox_messages")
+            .select("id,created_at,external_message_id,direction,platform,customer_id")
+            .eq("business_id", business_id)
+            .eq("platform", platform)
+            .eq("customer_id", customer_id)
+            .eq("external_message_id", external_message_id)
+            .order("created_at", desc=True)
+            .limit(5)
+        )
+        if direction:
+            query = query.eq("direction", direction)
+        rows = query.execute().data or []
+        return rows[0] if rows and isinstance(rows[0], dict) else {}
+    except Exception as exc:
+        log("Could not load inbox message by external id", {"business_id": business_id, "platform": platform, "external_message_id": external_message_id, "error": str(exc)})
+        return {}
+
+
+def has_outbound_reply_after(
+    business_id: str,
+    platform: str,
+    customer_id: str,
+    inbound_created_at: str,
+    channel: str = "",
+) -> bool:
+    business_id = normalize_id(business_id)
+    platform = normalize_id(platform)
+    customer_id = normalize_id(customer_id)
+    inbound_created_at = normalize_id(inbound_created_at)
+    channel = normalize_id(channel)
+    if not business_id or not platform or not customer_id or not inbound_created_at:
+        return False
+
+    try:
+        query = (
+            supabase.table("inbox_messages")
+            .select("id,created_at,external_message_id")
+            .eq("business_id", business_id)
+            .eq("platform", platform)
+            .eq("customer_id", customer_id)
+            .eq("direction", "outbound")
+            .gt("created_at", inbound_created_at)
+            .order("created_at", desc=True)
+            .limit(1)
+        )
+        if channel:
+            query = query.eq("channel", channel)
+        rows = query.execute().data or []
+        return bool(rows and isinstance(rows[0], dict))
+    except Exception as exc:
+        log("Could not check outbound reply dedupe", {"business_id": business_id, "platform": platform, "customer_id": customer_id, "error": str(exc)})
+        return False
+
+
 def get_message_count(platform=None, business_ids=None):
     try:
         q = supabase.table("inbox_messages").select("id", count="exact")
@@ -5249,6 +5320,30 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             post_image_url=post_image_url,
             post_media_type=post_media_type,
         )
+
+        inbound_record = load_inbox_message_by_external_id(
+            business_id=business.get("id"),
+            platform="instagram",
+            customer_id=sender_id,
+            external_message_id=message_id,
+            direction="inbound",
+        )
+        inbound_created_at = normalize_id(inbound_record.get("created_at"))
+
+        if inbound_created_at and has_outbound_reply_after(
+            business_id=business.get("id"),
+            platform="instagram",
+            customer_id=sender_id,
+            inbound_created_at=inbound_created_at,
+            channel="dm",
+        ):
+            log("Instagram DM reply skipped: duplicate inbound already answered", {
+                "customer_id": sender_id,
+                "message_id": message_id,
+                "inbound_created_at": inbound_created_at,
+            })
+            mark_processed(processed_message_ids, message_id)
+            return
 
         if not business_allows_auto_reply(business, "instagram", "dm"):
             mark_processed(processed_message_ids, message_id)
