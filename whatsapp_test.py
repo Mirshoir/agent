@@ -4,6 +4,7 @@ import re
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse, JSONResponse
+from catalog_matcher import analyze_media_for_sales_reply_local as analyze_catalog_media
 
 app = FastAPI()
 
@@ -113,6 +114,25 @@ def business_allows_auto_reply() -> bool:
 
 def business_allows_human_handoff() -> bool:
     return normalize_bool(HUMAN_TAKEOVER_ENABLED, True)
+
+
+def get_whatsapp_media_download_url(media_id: str) -> str:
+    clean_media_id = str(media_id or "").strip()
+    if not clean_media_id or not WHATSAPP_ACCESS_TOKEN:
+        return ""
+
+    try:
+        res = requests.get(
+            f"https://graph.facebook.com/{GRAPH_VERSION}/{clean_media_id}",
+            headers={"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}"},
+            timeout=30,
+        )
+        if not res.ok:
+            return ""
+        data = res.json()
+        return str(data.get("url") or "").strip()
+    except Exception:
+        return ""
 
 
 def detect_customer_language(text: str) -> str:
@@ -407,7 +427,7 @@ Business context:
 """
 
 
-def get_ai_reply(phone: str, user_text: str) -> str:
+def get_ai_reply(phone: str, user_text: str, media_context: str = "", media_reply_hint: str = "") -> str:
     chat = get_chat(phone)
 
     if not chat["intro_sent"]:
@@ -420,6 +440,13 @@ def get_ai_reply(phone: str, user_text: str) -> str:
         return "Xabaringiz qabul qilindi 😊 Qanday yordam bera olaman?"
 
     messages = [{"role": "system", "content": build_system_prompt(chat["intro_sent"])}]
+    if media_context:
+        messages.append({"role": "system", "content": media_context})
+    if media_reply_hint:
+        messages.append({
+            "role": "system",
+            "content": f"Suggested product answer from media matcher: {media_reply_hint}. Keep the answer in the customer's language and do not ask which model if the matcher already found one.",
+        })
 
     memory_limit = get_memory_limit()
     if memory_limit > 0:
@@ -513,6 +540,11 @@ async def receive_webhook(request: Request):
                     continue
 
                 from_phone = message.get("from", "")
+                msg_type = message.get("type", "")
+                whatsapp_media_id = ""
+                if msg_type in {"image", "video", "audio", "document", "sticker"}:
+                    media = message.get(msg_type, {}) or {}
+                    whatsapp_media_id = media.get("id", "")
                 user_text = extract_message_text(message)
 
                 log("CUSTOMER MESSAGE", {"from": from_phone, "text": user_text})
@@ -527,7 +559,22 @@ async def receive_webhook(request: Request):
 
                 add_memory(from_phone, "user", user_text, limit=get_memory_limit() or 12)
 
-                reply = get_ai_reply(from_phone, user_text)
+                media_context = ""
+                media_reply_hint = ""
+                if msg_type in {"image", "document"} and whatsapp_media_id:
+                    media_download_url = get_whatsapp_media_download_url(whatsapp_media_id)
+                    if media_download_url:
+                        media_match = analyze_catalog_media(
+                            media_download_url,
+                            user_text or "",
+                            media_type="photo",
+                            access_token=WHATSAPP_ACCESS_TOKEN,
+                        )
+                        if media_match:
+                            media_context = media_match.get("context", "")
+                            media_reply_hint = media_match.get("reply_hint", "")
+
+                reply = get_ai_reply(from_phone, user_text, media_context=media_context, media_reply_hint=media_reply_hint)
 
                 add_memory(from_phone, "assistant", reply, limit=get_memory_limit() or 12)
 
