@@ -3257,6 +3257,13 @@ def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
     return reply_text[:1000]
 
 
+def catalog_card_subtitle(business: dict) -> str:
+    business_name = normalize_id((business or {}).get("business_name")) or "Milana Premium"
+    if len(business_name) <= 22:
+        return f"{business_name} katalogi tayyor."
+    return "Katalog tayyor. Tugmani bosing."
+
+
 def catalog_template_payload(recipient: dict, business: dict, text: str = "") -> dict:
     catalog_link = get_catalog_link(business)
     business_name = normalize_id((business or {}).get("business_name")) or "Milana Premium"
@@ -3274,7 +3281,7 @@ def catalog_template_payload(recipient: dict, business: dict, text: str = "") ->
                     "elements": [
                         {
                             "title": "Katalogni ko'rish",
-                            "subtitle": text[:80],
+                            "subtitle": catalog_card_subtitle(business),
                             "default_action": {
                                 "type": "web_url",
                                 "url": catalog_link,
