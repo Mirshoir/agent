@@ -3,6 +3,7 @@ import re
 import time
 import secrets
 import base64
+import io
 import json
 import hashlib
 import hmac
@@ -3883,7 +3884,7 @@ def _get_local_catalog_rows(force_refresh: bool = False) -> list[dict]:
     if not force_refresh and cached_rows and (now - float(loaded_at or 0.0)) < PRODUCT_MATCHER_LOCAL_CATALOG_CACHE_TTL_SECONDS:
         return cached_rows
 
-    fields = "product_code,model_code,price,currency,combined_text,image_url,source_pdf,page,card_index"
+    fields = "product_code,model_code,price,currency,combined_text,image_url,image_sha256,image_fingerprint,embedding_model,embedding_preview,source_pdf,page,card_index"
     try:
         res = (
             supabase
@@ -3913,6 +3914,10 @@ def _get_local_catalog_rows(force_refresh: bool = False) -> list[dict]:
             "currency": normalize_id(row.get("currency")),
             "combined_text": combined_text,
             "image_url": normalize_id(row.get("image_url")),
+            "image_sha256": normalize_id(row.get("image_sha256")).lower(),
+            "image_fingerprint": normalize_id(row.get("image_fingerprint")),
+            "embedding_model": normalize_id(row.get("embedding_model")).lower(),
+            "embedding_preview": normalize_id(row.get("embedding_preview")),
             "source_pdf": normalize_id(row.get("source_pdf")),
             "page": row.get("page"),
             "card_index": row.get("card_index"),
@@ -3950,12 +3955,14 @@ def _extract_media_vision_hints_local(media_bytes: bytes, mime_type: str, user_t
 
     b64 = base64.b64encode(media_bytes).decode("ascii")
     prompt = {
-        "task": "Identify product codes/models and useful keywords from this clothing catalog image.",
+        "task": "Identify product codes/models, garment details, colors, patterns, and useful keywords from this product image.",
         "customer_message": normalize_id(user_text),
         "output_format": {
             "product_codes": ["code strings"],
             "model_codes": ["model strings"],
             "keywords": ["short style/product keywords"],
+            "colors": ["dominant colors"],
+            "garment_type": "short product type label",
             "detected_text": "short OCR-like text seen on image",
             "confidence": "0..1",
         },
@@ -4042,13 +4049,130 @@ def _extract_media_vision_hints_local(media_bytes: bytes, mime_type: str, user_t
     return {
         "codes": codes[:24],
         "keywords": keywords[:PRODUCT_MATCHER_LOCAL_MAX_KEYWORDS],
+        "colors": [normalize_id(x).lower() for x in (parsed.get("colors") if isinstance(parsed.get("colors"), list) else [])][:8],
+        "garment_type": normalize_id(parsed.get("garment_type")).lower(),
         "detected_text": detected_text,
         "confidence": _safe_score(parsed.get("confidence")),
         "raw_text": raw_text[:400],
     }
 
 
-def _score_local_catalog_row(row: dict, code_set: set, keyword_set: set) -> tuple[float, dict]:
+def _parse_float_list(value, limit: int = 12) -> list[float]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        items = value
+    elif isinstance(value, tuple):
+        items = list(value)
+    else:
+        text = normalize_id(value)
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                items = parsed
+            else:
+                items = re.findall(r"-?\d+(?:\.\d+)?", text)
+        except Exception:
+            items = re.findall(r"-?\d+(?:\.\d+)?", text)
+    result = []
+    for item in items[:limit]:
+        try:
+            result.append(float(item))
+        except Exception:
+            continue
+    return result
+
+
+def _image_sha256_from_bytes(media_bytes: bytes) -> str:
+    if not media_bytes:
+        return ""
+    return hashlib.sha256(media_bytes).hexdigest()
+
+
+def _build_image_signatures_from_bytes(media_bytes: bytes) -> list[list[float]]:
+    if not media_bytes:
+        return []
+
+    try:
+        from PIL import Image
+        import numpy as np
+    except Exception:
+        return []
+
+    try:
+        image = Image.open(io.BytesIO(media_bytes)).convert("RGB").resize((128, 128))
+        arr = np.asarray(image, dtype=np.float32)
+    except Exception:
+        return []
+
+    signatures = []
+
+    try:
+        rgb_hist = []
+        total_pixels = float(arr.shape[0] * arr.shape[1] * 3) or 1.0
+        for channel in range(3):
+            hist, _ = np.histogram(arr[:, :, channel], bins=4, range=(0, 255))
+            rgb_hist.extend((hist.astype(np.float32) / total_pixels).tolist())
+        signatures.append([float(x) for x in rgb_hist])
+    except Exception:
+        pass
+
+    try:
+        lum = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
+        lum_hist, _ = np.histogram(lum, bins=12, range=(0, 255))
+        lum_total = float(lum_hist.sum()) or 1.0
+        signatures.append((lum_hist.astype(np.float32) / lum_total).tolist())
+    except Exception:
+        pass
+
+    try:
+        flat = arr.reshape(-1, 3)
+        means = (flat.mean(axis=0) / 255.0).tolist()
+        stds = (flat.std(axis=0) / 255.0).tolist()
+        percentiles = np.percentile(flat, [10, 25, 50], axis=0) / 255.0
+        signatures.append([float(x) for x in (means + stds + percentiles.reshape(-1).tolist())[:12]])
+    except Exception:
+        pass
+
+    return [sig for sig in signatures if len(sig) >= 6]
+
+
+def _vector_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right:
+        return 0.0
+    size = min(len(left), len(right))
+    if size < 4:
+        return 0.0
+    l = [float(x) for x in left[:size]]
+    r = [float(x) for x in right[:size]]
+    dot = sum(a * b for a, b in zip(l, r))
+    left_norm = sum(a * a for a in l) ** 0.5
+    right_norm = sum(b * b for b in r) ** 0.5
+    if not left_norm or not right_norm:
+        return 0.0
+    return max(0.0, min(1.0, dot / (left_norm * right_norm)))
+
+
+def _row_image_similarity_score(row: dict, media_sha256: str, media_signatures: list[list[float]]) -> float:
+    row_sha256 = normalize_id(row.get("image_sha256")).lower()
+    if row_sha256 and media_sha256 and row_sha256 == media_sha256:
+        return 1.0
+
+    row_signature = _parse_float_list(row.get("embedding_preview"), limit=12)
+    if not row_signature:
+        return 0.0
+
+    best = 0.0
+    for media_signature in media_signatures or []:
+        score = _vector_similarity(row_signature, media_signature)
+        if score > best:
+            best = score
+    return best
+
+
+def _score_local_catalog_row(row: dict, code_set: set, keyword_set: set, media_sha256: str = "", media_signatures: list[list[float]] = None, vision: dict = None) -> tuple[float, dict]:
     code = normalize_product_code(row.get("product_code"))
     model = normalize_product_code(row.get("model_code"))
     text_blob = " ".join(
@@ -4056,6 +4180,7 @@ def _score_local_catalog_row(row: dict, code_set: set, keyword_set: set) -> tupl
             normalize_id(row.get("combined_text")).upper(),
             code,
             model,
+            normalize_id(row.get("image_fingerprint")).upper(),
         ]
     )
 
@@ -4081,12 +4206,25 @@ def _score_local_catalog_row(row: dict, code_set: set, keyword_set: set) -> tupl
     elif model and model in text_blob:
         text_score = 0.9
 
-    final_score = (0.64 * code_score) + (0.26 * keyword_score) + (0.10 * text_score)
+    image_score = _row_image_similarity_score(row, media_sha256, media_signatures or [])
+    if vision and isinstance(vision, dict):
+        row_text = normalize_id(row.get("combined_text")).lower()
+        row_type_blob = f"{code} {model} {row_text}".lower()
+        for color in vision.get("colors", []) or []:
+            token = normalize_id(color).lower()
+            if token and token in row_type_blob:
+                image_score = max(image_score, 0.55)
+        garment_type = normalize_id(vision.get("garment_type")).lower()
+        if garment_type and garment_type in row_type_blob:
+            image_score = max(image_score, 0.60)
+
+    final_score = (0.54 * code_score) + (0.18 * keyword_score) + (0.08 * text_score) + (0.20 * image_score)
     parts = {
         "final": round(final_score, 6),
         "code": round(code_score, 6),
         "keyword": round(keyword_score, 6),
         "text": round(text_score, 6),
+        "image": round(image_score, 6),
     }
     return final_score, parts
 
@@ -4107,6 +4245,8 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
         return {}
 
     vision = _extract_media_vision_hints_local(media_bytes, mime_type, user_text)
+    media_sha256 = _image_sha256_from_bytes(media_bytes)
+    media_signatures = _build_image_signatures_from_bytes(media_bytes)
     extracted_codes = extract_codes_from_text_local(user_text)
     for code in vision.get("codes", []):
         if code not in extracted_codes:
@@ -4122,10 +4262,22 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
     rows = _get_local_catalog_rows()
     if not rows:
         return {}
+    exact_image_match = any(
+        normalize_id(row.get("image_sha256")).lower()
+        and normalize_id(row.get("image_sha256")).lower() == media_sha256
+        for row in rows
+    )
 
     scored = []
     for row in rows:
-        score, parts = _score_local_catalog_row(row, code_set, keyword_set)
+        score, parts = _score_local_catalog_row(
+            row,
+            code_set,
+            keyword_set,
+            media_sha256=media_sha256,
+            media_signatures=media_signatures,
+            vision=vision,
+        )
         if score <= 0:
             continue
         scored.append({
@@ -4145,10 +4297,13 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
     model = normalize_id(top.get("model_code"))
     price = normalize_id(top.get("price"))
     currency = normalize_id(top.get("currency"))
+    image_score = _safe_score(top.get("components", {}).get("image"))
 
-    accepted_by_score = top_score >= PRODUCT_MATCHER_MIN_SCORE
+    visual_evidence = exact_image_match or bool(code_set) or bool(vision.get("codes")) or bool(vision.get("keywords")) or bool(vision.get("garment_type"))
+    accepted_by_score = top_score >= PRODUCT_MATCHER_MIN_SCORE and visual_evidence
     accepted_by_code = bool(code_set)
-    accepted_weak_match = bool(code or model or price) and top_score >= PRODUCT_MATCHER_WEAK_MIN_SCORE
+    accepted_by_image = image_score >= max(PRODUCT_MATCHER_WEAK_MIN_SCORE, 0.45) and visual_evidence
+    accepted_weak_match = bool(code or model or price) and top_score >= PRODUCT_MATCHER_WEAK_MIN_SCORE and visual_evidence
 
     log("Local media matcher response summary", {
         "match_count": len(matches),
@@ -4160,10 +4315,11 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
         "vision_confidence": _safe_score(vision.get("confidence")),
         "accepted_by_score": accepted_by_score,
         "accepted_by_code": accepted_by_code,
+        "accepted_by_image": accepted_by_image,
         "accepted_weak_match": accepted_weak_match,
     })
 
-    if not (accepted_by_score or accepted_by_code or accepted_weak_match):
+    if not (accepted_by_score or accepted_by_code or accepted_by_image or accepted_weak_match):
         return {}
 
     alternatives = []
@@ -5703,7 +5859,7 @@ Fallback catalog link:
 """
 
 
-def get_whatsapp_ai_reply(phone: str, user_text: str, business: dict) -> str:
+def get_whatsapp_ai_reply(phone: str, user_text: str, business: dict, media_context: str = "", media_reply_hint: str = "") -> str:
     chat = get_whatsapp_chat(phone)
 
     off_topic_reply = unrelated_topic_reply(user_text, business)
@@ -5719,6 +5875,13 @@ def get_whatsapp_ai_reply(phone: str, user_text: str, business: dict) -> str:
         return intro
 
     messages = [{"role": "system", "content": build_whatsapp_system_prompt(business, True)}]
+    if media_context:
+        messages.append({"role": "system", "content": media_context})
+    if media_reply_hint:
+        messages.append({
+            "role": "system",
+            "content": f"Suggested product answer from media matcher: {media_reply_hint}. Keep the answer in the customer's language and do not ask which model if the matcher already found one.",
+        })
     messages.extend(chat.get("messages", []))
     messages.append({"role": "user", "content": user_text})
 
@@ -5853,10 +6016,24 @@ async def process_whatsapp_message(change: dict):
             if msg_type == "text":
                 reply_text = get_whatsapp_ai_reply(sender_id, text, business)
             elif media_type:
+                media_match_context = ""
+                media_reply_hint = ""
+                if media_url and media_type in {"photo", "file"}:
+                    media_match = analyze_media_for_sales_reply(
+                        media_url=media_url,
+                        user_text=text or "",
+                        media_type=media_type,
+                        access_token=get_whatsapp_access_token(business),
+                    )
+                    if media_match:
+                        media_match_context = media_match.get("context", "")
+                        media_reply_hint = media_match.get("reply_hint", "")
                 reply_text = get_whatsapp_ai_reply(
                     sender_id,
                     text or "Customer sent a media message.",
                     business,
+                    media_context=media_match_context,
+                    media_reply_hint=media_reply_hint,
                 )
             else:
                 reply_text = get_whatsapp_ai_reply(sender_id, text, business)
