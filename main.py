@@ -2805,6 +2805,7 @@ Safety rules:
 - Answer the exact question first.
 - Never invent prices, stock, delivery, discounts, addresses, or availability.
 - Use only the business facts above.
+- If the customer asks for the phone/contact/manager number, provide the exact contact from Business facts.
 - If the topic is unrelated to Milana Premium sales, do not answer it; use the unrelated-topic refusal from the Milana policy.
 - If information is missing, ask 2-3 short clarifying questions.
 - Only mention a manager when the customer asks for a human or is ready to order.
@@ -2903,6 +2904,13 @@ def is_auto_media_placeholder_message(text: str) -> bool:
     }
 
 
+def is_forwarded_instagram_share_placeholder(text: str) -> bool:
+    return normalize_id(text).strip().lower() in {
+        "🔁 forwarded post",
+        "🔁 forwarded reel",
+    }
+
+
 def contains_forbidden_product_photo_question(text: str) -> bool:
     s = normalize_id(text).lower()
     if not s:
@@ -2944,6 +2952,70 @@ def replacement_for_forbidden_product_photo_question(user_text: str = "") -> str
     if lang == "kk":
         return "Фото үшін рахмет. Ең жақын модельді тексеріп, мәліметпен көмектесемін."
     return "Rasm uchun rahmat. Eng yaqin modelni tekshirib, ma'lumot bilan yordam beraman."
+
+
+def get_sales_phone(business: dict) -> str:
+    return normalize_id(
+        (business or {}).get("sales_phone")
+        or os.getenv("SALES_PHONE", "")
+        or os.getenv("CONTACT_PHONE", "")
+        or os.getenv("BUSINESS_PHONE", "")
+        or os.getenv("MILANA_SALES_PHONE", "")
+    )
+
+
+def wants_business_phone_number(text: str) -> bool:
+    s = normalize_id(text).lower()
+    if not s:
+        return False
+
+    # If the customer is leaving their own phone number, do not answer with ours.
+    if re.search(r"\b(?:\+?998)?\s*\d{2}[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}\b", s):
+        return False
+
+    phone_markers = [
+        "telefon", "tel", "phone", "phone number", "contact", "kontakt",
+        "nomer", "номер", "телефон", "контакт", "raqam", "рақам",
+    ]
+    owner_markers = [
+        "sizni", "sizning", "raqamingiz", "nomeringiz", "telefoningiz",
+        "menejer", "menedjer", "manager", "admin", "админ", "менеджер",
+        "operator", "sales", "sotuvchi",
+    ]
+    request_markers = [
+        "bering", "yuboring", "jo'nating", "jonating", "bormi", "bor mi",
+        "kerak", "ayting", "yozing", "бер", "дайте", "номер есть",
+        "send", "give", "share", "can i call", "call you",
+    ]
+
+    has_phone_word = any(marker in s for marker in phone_markers)
+    has_owner_word = any(marker in s for marker in owner_markers)
+    has_request_word = any(marker in s for marker in request_markers)
+
+    direct_patterns = [
+        r"\b(menejer|menedjer|manager|admin|operator)\s+(raqam|nomer|telefon)",
+        r"\b(raqam|nomer|telefon)\w*\s+(ber|yubor|jo'?nat|bor|bormi)",
+        r"\b(phone|contact)\s+(number|details)?\s*(please|send|give|share)?",
+        r"(номер|телефон|контакт).*(дайте|есть|можно|менеджер)",
+    ]
+    return (has_phone_word and (has_owner_word or has_request_word)) or any(
+        re.search(pattern, s) for pattern in direct_patterns
+    )
+
+
+def sales_phone_reply(user_text: str, business: dict) -> str:
+    phone = get_sales_phone(business)
+    if not phone:
+        return ""
+
+    lang = detect_customer_language(user_text)
+    if lang == "en":
+        return f"You can contact our manager at this number: {phone}."
+    if lang == "ru":
+        return f"С менеджером можно связаться по этому номеру: {phone}."
+    if lang == "kk":
+        return f"Менеджермен осы нөмір арқылы байланыса аласыз: {phone}."
+    return f"Menejerimiz bilan shu raqam orqali bog'lanishingiz mumkin: {phone}."
 
 
 def wants_deal_handoff(text: str) -> bool:
@@ -3482,7 +3554,7 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     if contains_forbidden_product_photo_question(text):
         text = replacement_for_forbidden_product_photo_question(user_text)
 
-    if "998501551010" in text or re.search(r"menejerimiz bilan bog'?lay|manager.*connect|connect you with our manager", text, re.IGNORECASE):
+    if re.search(r"menejerimiz bilan bog'?lay|manager.*connect|connect you with our manager", text, re.IGNORECASE):
         text = LEAD_CONTACT_REQUEST_UZ if lang not in {"en", "ru", "kk"} else {
             "en": LEAD_CONTACT_REQUEST_EN,
             "ru": LEAD_CONTACT_REQUEST_RU,
@@ -4452,6 +4524,11 @@ def get_ai_reply(
     media_reply_hint: str = "",
 ):
     try:
+        if wants_business_phone_number(user_text):
+            direct_phone_reply = sales_phone_reply(user_text, business)
+            if direct_phone_reply:
+                return direct_phone_reply
+
         off_topic_reply = unrelated_topic_reply(user_text)
         if off_topic_reply:
             return off_topic_reply
@@ -4910,6 +4987,16 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             return
 
         if not is_chat_ai_enabled("instagram", "dm", sender_id, business.get("id")):
+            mark_processed(processed_message_ids, message_id)
+            return
+
+        if is_forwarded_instagram_share_placeholder(message_text):
+            log("Instagram DM forwarded share saved without auto-reply", {
+                "customer_id": sender_id,
+                "message_id": message_id,
+                "media_type": media_type,
+                "post_permalink": post_permalink,
+            })
             mark_processed(processed_message_ids, message_id)
             return
 
