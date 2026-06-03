@@ -163,11 +163,10 @@ INSTAGRAM_PUBLIC_PREVIEW_CACHE: dict[str, tuple[float, dict]] = {}
 INSTAGRAM_CUSTOMER_PROFILE_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_CUSTOMER_PROFILE_CACHE_TTL_SECONDS", str(60 * 60 * 24)))
 INSTAGRAM_CUSTOMER_PROFILE_CACHE: dict[str, tuple[float, dict]] = {}
 PRODUCT_MATCHER_ENABLED = str(os.getenv("PRODUCT_MATCHER_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
-DEFAULT_PRODUCT_MATCHER_API_URL = "https://new-project-2-kny4.onrender.com/api/process-media"
 _product_matcher_urls = env_list("PRODUCT_MATCHER_API_URLS", "")
 if not _product_matcher_urls:
     _legacy_matcher_url = os.getenv("PRODUCT_MATCHER_API_URL", "").strip()
-    _product_matcher_urls = [_legacy_matcher_url] if _legacy_matcher_url else [DEFAULT_PRODUCT_MATCHER_API_URL]
+    _product_matcher_urls = [_legacy_matcher_url] if _legacy_matcher_url else []
 PRODUCT_MATCHER_API_URLS = [str(url or "").strip() for url in _product_matcher_urls if str(url or "").strip()]
 PRODUCT_MATCHER_TIMEOUT_SECONDS = max(10, min(180, int(os.getenv("PRODUCT_MATCHER_TIMEOUT_SECONDS", "90"))))
 PRODUCT_MATCHER_TOP_K = max(1, min(10, int(os.getenv("PRODUCT_MATCHER_TOP_K", "3"))))
@@ -180,7 +179,7 @@ PRODUCT_MATCHER_RECENT_MEDIA_LOOKBACK_SECONDS = max(
     min(24 * 60 * 60, int(os.getenv("PRODUCT_MATCHER_RECENT_MEDIA_LOOKBACK_SECONDS", "1800"))),
 )
 PRODUCT_MATCHER_LOCAL_ENABLED = str(os.getenv("PRODUCT_MATCHER_LOCAL_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
-PRODUCT_MATCHER_LOCAL_ONLY = str(os.getenv("PRODUCT_MATCHER_LOCAL_ONLY", "0")).strip().lower() in {"1", "true", "yes", "on"}
+PRODUCT_MATCHER_LOCAL_ONLY = str(os.getenv("PRODUCT_MATCHER_LOCAL_ONLY", "1")).strip().lower() in {"1", "true", "yes", "on"}
 PRODUCT_MATCHER_LOCAL_CATALOG_TABLE = str(os.getenv("PRODUCT_MATCHER_LOCAL_CATALOG_TABLE", "milana_products") or "").strip() or "milana_products"
 PRODUCT_MATCHER_LOCAL_CATALOG_CACHE_TTL_SECONDS = max(
     30,
@@ -3045,19 +3044,19 @@ def replacement_for_forbidden_product_photo_question(user_text: str = "", busine
     lang = detect_customer_language(user_text)
     if lang == "en":
         if is_price_question(user_text):
-            return "Thanks for the photo. Our manager will confirm the exact price. Please share the model or ask our manager for details."
-        return "Thanks for the photo. Our manager will help confirm the exact model and details."
+            return "Thanks for the photo. Our manager will confirm the exact price."
+        return "Thanks for the photo. Our manager will confirm the details."
     if lang == "ru":
         if is_price_question(user_text):
-            return "Спасибо за фото. Точную цену подтвердит менеджер. Пожалуйста, отправьте модель или свяжитесь с менеджером."
-        return "Спасибо за фото. Менеджер поможет уточнить точную модель и детали."
+            return "Спасибо за фото. Точную цену подтвердит менеджер."
+        return "Спасибо за фото. Менеджер подтвердит детали."
     if lang == "kk":
         if is_price_question(user_text):
-            return "Фото үшін рахмет. Нақты бағаны менеджер растайды. Өтінемін, модельді жіберіңіз немесе менеджерге жазыңыз."
-        return "Фото үшін рахмет. Менеджер нақты модель мен детальдарды нақтылайды."
+            return "Фото үшін рахмет. Нақты бағаны менеджер растайды."
+        return "Фото үшін рахмет. Менеджер егжей-тегжейін растайды."
     if is_price_question(user_text):
-        return "Rasm uchun rahmat. Aniq narxni menejerimiz tasdiqlaydi. Iltimos, modelni yuboring yoki menejerga yozing."
-    return "Rasm uchun rahmat. Menejerimiz aniq model va tafsilotlarni tasdiqlaydi."
+        return "Rasm uchun rahmat. Aniq narxni menejerimiz tasdiqlaydi."
+    return "Rasm uchun rahmat. Menejerimiz tafsilotlarni tasdiqlaydi."
 
 
 def get_sales_phone(business: dict) -> str:
