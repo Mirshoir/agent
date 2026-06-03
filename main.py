@@ -3370,7 +3370,8 @@ def is_price_question(text: str) -> bool:
         return False
     return any(k in text for k in [
         "narx", "narxi", "nechpul", "necha pul", "qancha", "kancha",
-        "цена", "сколько", "price",
+        "цена", "сколько", "сколько стоит", "price", "how much", "cost",
+        "баға", "бағасы", "қанша",
     ])
 
 
@@ -3485,6 +3486,17 @@ def generic_price_fallback_reply(user_text: str, business: dict = None) -> str:
     if lang == "kk":
         return "Нақты бағаны менеджер растайды. Қай тауар немесе модель керек?"
     return "Aniq narxni menejerimiz tasdiqlaydi. Sizga qaysi mahsulot yoki model kerak?"
+
+
+def product_media_price_fallback_reply(user_text: str, business: dict = None) -> str:
+    lang = detect_customer_language(user_text)
+    if lang == "en":
+        return "Thanks for the photo. I need to confirm the exact price for this model. Which size or quantity are you interested in?"
+    if lang == "ru":
+        return "Спасибо за фото. Точную цену этой модели нужно подтвердить. Какой размер или количество вас интересует?"
+    if lang == "kk":
+        return "Фото үшін рахмет. Бұл модельдің нақты бағасын нақтылау керек. Қай өлшем немесе қанша дана қызықтырады?"
+    return "Rasm uchun rahmat. Bu modelning aniq narxini tekshirib aytamiz. Qaysi razmer yoki nechta kerak?"
 
 
 def business_products_summary(business: dict = None, limit: int = 4) -> str:
@@ -4265,7 +4277,7 @@ def clean_sales_reply(reply_text: str, user_text: str = "", business: dict = Non
     if contains_forbidden_product_photo_question(text):
         text = replacement_for_forbidden_product_photo_question(user_text, business)
 
-    if re.search(r"menejerimiz bilan bog'?lay|manager.*connect|connect you with our manager", text, re.IGNORECASE):
+    if re.search(r"menejerimiz bilan bog'?lay|manager.*connect|connect you with our manager", text, re.IGNORECASE) and not is_price_question(user_text):
         text = LEAD_CONTACT_REQUEST_UZ if lang not in {"en", "ru", "kk"} else {
             "en": LEAD_CONTACT_REQUEST_EN,
             "ru": LEAD_CONTACT_REQUEST_RU,
@@ -4286,8 +4298,12 @@ def clean_sales_reply(reply_text: str, user_text: str = "", business: dict = Non
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
     # If customer asked price but reply has no numeric price hint, force concise pricing follow-up.
-    price_ask = any(k in user for k in ["narx", "nechpul", "qancha", "цена", "сколько", "price"])
+    price_ask = is_price_question(user_text)
     has_number = bool(re.search(r"\d", text))
+    if price_ask and (_reply_mentions_phone_request(text) or _reply_mentions_name_request(text)):
+        text = generic_price_fallback_reply(user_text, business)
+        forced_contact_request = False
+        has_number = bool(re.search(r"\d", text))
     if price_ask and not has_number and not forced_contact_request:
         text = generic_price_fallback_reply(user_text, business)
 
@@ -5332,14 +5348,20 @@ def should_reuse_recent_media_match(user_text: str, media_type: str = "", busine
     if not text:
         return False
     lower = text.lower()
+    compact = re.sub(r"[^\w\s'А-Яа-яЁёЎўҚқҒғҲҳ-]+", " ", lower).strip()
+    if is_price_question(lower):
+        return True
     if is_greeting_only(lower):
         return True
     if re.search(r"\b\d+\s*(qop|meshok|ta|dona|pack|quti)\b", lower):
         return True
     if has_strong_business_sales_context(lower, business):
         return True
-    short_followups = {"bor", "bormi", "narxi", "qancha", "nechpul", "razmer", "rang", "olaman", "zakaz", "беру", "есть"}
-    return lower in short_followups
+    short_followups = {
+        "bor", "bormi", "narxi", "qancha", "nechpul", "razmer", "rang", "olaman",
+        "zakaz", "беру", "есть", "how much", "cost", "price",
+    }
+    return compact in short_followups or lower in short_followups
 
 
 def get_recent_platform_chat_history(platform: str, business: dict, customer_id: str = "", channel: str = "", limit: int = 10) -> list:
@@ -5966,6 +5988,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         matcher_source_url = media_url or post_image_url
         business_id = normalize_id(business.get("id"))
         recent_media_context_found = False
+        force_direct_media_reply = False
 
         if matcher_source_url and media_type in {"photo", "video", "file"}:
             log("Instagram DM media matcher request", {
@@ -6137,22 +6160,40 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             and not media_reply_hint
         )
         if needs_photo_fallback:
-            log("Instagram DM skipped auto-reply: no verified media match", {
+            if recent_media_context_found and is_price_question(message_text):
+                media_reply_hint = product_media_price_fallback_reply(message_text, business)
+                media_match_context = (
+                    "The customer is asking the price for their recent product photo, "
+                    "but the product matcher did not return a verified catalog match. "
+                    "Answer with a short price-confirmation fallback and do not ask for name or phone."
+                )
+                force_direct_media_reply = True
+            else:
+                log("Instagram DM skipped auto-reply: no verified media match", {
+                    "customer_id": sender_id,
+                    "message_id": message_id,
+                    "media_type": media_type,
+                    "source_url_host": urlparse(matcher_source_url).netloc if matcher_source_url else "",
+                })
+                mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_no_verified_match")
+                mark_processed(processed_message_ids, message_id)
+                return
+
+        if force_direct_media_reply:
+            log("Instagram DM product photo price fallback", {
                 "customer_id": sender_id,
                 "message_id": message_id,
-                "media_type": media_type,
-                "source_url_host": urlparse(matcher_source_url).netloc if matcher_source_url else "",
+                "reason": "recent_media_match_missing",
             })
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_no_verified_match")
-            mark_processed(processed_message_ids, message_id)
-            return
 
-        use_direct_matcher_reply = bool(media_reply_hint) and (
+        use_direct_matcher_reply = force_direct_media_reply or (bool(media_reply_hint) and (
             is_auto_media_placeholder_message(message_text)
             or not normalize_id(message_text)
             or (media_type in {"photo", "video"} and not message.get("text"))
-        )
-        if use_direct_matcher_reply:
+        ))
+        if force_direct_media_reply:
+            reply_text = complete_sentence_reply(media_reply_hint)
+        elif use_direct_matcher_reply:
             reply_text = clean_sales_reply(media_reply_hint, message_text or "photo", business, lead_state)
         else:
             reply_text = get_ai_reply(
