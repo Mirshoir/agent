@@ -3043,19 +3043,21 @@ def business_products_summary(business: dict = None, limit: int = 4) -> str:
 
 def replacement_for_forbidden_product_photo_question(user_text: str = "", business: dict = None) -> str:
     lang = detect_customer_language(user_text)
-    if is_price_question(user_text):
-        return generic_price_fallback_reply(user_text, business)
-
-    products = business_products_summary(business)
-    product_hint = f" Bizda asosan {products} bor." if products else ""
-
     if lang == "en":
-        return f"Thanks for the photo.{product_hint} Which model or size are you interested in?".strip()
+        if is_price_question(user_text):
+            return "Thanks for the photo. Our manager will confirm the exact price. Please share the model or ask our manager for details."
+        return "Thanks for the photo. Our manager will help confirm the exact model and details."
     if lang == "ru":
-        return f"Спасибо за фото.{product_hint} Какая модель или размер вас интересует?".strip()
+        if is_price_question(user_text):
+            return "Спасибо за фото. Точную цену подтвердит менеджер. Пожалуйста, отправьте модель или свяжитесь с менеджером."
+        return "Спасибо за фото. Менеджер поможет уточнить точную модель и детали."
     if lang == "kk":
-        return f"Фото үшін рахмет.{product_hint} Қай модель немесе өлшем керек?".strip()
-    return f"Rasm uchun rahmat.{product_hint} Qaysi model yoki o'lcham kerak?".strip()
+        if is_price_question(user_text):
+            return "Фото үшін рахмет. Нақты бағаны менеджер растайды. Өтінемін, модельді жіберіңіз немесе менеджерге жазыңыз."
+        return "Фото үшін рахмет. Менеджер нақты модель мен детальдарды нақтылайды."
+    if is_price_question(user_text):
+        return "Rasm uchun rahmat. Aniq narxni menejerimiz tasdiqlaydi. Iltimos, modelni yuboring yoki menejerga yozing."
+    return "Rasm uchun rahmat. Menejerimiz aniq model va tafsilotlarni tasdiqlaydi."
 
 
 def get_sales_phone(business: dict) -> str:
@@ -5456,12 +5458,6 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             (media_type in {"photo", "video", "file"} or recent_media_context_found)
             and not media_match_context
             and not media_reply_hint
-            and (
-                is_greeting_only(message_text or "")
-                or is_low_signal_message(message_text or "", messaging)
-                or not normalize_id(message_text)
-                or is_auto_media_placeholder_message(message_text or "")
-            )
         )
         if needs_photo_fallback:
             reply_text = replacement_for_forbidden_product_photo_question(message_text or "", business)
