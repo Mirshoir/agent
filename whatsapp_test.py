@@ -16,6 +16,20 @@ MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY", "")
 MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-small-latest")
 
 CATALOG_LINK = os.getenv("CATALOG_LINK", "Catalog link will be shared soon.")
+BUSINESS_NAME = os.getenv("WHATSAPP_BUSINESS_NAME", os.getenv("BUSINESS_NAME", "your business"))
+BUSINESS_TYPE = os.getenv("WHATSAPP_BUSINESS_TYPE", os.getenv("BUSINESS_TYPE", "business"))
+BUSINESS_WEBSITE = os.getenv("WHATSAPP_BUSINESS_WEBSITE", os.getenv("BUSINESS_WEBSITE", ""))
+BUSINESS_KNOWLEDGE = os.getenv("WHATSAPP_BUSINESS_KNOWLEDGE", os.getenv("BUSINESS_KNOWLEDGE", ""))
+AI_REPLY_RULES = os.getenv("WHATSAPP_AI_REPLY_RULES", os.getenv("AI_REPLY_RULES", ""))
+SALES_PHONE = os.getenv("WHATSAPP_SALES_PHONE", os.getenv("SALES_PHONE", os.getenv("CONTACT_PHONE", "")))
+TELEGRAM_CONTACT = os.getenv("WHATSAPP_TELEGRAM_CONTACT", os.getenv("TELEGRAM_CONTACT", ""))
+INSTAGRAM_LINK = os.getenv("WHATSAPP_INSTAGRAM_LINK", os.getenv("INSTAGRAM_LINK", ""))
+TIKTOK_LINK = os.getenv("WHATSAPP_TIKTOK_LINK", os.getenv("TIKTOK_LINK", ""))
+KG_PHONE = os.getenv("WHATSAPP_KG_PHONE", os.getenv("KG_PHONE", ""))
+AUTOMATION_MODE = os.getenv("WHATSAPP_AUTOMATION_MODE", os.getenv("AUTOMATION_MODE", "FULL_AUTO"))
+HUMAN_TAKEOVER_ENABLED = os.getenv("WHATSAPP_HUMAN_TAKEOVER_ENABLED", os.getenv("HUMAN_TAKEOVER_ENABLED", "true"))
+MEMORY_ENABLED = os.getenv("WHATSAPP_MEMORY_ENABLED", os.getenv("MEMORY_ENABLED", "true"))
+MEMORY_LIMIT = os.getenv("WHATSAPP_MEMORY_LIMIT", os.getenv("MEMORY_LIMIT", "12"))
 
 PROCESSED_MESSAGES = {}
 CHAT_MEMORY = {}
@@ -59,9 +73,46 @@ def get_chat(phone: str):
 
 
 def add_memory(phone: str, role: str, content: str, limit: int = 12):
+    if limit <= 0:
+        return
     chat = get_chat(phone)
     chat["messages"].append({"role": role, "content": content})
     chat["messages"] = chat["messages"][-limit:]
+
+
+def normalize_bool(value, default=True):
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "y", "on", "enabled", "enable", "full_auto"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disabled", "disable", "manual", "human_only", "human"}:
+        return False
+    return default
+
+
+def get_memory_limit(default: int = 12) -> int:
+    try:
+        if not normalize_bool(MEMORY_ENABLED, True):
+            return 0
+        return max(0, min(20, int(MEMORY_LIMIT or default)))
+    except Exception:
+        return default
+
+
+def business_allows_auto_reply() -> bool:
+    if not normalize_bool(os.getenv("WHATSAPP_BOT_ENABLED", "true"), True):
+        return False
+    mode = str(AUTOMATION_MODE or "").strip().upper()
+    if mode in {"OFF", "DISABLED", "MANUAL", "HUMAN_ONLY"}:
+        return False
+    return True
+
+
+def business_allows_human_handoff() -> bool:
+    return normalize_bool(HUMAN_TAKEOVER_ENABLED, True)
 
 
 def detect_customer_language(text: str) -> str:
@@ -113,6 +164,16 @@ def wants_deal_handoff(text: str) -> bool:
     return any(k in s for k in keys)
 
 
+def wants_phone_number(text: str) -> bool:
+    s = str(text or "").lower()
+    keys = [
+        "phone", "phone number", "contact number", "number", "whatsapp number",
+        "telefon", "telefon raqam", "telefon raqami", "raqam", "номер", "номер телефона",
+        "menejer raqami", "menejer telefon", "manager number", "manager phone",
+    ]
+    return any(k in s for k in keys)
+
+
 def is_low_signal_message(text: str) -> bool:
     s = str(text or "").strip()
     if not s:
@@ -141,17 +202,25 @@ def complete_sentence_reply(text: str, limit: int = 900) -> str:
 
 def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
     lang = detect_customer_language(user_text)
-    user = str(user_text or "").lower()
     text = str(reply_text or "").strip()
 
     if wants_deal_handoff(user_text):
-        if lang == "en":
-            return "Great. To finalize the order, please contact our admin on Telegram: @milana_admin25."
-        if lang == "ru":
-            return "Отлично. Чтобы оформить заказ, напишите нашему админу в Telegram: @milana_admin25."
-        if lang == "kk":
-            return "Керемет. Тапсырысты рәсімдеу үшін Telegram-дағы әкімшіге жазыңыз: @milana_admin25."
-        return "Zo'r. Buyurtmani rasmiylashtirish uchun Telegramdagi adminimizga yozing: @milana_admin25."
+        if business_allows_human_handoff():
+            if TELEGRAM_CONTACT:
+                if lang == "en":
+                    return f"Great. To finalize the order, please contact our manager on Telegram: {TELEGRAM_CONTACT}"
+                if lang == "ru":
+                    return f"Отлично. Чтобы оформить заказ, напишите нашему менеджеру в Telegram: {TELEGRAM_CONTACT}"
+                if lang == "kk":
+                    return f"Керемет. Тапсырысты рәсімдеу үшін Telegram-дағы менеджерге жазыңыз: {TELEGRAM_CONTACT}"
+                return f"Zo'r. Buyurtmani rasmiylashtirish uchun Telegramdagi menejerimizga yozing: {TELEGRAM_CONTACT}"
+            if lang == "en":
+                return "Great. Our manager will contact you shortly to finalize the order."
+            if lang == "ru":
+                return "Отлично. Наш менеджер скоро свяжется с вами для оформления заказа."
+            if lang == "kk":
+                return "Керемет. Тапсырысты рәсімдеу үшін менеджеріміз сізбен жақын арада хабарласады."
+            return "Zo'r. Buyurtmani rasmiylashtirish uchun menejerimiz siz bilan tez orada bog'lanadi."
 
     if wants_catalog(user_text):
         if lang == "en":
@@ -161,6 +230,23 @@ def clean_sales_reply(reply_text: str, user_text: str = "") -> str:
         if lang == "kk":
             return complete_sentence_reply(f"Біздің каталогты осы жерден көре аласыз: {CATALOG_LINK} Қай тауарлар сізді қызықтырады?")
         return complete_sentence_reply(f"Katalogimizni shu yerda ko'rishingiz mumkin: {CATALOG_LINK} Qaysi mahsulotlar sizni qiziqtirmoqda?")
+
+    if wants_phone_number(user_text):
+        if SALES_PHONE:
+            if lang == "en":
+                return complete_sentence_reply(f"Our contact number is {SALES_PHONE}. Which product are you interested in?")
+            if lang == "ru":
+                return complete_sentence_reply(f"Наш контактный номер: {SALES_PHONE}. Какой товар вас интересует?")
+            if lang == "kk":
+                return complete_sentence_reply(f"Байланыс нөміріміз: {SALES_PHONE}. Қай тауар сізді қызықтырады?")
+            return complete_sentence_reply(f"Bizning aloqa raqamimiz: {SALES_PHONE}. Qaysi mahsulot sizni qiziqtiradi?")
+        if lang == "en":
+            return "Our contact number will be shared by the manager shortly. Which product are you interested in?"
+        if lang == "ru":
+            return "Наш номер менеджер скоро отправит вам. Какой товар вас интересует?"
+        if lang == "kk":
+            return "Байланыс нөмірін менеджер жақын арада жібереді. Қай тауар сізді қызықтырады?"
+        return "Aloqa raqamimizni menejerimiz tez orada yuboradi. Qaysi mahsulot sizni qiziqtiradi?"
 
     if not text:
         if lang == "en":
@@ -244,17 +330,59 @@ def send_whatsapp_text(to_phone: str, text: str):
 
 
 def first_intro_message():
-    return (
-        "Assalomu alaykum 😊 Men Milana Premium virtual assistentiman.\n\n"
-        "Sizga tezroq va ustuvor yordam berishimiz uchun, xohlasangiz quyidagi ma’lumotlarni qoldiring:\n"
-        "Ism, telefon raqam, manzil, qaysi mahsulot kerakligi va miqdori.\n\n"
-        "Vakilimiz tez orada siz bilan bog‘lanadi."
+    company = BUSINESS_NAME.strip()
+    intro = (
+        f"Assalomu alaykum 😊 Men {company} virtual assistentiman.\n\n"
+        "Sizga tezroq yordam berishimiz uchun, xohlasangiz quyidagi ma'lumotlarni qoldiring:\n"
+        "Ism, telefon raqam, qaysi mahsulot kerakligi va miqdori.\n\n"
+        "Vakilimiz tez orada siz bilan bog'lanadi."
     )
+    return intro
+
+
+def build_business_context() -> str:
+    return f"""
+Business name:
+{BUSINESS_NAME}
+
+Business type:
+{BUSINESS_TYPE}
+
+Website:
+{BUSINESS_WEBSITE}
+
+Catalog link:
+{CATALOG_LINK}
+
+Phone:
+{SALES_PHONE}
+
+Telegram:
+{TELEGRAM_CONTACT}
+
+Instagram:
+{INSTAGRAM_LINK}
+
+TikTok:
+{TIKTOK_LINK}
+
+Knowledge:
+{BUSINESS_KNOWLEDGE}
+
+AI reply rules:
+{AI_REPLY_RULES}
+
+Runtime settings:
+- automation_mode: {AUTOMATION_MODE}
+- human_takeover_enabled: {HUMAN_TAKEOVER_ENABLED}
+- memory_enabled: {MEMORY_ENABLED}
+- memory_limit: {MEMORY_LIMIT}
+"""
 
 
 def build_system_prompt(intro_sent: bool):
     return f"""
-You are Milana Premium's human-like WhatsApp sales assistant.
+You are a human-like WhatsApp sales assistant for this business.
 
 Important style:
 - Reply in the customer's language: Uzbek, Russian, or English.
@@ -262,67 +390,20 @@ Important style:
 - Usually 1-3 short sentences.
 - Do not mention AI, bot, API, database, or automation.
 - Do not invent prices, stock, addresses, or discounts.
-- If something is missing, say the manager will clarify.
+- If something is missing, ask a short follow-up question or hand off to the manager if the business allows it.
 - Do not repeat the opening information request if it was already sent.
 - If the user ignores the details request, continue naturally.
 
 Opening conversation rule:
-- If intro_sent is false, introduce yourself as Milana Premium virtual assistant.
-- Ask politely for: name, phone number, address, product of interest, and quantity.
+- If intro_sent is false, introduce yourself as the business's virtual assistant.
+- Use the configured business name in the intro.
+- Ask politely for: name, phone number, product of interest, and quantity.
 - Say a representative will contact them soon.
 - Do not force them.
 - Do not keep asking again.
 
-Company:
-Milana Premium sells clothing/textile products.
-Website: https://milanapremium.com/
-
-Catalog and price:
-If customer asks price/catalog, send this catalog link:
-{CATALOG_LINK}
-
-Fast sales contact:
-If customer wants to contact sales manager quickly:
-+998 50 155 10 10
-They can contact this number via Telegram and WhatsApp.
-
-Social pages:
-Instagram: https://www.instagram.com/milanapremium/
-TikTok: tiktok.com/@milana_premium_rasmiy
-
-Production/preparation:
-If customer wants us to prepare products:
-- Preparation takes about 2 weeks to 1 month.
-- 50% advance payment is required.
-- Minimum order for preparation is 600.
-
-Delivery:
-- Outside Uzbekistan: 3-5 days depending on location.
-- Inside Uzbekistan: 2-3 days.
-- Delivery options: postal service or Isuzu car.
-
-Minimum order:
-- Outside Uzbekistan: minimum 2000 USD.
-- Inside Uzbekistan: no minimum amount.
-
-KG purchase:
-If they want to buy by KG, tell them to contact:
-+998 93 400 44 33
-
-Telegram groups:
-- Single product: t.me/milanapremium1
-- Package: t.me/milanapremium3
-- Мешок / bag: t.me/milanapremium2
-
-Buying flow:
-Ask how many they want to purchase.
-Then send the correct Telegram group depending on their answer:
-single product, package, or мешок/bag.
-
-End rule:
-When the conversation is ending, thank them and ask them to follow:
-Instagram: https://www.instagram.com/milanapremium/
-TikTok: tiktok.com/@milana_premium_rasmiy
+Business context:
+{build_business_context()}
 """
 
 
@@ -339,7 +420,10 @@ def get_ai_reply(phone: str, user_text: str) -> str:
         return "Xabaringiz qabul qilindi 😊 Qanday yordam bera olaman?"
 
     messages = [{"role": "system", "content": build_system_prompt(chat["intro_sent"])}]
-    messages.extend(chat["messages"])
+
+    memory_limit = get_memory_limit()
+    if memory_limit > 0:
+        messages.extend(chat["messages"][-memory_limit:])
     messages.append({"role": "user", "content": user_text})
 
     try:
@@ -433,15 +517,19 @@ async def receive_webhook(request: Request):
 
                 log("CUSTOMER MESSAGE", {"from": from_phone, "text": user_text})
 
-                add_memory(from_phone, "user", user_text)
-
                 if is_low_signal_message(user_text):
                     log("IGNORED LOW SIGNAL MESSAGE", {"from": from_phone, "text": user_text})
                     continue
 
+                if not business_allows_auto_reply():
+                    log("AUTO REPLY DISABLED", {"from": from_phone, "text": user_text})
+                    continue
+
+                add_memory(from_phone, "user", user_text, limit=get_memory_limit() or 12)
+
                 reply = get_ai_reply(from_phone, user_text)
 
-                add_memory(from_phone, "assistant", reply)
+                add_memory(from_phone, "assistant", reply, limit=get_memory_limit() or 12)
 
                 send_whatsapp_text(from_phone, reply)
 
