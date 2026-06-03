@@ -2312,6 +2312,53 @@ def upsert_workspace_state(business_id: str, state_key: str, state_value, update
         WORKSPACE_STATE_FALLBACK[business_id][state_key] = data.get("state_value")
 
 
+def instagram_processed_message_state_key(message_id: str) -> str:
+    message_id = normalize_id(message_id)
+    return f"instagram_processed_message:{message_id}" if message_id else ""
+
+
+def has_instagram_processed_message(business_id: str, message_id: str) -> bool:
+    business_id = normalize_id(business_id)
+    state_key = instagram_processed_message_state_key(message_id)
+    if not business_id or not state_key:
+        return False
+    try:
+        rows = (
+            supabase.table("dashboard_workspace_state")
+            .select("state_key,state_value")
+            .eq("business_id", business_id)
+            .eq("state_key", state_key)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if rows:
+            return True
+    except Exception as exc:
+        log("Could not check Instagram processed message state", {"business_id": business_id, "message_id": message_id, "error": str(exc)})
+
+    fallback = WORKSPACE_STATE_FALLBACK.get(business_id) or {}
+    return state_key in fallback
+
+
+def mark_instagram_processed_message(business_id: str, message_id: str, customer_id: str = "", channel: str = "dm"):
+    business_id = normalize_id(business_id)
+    state_key = instagram_processed_message_state_key(message_id)
+    if not business_id or not state_key:
+        return
+    state_value = {
+        "message_id": normalize_id(message_id),
+        "customer_id": normalize_id(customer_id),
+        "channel": normalize_id(channel),
+        "processed_at": datetime.utcnow().isoformat(),
+    }
+    try:
+        upsert_workspace_state(business_id, state_key, state_value)
+    except Exception as exc:
+        log("Could not mark Instagram processed message", {"business_id": business_id, "message_id": message_id, "error": str(exc)})
+
+
 def list_business_operator_ids(business_id: str) -> list[str]:
     business_id = normalize_id(business_id)
     if not business_id:
@@ -5321,26 +5368,11 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             post_media_type=post_media_type,
         )
 
-        inbound_record = load_inbox_message_by_external_id(
-            business_id=business.get("id"),
-            platform="instagram",
-            customer_id=sender_id,
-            external_message_id=message_id,
-            direction="inbound",
-        )
-        inbound_created_at = normalize_id(inbound_record.get("created_at"))
-
-        if inbound_created_at and has_outbound_reply_after(
-            business_id=business.get("id"),
-            platform="instagram",
-            customer_id=sender_id,
-            inbound_created_at=inbound_created_at,
-            channel="dm",
-        ):
-            log("Instagram DM reply skipped: duplicate inbound already answered", {
+        if has_instagram_processed_message(business.get("id"), message_id):
+            log("Instagram DM reply skipped: already processed in database", {
                 "customer_id": sender_id,
                 "message_id": message_id,
-                "inbound_created_at": inbound_created_at,
+                "media_type": media_type,
             })
             mark_processed(processed_message_ids, message_id)
             return
@@ -5607,6 +5639,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 is_read=True,
                 channel="dm",
             )
+            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm")
             mark_processed(processed_message_ids, message_id)
         elif send_result is not None:
             log("Instagram DM send failed", {
