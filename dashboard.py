@@ -1071,6 +1071,23 @@ def business_editor(business):
         bot_enabled = st.toggle("Enable automation for this business", value=bool(business.get("bot_enabled", True)))
         auto_reply_dms = st.toggle("Instagram DM auto-reply", value=bool(business.get("auto_reply_dms", True)))
         auto_reply_comments = st.toggle("Instagram comment auto-reply", value=bool(business.get("auto_reply_comments", True)))
+        human_takeover_enabled = st.toggle("Allow human takeover", value=bool(business.get("human_takeover_enabled", True)))
+        telegram_bot_enabled = st.toggle("Telegram bot enabled", value=bool(business.get("telegram_bot_enabled", True)))
+        whatsapp_enabled = st.toggle("WhatsApp enabled", value=bool(business.get("whatsapp_enabled", False)))
+        analytics_enabled = st.toggle("Analytics enabled", value=bool(business.get("analytics_enabled", True)))
+
+        automation_mode_options = ["FULL_AUTO", "ASSIST", "MANUAL", "HUMAN_ONLY"]
+        current_automation_mode = (business.get("automation_mode") or "FULL_AUTO").upper()
+        automation_index = automation_mode_options.index(current_automation_mode) if current_automation_mode in automation_mode_options else 0
+        automation_mode = st.selectbox("Automation mode", automation_mode_options, index=automation_index)
+
+        bot_language_mode_options = ["auto", "fixed"]
+        current_bot_language_mode = (business.get("bot_language_mode") or "auto").lower()
+        bot_language_mode_index = bot_language_mode_options.index(current_bot_language_mode) if current_bot_language_mode in bot_language_mode_options else 0
+        bot_language_mode = st.selectbox("Bot language mode", bot_language_mode_options, index=bot_language_mode_index)
+
+        memory_enabled = st.toggle("Enable chat memory", value=bool(business.get("memory_enabled", True)))
+        memory_limit = st.slider("Chat memory limit", 0, 20, safe_int(business.get("memory_limit", 8), 8), 1)
 
         st.caption("WhatsApp and Telegram auto-replies use the main business automation toggle plus per-chat AI toggles.")
 
@@ -1083,8 +1100,11 @@ def business_editor(business):
         faq = st.text_area("FAQ", value=business.get("faq", ""), height=120)
         catalog_link = st.text_input("Catalog link", value=business.get("catalog_link", ""))
         sales_phone = st.text_input("Sales phone", value=business.get("sales_phone", ""))
+        telegram_chat_id = st.text_input("Telegram chat ID", value=business.get("telegram_chat_id", ""))
+        telegram_notes = st.text_area("Telegram notes", value=business.get("telegram_notes", ""), height=80)
 
         knowledge = st.text_area("Main knowledge prompt", value=business.get("knowledge", ""), height=180)
+        ai_reply_rules = st.text_area("Business AI reply rules", value=business.get("ai_reply_rules", ""), height=160)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -1115,6 +1135,14 @@ def business_editor(business):
                 "bot_enabled": bot_enabled,
                 "auto_reply_dms": auto_reply_dms,
                 "auto_reply_comments": auto_reply_comments,
+                "human_takeover_enabled": human_takeover_enabled,
+                "telegram_bot_enabled": telegram_bot_enabled,
+                "whatsapp_enabled": whatsapp_enabled,
+                "analytics_enabled": analytics_enabled,
+                "automation_mode": automation_mode,
+                "bot_language_mode": bot_language_mode,
+                "memory_enabled": memory_enabled,
+                "memory_limit": memory_limit,
                 "products": products,
                 "prices": prices,
                 "delivery_info": delivery_info,
@@ -1122,7 +1150,10 @@ def business_editor(business):
                 "faq": faq,
                 "catalog_link": catalog_link,
                 "sales_phone": sales_phone,
+                "telegram_chat_id": telegram_chat_id,
+                "telegram_notes": telegram_notes,
                 "knowledge": knowledge,
+                "ai_reply_rules": ai_reply_rules,
                 "ai_max_tokens": ai_max_tokens,
                 "ai_temperature": ai_temperature,
             }
@@ -1220,7 +1251,7 @@ def render_account_connections_page(businesses):
 
     elif platform == "telegram_user":
         session_file = st.file_uploader("Upload .session file", type=["session"])
-        session_name = st.text_input("Session name", placeholder="milana_user.session")
+        session_name = st.text_input("Session name", placeholder="telegram_user.session")
         session_b64 = ""
         if session_file is not None:
             session_b64 = base64.b64encode(session_file.getvalue()).decode()
@@ -1468,7 +1499,7 @@ def render_admin_users_page(businesses):
         st.markdown("### Register new business")
         c1, c2 = st.columns(2)
         with c1:
-            business_name = st.text_input("Business name", placeholder="Milana Premium")
+            business_name = st.text_input("Business name", placeholder="New Brand LLC")
             business_type = st.text_input("Business type", placeholder="Textile / Retail / E-commerce")
             owner_email = st.text_input("Owner email (optional)", placeholder="owner@company.com")
         with c2:
@@ -1499,6 +1530,14 @@ def render_admin_users_page(businesses):
                     "bot_enabled": True,
                     "auto_reply_dms": True,
                     "auto_reply_comments": True,
+                    "human_takeover_enabled": True,
+                    "telegram_bot_enabled": True,
+                    "whatsapp_enabled": False,
+                    "analytics_enabled": True,
+                    "automation_mode": "FULL_AUTO",
+                    "bot_language_mode": "auto",
+                    "memory_enabled": True,
+                    "memory_limit": 8,
                     "knowledge": "",
                     "products": "",
                     "prices": "",
@@ -1507,6 +1546,9 @@ def render_admin_users_page(businesses):
                     "faq": "",
                     "catalog_link": "",
                     "sales_phone": "",
+                    "telegram_chat_id": "",
+                    "telegram_notes": "",
+                    "ai_reply_rules": "",
                     "ai_model": "mistral-small-latest",
                     "ai_provider": "mistral",
                     "ai_temperature": 0.5,
@@ -1889,6 +1931,14 @@ def render_creator_onboarding(businesses):
                     "bot_enabled": True,
                     "auto_reply_dms": True,
                     "auto_reply_comments": True,
+                    "human_takeover_enabled": True,
+                    "telegram_bot_enabled": True,
+                    "whatsapp_enabled": False,
+                    "analytics_enabled": True,
+                    "automation_mode": "FULL_AUTO",
+                    "bot_language_mode": "auto",
+                    "memory_enabled": True,
+                    "memory_limit": 8,
                     "knowledge": "",
                     "products": "",
                     "prices": "",
@@ -1897,6 +1947,9 @@ def render_creator_onboarding(businesses):
                     "faq": "",
                     "catalog_link": "",
                     "sales_phone": "",
+                    "telegram_chat_id": "",
+                    "telegram_notes": "",
+                    "ai_reply_rules": "",
                     "ai_model": "mistral-small-latest",
                     "ai_provider": ai_provider,
                     "ai_temperature": 0.5,
