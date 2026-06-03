@@ -595,3 +595,15 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
     if code_set:
         context_lines.append(f"- Extracted codes from media/text: {', '.join(sorted(code_set)[:8])}")
     if alternatives:
+        alternative_text = ", ".join(alternatives)
+        context_lines.append(f"- Alternatives: {alternative_text}")
+    context_lines.append("- Use this to answer product/price questions for the attached media.")
+
+    return {
+        "context": "\n".join(context_lines),
+        "reply_hint": build_product_match_reply(code, model, price, currency, top_score),
+        "top_score": top_score,
+        "top_match_code": code,
+        "top_match_model": model,
+        "matches": matches,
+    }
