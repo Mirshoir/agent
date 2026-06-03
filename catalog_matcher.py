@@ -23,6 +23,12 @@ def env_bool(name: str, default: bool = True) -> bool:
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+CATALOG_SUPABASE_URL = os.getenv("CATALOG_SUPABASE_URL") or os.getenv("PRODUCT_CATALOG_SUPABASE_URL") or SUPABASE_URL
+CATALOG_SUPABASE_SERVICE_KEY = (
+    os.getenv("CATALOG_SUPABASE_SERVICE_KEY")
+    or os.getenv("PRODUCT_CATALOG_SUPABASE_SERVICE_KEY")
+    or SUPABASE_SERVICE_KEY
+)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 PRODUCT_MATCHER_LOCAL_ENABLED = env_bool("PRODUCT_MATCHER_LOCAL_ENABLED", True)
@@ -51,9 +57,9 @@ def log(title, data=None):
 def _client():
     global _supabase
     if _supabase is None:
-        if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-            raise RuntimeError("Missing Supabase credentials")
-        _supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+        if not CATALOG_SUPABASE_URL or not CATALOG_SUPABASE_SERVICE_KEY:
+            raise RuntimeError("Missing catalog Supabase credentials")
+        _supabase = create_client(CATALOG_SUPABASE_URL, CATALOG_SUPABASE_SERVICE_KEY)
     return _supabase
 
 
@@ -246,7 +252,11 @@ def _get_local_catalog_rows(force_refresh: bool = False) -> list[dict]:
         )
         rows = res.data if isinstance(res.data, list) else []
     except Exception as exc:
-        log("Local catalog fetch failed", {"table": PRODUCT_MATCHER_LOCAL_CATALOG_TABLE, "error": str(exc)})
+        log("Local catalog fetch failed", {
+            "table": PRODUCT_MATCHER_LOCAL_CATALOG_TABLE,
+            "catalog_supabase_url": normalize_text(CATALOG_SUPABASE_URL).split("//")[-1].split(".")[0] if CATALOG_SUPABASE_URL else "",
+            "error": str(exc),
+        })
         return cached_rows or []
 
     normalized_rows = []
