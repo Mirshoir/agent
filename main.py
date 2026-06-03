@@ -2317,32 +2317,36 @@ def instagram_processed_message_state_key(message_id: str) -> str:
     return f"instagram_processed_message:{message_id}" if message_id else ""
 
 
-def has_instagram_processed_message(business_id: str, message_id: str) -> bool:
+def claim_instagram_message_processing(business_id: str, message_id: str, customer_id: str = "", channel: str = "dm") -> bool:
     business_id = normalize_id(business_id)
     state_key = instagram_processed_message_state_key(message_id)
     if not business_id or not state_key:
         return False
+    state_value = {
+        "message_id": normalize_id(message_id),
+        "customer_id": normalize_id(customer_id),
+        "channel": normalize_id(channel),
+        "status": "processing",
+        "claimed_at": datetime.utcnow().isoformat(),
+    }
     try:
-        rows = (
-            supabase.table("dashboard_workspace_state")
-            .select("state_key,state_value")
-            .eq("business_id", business_id)
-            .eq("state_key", state_key)
-            .limit(1)
-            .execute()
-            .data
-            or []
-        )
-        if rows:
-            return True
+        supabase.table("dashboard_workspace_state").insert({
+            "business_id": business_id,
+            "state_key": state_key,
+            "state_value": state_value,
+            "updated_by": "instagram_bot",
+        }).execute()
+        return True
     except Exception as exc:
-        log("Could not check Instagram processed message state", {"business_id": business_id, "message_id": message_id, "error": str(exc)})
+        log("Could not claim Instagram message processing", {"business_id": business_id, "message_id": message_id, "error": str(exc)})
 
     fallback = WORKSPACE_STATE_FALLBACK.get(business_id) or {}
-    return state_key in fallback
+    if state_key in fallback:
+        return False
+    return False
 
 
-def mark_instagram_processed_message(business_id: str, message_id: str, customer_id: str = "", channel: str = "dm"):
+def mark_instagram_processed_message(business_id: str, message_id: str, customer_id: str = "", channel: str = "dm", status: str = "processed"):
     business_id = normalize_id(business_id)
     state_key = instagram_processed_message_state_key(message_id)
     if not business_id or not state_key:
@@ -2351,6 +2355,7 @@ def mark_instagram_processed_message(business_id: str, message_id: str, customer
         "message_id": normalize_id(message_id),
         "customer_id": normalize_id(customer_id),
         "channel": normalize_id(channel),
+        "status": normalize_id(status) or "processed",
         "processed_at": datetime.utcnow().isoformat(),
     }
     try:
@@ -5368,8 +5373,8 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             post_media_type=post_media_type,
         )
 
-        if has_instagram_processed_message(business.get("id"), message_id):
-            log("Instagram DM reply skipped: already processed in database", {
+        if not claim_instagram_message_processing(business.get("id"), message_id, sender_id, "dm"):
+            log("Instagram DM reply skipped: already claimed in database", {
                 "customer_id": sender_id,
                 "message_id": message_id,
                 "media_type": media_type,
@@ -5378,10 +5383,12 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             return
 
         if not business_allows_auto_reply(business, "instagram", "dm"):
+            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_auto_reply_disabled")
             mark_processed(processed_message_ids, message_id)
             return
 
         if not is_chat_ai_enabled("instagram", "dm", sender_id, business.get("id")):
+            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_ai_disabled")
             mark_processed(processed_message_ids, message_id)
             return
 
@@ -5392,10 +5399,12 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 "media_type": media_type,
                 "post_permalink": post_permalink,
             })
+            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_forwarded_share")
             mark_processed(processed_message_ids, message_id)
             return
 
         if is_low_signal_message(message_text, messaging):
+            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_low_signal")
             mark_processed(processed_message_ids, message_id)
             return
 
@@ -5408,6 +5417,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 "has_media_url": bool(media_url),
                 "has_post_image_url": bool(post_image_url),
             })
+            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_missing_access_token")
             return
 
         media_match_context = ""
@@ -5586,25 +5596,33 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             and not media_reply_hint
         )
         if needs_photo_fallback:
-            reply_text = replacement_for_forbidden_product_photo_question(message_text or "", business)
+            log("Instagram DM skipped auto-reply: no verified media match", {
+                "customer_id": sender_id,
+                "message_id": message_id,
+                "media_type": media_type,
+                "source_url_host": urlparse(matcher_source_url).netloc if matcher_source_url else "",
+            })
+            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_no_verified_match")
+            mark_processed(processed_message_ids, message_id)
+            return
+
+        use_direct_matcher_reply = bool(media_reply_hint) and (
+            is_auto_media_placeholder_message(message_text)
+            or not normalize_id(message_text)
+            or (media_type in {"photo", "video"} and not message.get("text"))
+        )
+        if use_direct_matcher_reply:
+            reply_text = clean_sales_reply(media_reply_hint, message_text or "photo", business)
         else:
-            use_direct_matcher_reply = bool(media_reply_hint) and (
-                is_auto_media_placeholder_message(message_text)
-                or not normalize_id(message_text)
-                or (media_type in {"photo", "video"} and not message.get("text"))
+            reply_text = get_ai_reply(
+                message_text or "Photo/Video received",
+                business,
+                "instagram",
+                sender_id,
+                "dm",
+                media_context=media_match_context,
+                media_reply_hint=media_reply_hint,
             )
-            if use_direct_matcher_reply:
-                reply_text = clean_sales_reply(media_reply_hint, message_text or "photo", business)
-            else:
-                reply_text = get_ai_reply(
-                    message_text or "Photo/Video received",
-                    business,
-                    "instagram",
-                    sender_id,
-                    "dm",
-                    media_context=media_match_context,
-                    media_reply_hint=media_reply_hint,
-                )
 
         should_send_catalog = (
             bool(get_catalog_link(business))
@@ -5639,9 +5657,10 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 is_read=True,
                 channel="dm",
             )
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm")
+            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="processed")
             mark_processed(processed_message_ids, message_id)
         elif send_result is not None:
+            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="failed_send")
             log("Instagram DM send failed", {
                 "customer_id": sender_id,
                 "message_id": message_id,
