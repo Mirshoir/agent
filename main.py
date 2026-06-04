@@ -28,6 +28,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from supabase import create_client
 from starlette.concurrency import run_in_threadpool
+try:
+    import firebase_admin
+    from firebase_admin import credentials as firebase_credentials, messaging as firebase_messaging
+except Exception:
+    firebase_admin = None
+    firebase_credentials = None
+    firebase_messaging = None
 
 try:
     import telegram_bot as telegram_bot_module
@@ -194,6 +201,13 @@ SUPER_ADMIN_EMAILS = {
     for item in os.getenv("SUPER_ADMIN_EMAILS", "").split(",")
     if str(item).strip()
 }
+FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "")
+FIREBASE_SERVICE_ACCOUNT_PATH = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "")
+FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "")
+FIREBASE_PUSH_ENABLED = str(os.getenv("FIREBASE_PUSH_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
+MOBILE_DEVICE_TOKEN_STALE_DAYS = max(1, min(90, int(os.getenv("MOBILE_DEVICE_TOKEN_STALE_DAYS", "30"))))
+FIREBASE_APP_CACHE = None
+FIREBASE_APP_CACHE_ERROR = ""
 
 # Fallback store used only when `dashboard_workspace_state` table is missing.
 # This keeps operator tasks usable until SQL migration is applied.
@@ -431,6 +445,29 @@ class OperatorTaskCreateRequest(BaseModel):
     text: str
     recipients: list[str] = []
     assign_mode: str = "all"
+
+
+class OperatorDealAdjustRequest(BaseModel):
+    business_id: str
+    operator_login_id: str
+    delta: int = 0
+    total_after: Optional[int] = None
+    reason: str = ""
+    conversation_id: str = ""
+    lead_id: str = ""
+
+
+class MobileDeviceTokenRegisterRequest(BaseModel):
+    business_ids: list[str] = []
+    device_token: str
+    platform: str = "android"
+    device_label: str = ""
+    app_version: str = ""
+
+
+class MobileDeviceTokenUnregisterRequest(BaseModel):
+    business_ids: list[str] = []
+    device_token: str
 
 
 # ============================================================================
@@ -1150,9 +1187,9 @@ def verify_dashboard_password(password: str, password_hash: str) -> bool:
 
 
 AUTH_TOKEN_TTL_SECONDS = int(os.getenv("DASHBOARD_AUTH_TTL_SECONDS", str(60 * 60 * 24 * 30)))
-CONVERSATIONS_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATIONS_CACHE_TTL_SECONDS", "10"))
+CONVERSATIONS_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATIONS_CACHE_TTL_SECONDS", "2"))
 _conversations_cache: dict[str, tuple[float, dict]] = {}
-CONVERSATION_MESSAGES_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATION_MESSAGES_CACHE_TTL_SECONDS", "12"))
+CONVERSATION_MESSAGES_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATION_MESSAGES_CACHE_TTL_SECONDS", "2"))
 _conversation_messages_cache: dict[str, tuple[float, dict]] = {}
 CONVERSATIONS_FAST_LOOKBACK_DAYS = max(7, min(365, int(os.getenv("CONVERSATIONS_FAST_LOOKBACK_DAYS", "120"))))
 CONVERSATIONS_FAST_FETCH_LIMIT = max(80, min(5000, int(os.getenv("CONVERSATIONS_FAST_FETCH_LIMIT", "800"))))
@@ -2643,6 +2680,12 @@ def save_inbox_message(
 
         # New data landed; keep dashboard reads fresh.
         clear_inbox_caches()
+        if direction == "inbound" and business and normalize_id(business.get("id")):
+            schedule_operator_unread_push(
+                normalize_id(business.get("id")),
+                platform=platform,
+                customer_name=customer_name,
+            )
 
     except Exception as e:
         log("Could not save inbox message", str(e))
@@ -2842,6 +2885,515 @@ def upsert_workspace_state(business_id: str, state_key: str, state_value, update
         if business_id not in WORKSPACE_STATE_FALLBACK:
             WORKSPACE_STATE_FALLBACK[business_id] = {}
         WORKSPACE_STATE_FALLBACK[business_id][state_key] = data.get("state_value")
+
+
+def has_business_admin_access(access: dict, business_id: str) -> bool:
+    business_id = normalize_id(business_id)
+    if not can_access_business(access, business_id):
+        return False
+    if access.get("is_admin"):
+        return True
+    role = get_user_business_role(access.get("email", ""), business_id) or normalize_id(access.get("role", ""))
+    return normalize_id(role).lower() in BUSINESS_ADMIN_ROLES
+
+
+def normalize_operator_login(value: str) -> str:
+    clean = normalize_id(value).strip()
+    if "@" in clean:
+        return normalize_email(clean)
+    return clean.lower()
+
+
+def load_operator_deal_counts(business_id: str) -> dict[str, int]:
+    state = get_workspace_state(business_id)
+    raw = state.get("operator_deals") if isinstance(state, dict) else {}
+    if not isinstance(raw, dict):
+        return {}
+
+    counts = {}
+    for key, value in raw.items():
+        login_id = normalize_operator_login(key)
+        if not login_id:
+            continue
+        try:
+            count = int(value)
+        except Exception:
+            count = 0
+        counts[login_id] = max(0, count)
+    return counts
+
+
+def save_operator_deal_counts(business_id: str, counts: dict[str, int], updated_by: str = "") -> dict[str, int]:
+    payload = {}
+    for key, value in (counts or {}).items():
+        login_id = normalize_operator_login(key)
+        if not login_id:
+            continue
+        try:
+            payload[login_id] = max(0, int(value))
+        except Exception:
+            payload[login_id] = 0
+    upsert_workspace_state(business_id, "operator_deals", payload, updated_by=updated_by)
+    return payload
+
+
+def parse_report_date_range(date_from: str = "", date_to: str = "") -> tuple[str, str, str, str]:
+    raw_from = normalize_id(date_from)
+    raw_to = normalize_id(date_to)
+    from_dt = None
+    to_dt = None
+
+    try:
+        if raw_from:
+            from_dt = datetime.strptime(raw_from, "%Y-%m-%d")
+        if raw_to:
+            to_dt = datetime.strptime(raw_to, "%Y-%m-%d")
+    except ValueError as exc:
+        raise ValueError("Dates must use YYYY-MM-DD format.") from exc
+
+    if from_dt and to_dt and from_dt > to_dt:
+        raise ValueError("date_from must be earlier than or equal to date_to.")
+
+    from_iso = from_dt.isoformat() if from_dt else ""
+    to_iso_exclusive = (to_dt + timedelta(days=1)).isoformat() if to_dt else ""
+    return raw_from, raw_to, from_iso, to_iso_exclusive
+
+
+def append_operator_deal_event_fallback(business_id: str, event: dict, updated_by: str = ""):
+    state = get_workspace_state(business_id)
+    legacy = state.get("operator_deal_events") if isinstance(state, dict) else {}
+    items = []
+    if isinstance(legacy, dict):
+        raw_items = legacy.get("items")
+        if isinstance(raw_items, list):
+            items = [item for item in raw_items if isinstance(item, dict)]
+    elif isinstance(legacy, list):
+        items = [item for item in legacy if isinstance(item, dict)]
+
+    items.append(event)
+    upsert_workspace_state(
+        business_id,
+        "operator_deal_events",
+        {"items": items[-5000:]},
+        updated_by=updated_by,
+    )
+
+
+def append_operator_deal_event(
+    business_id: str,
+    operator_login_id: str,
+    delta: int,
+    total_after: int,
+    created_by: str = "",
+    source: str = "manual_adjustment",
+    metadata: dict | None = None,
+    occurred_at: str = "",
+) -> dict:
+    business_id = normalize_id(business_id)
+    operator_login_id = normalize_operator_login(operator_login_id)
+    safe_created_by = normalize_email(created_by)
+    event = {
+        "business_id": business_id,
+        "operator_login_id": operator_login_id,
+        "delta": int(delta or 0),
+        "total_after": max(0, int(total_after or 0)),
+        "source": normalize_id(source) or "manual_adjustment",
+        "created_by": safe_created_by,
+        "metadata": metadata if isinstance(metadata, dict) else {},
+        "created_at": normalize_id(occurred_at) or datetime.utcnow().isoformat(),
+    }
+    if not business_id or not operator_login_id or not event["delta"]:
+        return event
+
+    try:
+        response = supabase.table("operator_deal_events").insert(event).execute()
+        rows = response.data or []
+        if rows and isinstance(rows[0], dict):
+            event = rows[0]
+    except Exception as exc:
+        log("Could not persist operator deal event to table, using workspace fallback", {"business_id": business_id, "error": str(exc)})
+        append_operator_deal_event_fallback(business_id, event, updated_by=safe_created_by)
+    return event
+
+
+def load_operator_deal_events_fallback(
+    business_id: str,
+    from_iso: str = "",
+    to_iso_exclusive: str = "",
+) -> list[dict]:
+    state = get_workspace_state(business_id)
+    legacy = state.get("operator_deal_events") if isinstance(state, dict) else {}
+    items = []
+    if isinstance(legacy, dict):
+        raw_items = legacy.get("items")
+        if isinstance(raw_items, list):
+            items = [item for item in raw_items if isinstance(item, dict)]
+    elif isinstance(legacy, list):
+        items = [item for item in legacy if isinstance(item, dict)]
+
+    filtered = []
+    for item in items:
+        created_at = normalize_id(item.get("created_at"))
+        if from_iso and created_at and created_at < from_iso:
+            continue
+        if to_iso_exclusive and created_at and created_at >= to_iso_exclusive:
+            continue
+        filtered.append(item)
+    filtered.sort(key=lambda item: normalize_id(item.get("created_at")), reverse=True)
+    return filtered
+
+
+def load_operator_deal_events(
+    business_id: str,
+    date_from: str = "",
+    date_to: str = "",
+) -> tuple[list[dict], str]:
+    business_id = normalize_id(business_id)
+    _, _, from_iso, to_iso_exclusive = parse_report_date_range(date_from, date_to)
+    if not business_id:
+        return [], "none"
+
+    try:
+        query = (
+            supabase.table("operator_deal_events")
+            .select("id,business_id,operator_login_id,delta,total_after,source,created_by,metadata,created_at")
+            .eq("business_id", business_id)
+            .order("created_at", desc=True)
+            .limit(5000)
+        )
+        if from_iso:
+            query = query.gte("created_at", from_iso)
+        if to_iso_exclusive:
+            query = query.lt("created_at", to_iso_exclusive)
+        rows = query.execute().data or []
+        return [row for row in rows if isinstance(row, dict)], "table"
+    except Exception as exc:
+        log("Could not load operator deal events from table, using workspace fallback", {"business_id": business_id, "error": str(exc)})
+        return load_operator_deal_events_fallback(business_id, from_iso, to_iso_exclusive), "workspace_state_fallback"
+
+
+def get_operator_deal_history_started_at(business_id: str) -> str:
+    business_id = normalize_id(business_id)
+    if not business_id:
+        return ""
+    try:
+        rows = (
+            supabase.table("operator_deal_events")
+            .select("created_at")
+            .eq("business_id", business_id)
+            .order("created_at", desc=False)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if rows and isinstance(rows[0], dict):
+            return normalize_id(rows[0].get("created_at"))
+    except Exception:
+        pass
+
+    fallback_rows = load_operator_deal_events_fallback(business_id)
+    if not fallback_rows:
+        return ""
+    created_values = [normalize_id(item.get("created_at")) for item in fallback_rows if normalize_id(item.get("created_at"))]
+    return min(created_values) if created_values else ""
+
+
+def build_operator_deal_report(business_id: str, date_from: str = "", date_to: str = "") -> dict:
+    business_id = normalize_id(business_id)
+    normalized_from, normalized_to, _, _ = parse_report_date_range(date_from, date_to)
+    counts = load_operator_deal_counts(business_id)
+    events, source = load_operator_deal_events(business_id, normalized_from, normalized_to)
+    aggregates = {}
+
+    for event in events:
+        login_id = normalize_operator_login(event.get("operator_login_id"))
+        if not login_id:
+            continue
+        try:
+            delta = int(event.get("delta") or 0)
+        except Exception:
+            delta = 0
+        item = aggregates.setdefault(
+            login_id,
+            {
+                "period_delta": 0,
+                "positive_events": 0,
+                "negative_events": 0,
+                "event_count": 0,
+                "last_event_at": "",
+            },
+        )
+        item["period_delta"] += delta
+        item["event_count"] += 1
+        if delta > 0:
+            item["positive_events"] += delta
+        elif delta < 0:
+            item["negative_events"] += abs(delta)
+        created_at = normalize_id(event.get("created_at"))
+        if created_at and created_at > normalize_id(item.get("last_event_at")):
+            item["last_event_at"] = created_at
+
+    rows = []
+    for login_id in sorted(set(counts.keys()) | set(aggregates.keys())):
+        aggregate = aggregates.get(login_id, {})
+        rows.append(
+            {
+                "operator_login_id": login_id,
+                "current_total": max(0, int(counts.get(login_id, 0) or 0)),
+                "period_delta": int(aggregate.get("period_delta") or 0),
+                "positive_events": int(aggregate.get("positive_events") or 0),
+                "negative_events": int(aggregate.get("negative_events") or 0),
+                "event_count": int(aggregate.get("event_count") or 0),
+                "last_event_at": normalize_id(aggregate.get("last_event_at")),
+            }
+        )
+
+    rows.sort(
+        key=lambda item: (
+            int(item.get("period_delta") or 0),
+            int(item.get("current_total") or 0),
+            normalize_operator_login(item.get("operator_login_id")),
+        ),
+        reverse=True,
+    )
+
+    return {
+        "rows": rows,
+        "summary": {
+            "date_from": normalized_from,
+            "date_to": normalized_to,
+            "period_total": sum(int(item.get("period_delta") or 0) for item in rows),
+            "current_total": sum(int(item.get("current_total") or 0) for item in rows),
+            "positive_events": sum(int(item.get("positive_events") or 0) for item in rows),
+            "negative_events": sum(int(item.get("negative_events") or 0) for item in rows),
+            "history_started_at": get_operator_deal_history_started_at(business_id),
+            "history_source": source,
+        },
+    }
+
+
+def get_firebase_admin_app():
+    global FIREBASE_APP_CACHE, FIREBASE_APP_CACHE_ERROR
+    if FIREBASE_APP_CACHE is not None:
+        return FIREBASE_APP_CACHE
+    if FIREBASE_APP_CACHE_ERROR or not FIREBASE_PUSH_ENABLED:
+        return None
+    if firebase_admin is None or firebase_credentials is None or firebase_messaging is None:
+        FIREBASE_APP_CACHE_ERROR = "firebase-admin is not installed"
+        return None
+
+    try:
+        if FIREBASE_SERVICE_ACCOUNT_JSON:
+            certificate = firebase_credentials.Certificate(json.loads(FIREBASE_SERVICE_ACCOUNT_JSON))
+        elif FIREBASE_SERVICE_ACCOUNT_PATH:
+            certificate = firebase_credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_PATH)
+        else:
+            FIREBASE_APP_CACHE_ERROR = "Firebase service account is not configured"
+            return None
+
+        options = {"projectId": FIREBASE_PROJECT_ID} if FIREBASE_PROJECT_ID else None
+        try:
+            FIREBASE_APP_CACHE = firebase_admin.get_app()
+        except Exception:
+            FIREBASE_APP_CACHE = firebase_admin.initialize_app(certificate, options)
+        return FIREBASE_APP_CACHE
+    except Exception as exc:
+        FIREBASE_APP_CACHE_ERROR = str(exc)
+        log("Could not initialize Firebase Admin SDK", FIREBASE_APP_CACHE_ERROR)
+        return None
+
+
+def sync_mobile_device_token(
+    access: dict,
+    business_ids: list[str],
+    device_token: str,
+    platform: str = "android",
+    device_label: str = "",
+    app_version: str = "",
+) -> list[str]:
+    clean_token = normalize_id(device_token)
+    if not access or not clean_token:
+        return []
+
+    unique_business_ids = []
+    seen = set()
+    requested_ids = [normalize_id(item) for item in (business_ids or []) if normalize_id(item)]
+    source_ids = requested_ids or list(access.get("business_ids") or [])
+    for business_id in source_ids:
+        if business_id in seen or not can_access_business(access, business_id):
+            continue
+        seen.add(business_id)
+        unique_business_ids.append(business_id)
+
+    registered = []
+    for business_id in unique_business_ids:
+        role = get_user_business_role(access.get("email", ""), business_id) or normalize_id(access.get("role", "")) or "operator"
+        payload = {
+            "business_id": business_id,
+            "user_email": normalize_email(access.get("email", "")),
+            "user_role": normalize_id(role).lower() or "operator",
+            "platform": normalize_id(platform).lower() or "android",
+            "device_token": clean_token,
+            "device_label": normalize_id(device_label),
+            "app_version": normalize_id(app_version),
+            "is_active": True,
+            "last_seen_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+            "metadata": {
+                "device_label": normalize_id(device_label),
+                "app_version": normalize_id(app_version),
+            },
+        }
+        try:
+            supabase.table("mobile_device_tokens").upsert(
+                payload,
+                on_conflict="business_id,user_email,device_token",
+            ).execute()
+            registered.append(business_id)
+        except Exception as exc:
+            log("Could not register mobile device token", {"business_id": business_id, "error": str(exc)})
+    return registered
+
+
+def deactivate_mobile_device_token(access: dict, business_ids: list[str], device_token: str) -> list[str]:
+    clean_token = normalize_id(device_token)
+    if not access or not clean_token:
+        return []
+
+    requested_ids = [normalize_id(item) for item in (business_ids or []) if normalize_id(item)]
+    source_ids = requested_ids or list(access.get("business_ids") or [])
+    updated = []
+    for business_id in source_ids:
+        if not can_access_business(access, business_id):
+            continue
+        try:
+            supabase.table("mobile_device_tokens").update(
+                {
+                    "is_active": False,
+                    "updated_at": datetime.utcnow().isoformat(),
+                }
+            ).eq("business_id", business_id).eq("user_email", normalize_email(access.get("email", ""))).eq("device_token", clean_token).execute()
+            updated.append(business_id)
+        except Exception as exc:
+            log("Could not unregister mobile device token", {"business_id": business_id, "error": str(exc)})
+    return updated
+
+
+def list_active_operator_device_tokens(business_id: str) -> list[dict]:
+    business_id = normalize_id(business_id)
+    if not business_id:
+        return []
+    try:
+        rows = (
+            supabase.table("mobile_device_tokens")
+            .select("id,business_id,user_email,user_role,device_token,last_seen_at,is_active")
+            .eq("business_id", business_id)
+            .eq("platform", "android")
+            .eq("user_role", "operator")
+            .eq("is_active", True)
+            .limit(500)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        log("Could not load mobile device tokens", {"business_id": business_id, "error": str(exc)})
+        return []
+
+    stale_before = datetime.utcnow() - timedelta(days=MOBILE_DEVICE_TOKEN_STALE_DAYS)
+    active_rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        token = normalize_id(row.get("device_token"))
+        if not token:
+            continue
+        last_seen_at = normalize_id(row.get("last_seen_at"))
+        try:
+            if last_seen_at and datetime.fromisoformat(last_seen_at.replace("Z", "+00:00")).replace(tzinfo=None) < stale_before:
+                continue
+        except Exception:
+            pass
+        active_rows.append(row)
+    return active_rows
+
+
+async def send_operator_unread_push(business_id: str, platform: str = "", customer_name: str = ""):
+    business_id = normalize_id(business_id)
+    if not business_id:
+        return
+
+    firebase_app = get_firebase_admin_app()
+    if firebase_app is None:
+        return
+
+    token_rows = list_active_operator_device_tokens(business_id)
+    if not token_rows:
+        return
+
+    clean_platform = normalize_id(platform).lower()
+    clean_customer_name = normalize_id(customer_name)
+    title = "Unread customer messages"
+    body = clean_customer_name or (f"New unread {clean_platform} message received." if clean_platform else "New unread customer message received.")
+    messages = []
+    row_by_token = {}
+    for row in token_rows:
+        token = normalize_id(row.get("device_token"))
+        if not token:
+            continue
+        row_by_token[token] = row
+        messages.append(
+            firebase_messaging.Message(
+                token=token,
+                data={
+                    "type": "unread_sync",
+                    "business_id": business_id,
+                    "platform": clean_platform,
+                    "title": title,
+                    "body": body,
+                },
+                android=firebase_messaging.AndroidConfig(priority="high"),
+            )
+        )
+
+    if not messages:
+        return
+
+    try:
+        batch_response = await run_in_threadpool(lambda: firebase_messaging.send_each(messages, app=firebase_app))
+    except Exception as exc:
+        log("Could not send Firebase unread push", {"business_id": business_id, "error": str(exc)})
+        return
+
+    for index, response in enumerate(getattr(batch_response, "responses", []) or []):
+        if getattr(response, "success", False):
+            continue
+        error = getattr(response, "exception", None)
+        message = str(error or "")
+        token = normalize_id(messages[index].token)
+        if token and ("registration-token-not-registered" in message.lower() or "unregistered" in message.lower()):
+            row = row_by_token.get(token) or {}
+            try:
+                supabase.table("mobile_device_tokens").update(
+                    {
+                        "is_active": False,
+                        "updated_at": datetime.utcnow().isoformat(),
+                    }
+                ).eq("business_id", business_id).eq("device_token", token).execute()
+            except Exception:
+                pass
+
+
+def schedule_operator_unread_push(business_id: str, platform: str = "", customer_name: str = ""):
+    business_id = normalize_id(business_id)
+    if not business_id:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(send_operator_unread_push(business_id, platform=platform, customer_name=customer_name))
 
 
 def instagram_processed_message_state_key(message_id: str) -> str:
@@ -7792,6 +8344,155 @@ async def list_operator_tasks_v2(
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
+@app.get("/api/v2/operator-deals/report")
+async def operator_deal_report_v2(
+    business_id: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    business_id = normalize_id(business_id)
+    if not business_id:
+        return JSONResponse({"status": "error", "message": "Missing business_id"}, status_code=400)
+    if not has_business_admin_access(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+
+    try:
+        report = build_operator_deal_report(business_id, date_from=date_from, date_to=date_to)
+        return {"status": "ok", "data": report}
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/v2/operator-deals/adjust")
+async def adjust_operator_deal_v2(
+    body: OperatorDealAdjustRequest,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    business_id = normalize_id(body.business_id)
+    operator_login_id = normalize_operator_login(body.operator_login_id)
+    if not business_id or not operator_login_id:
+        return JSONResponse({"status": "error", "message": "business_id and operator_login_id are required"}, status_code=400)
+    if not has_business_admin_access(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+
+    try:
+        counts = load_operator_deal_counts(business_id)
+        previous_total = max(0, int(counts.get(operator_login_id, 0) or 0))
+        requested_delta = int(body.delta or 0)
+        if body.total_after is None:
+            next_total = max(0, previous_total + requested_delta)
+        else:
+            next_total = max(0, int(body.total_after or 0))
+        effective_delta = next_total - previous_total
+
+        counts[operator_login_id] = next_total
+        saved_counts = save_operator_deal_counts(
+            business_id,
+            counts,
+            updated_by=access.get("email", ""),
+        )
+
+        event = {}
+        if effective_delta:
+            event = append_operator_deal_event(
+                business_id=business_id,
+                operator_login_id=operator_login_id,
+                delta=effective_delta,
+                total_after=next_total,
+                created_by=access.get("email", ""),
+                source="android_admin_adjustment",
+                metadata={
+                    "reason": normalize_id(body.reason),
+                    "conversation_id": normalize_id(body.conversation_id),
+                    "lead_id": normalize_id(body.lead_id),
+                },
+            )
+
+        report = build_operator_deal_report(business_id)
+        return {
+            "status": "ok",
+            "data": {
+                "operator_deals": saved_counts,
+                "report": report,
+                "event": event,
+                "operator_login_id": operator_login_id,
+                "current_total": next_total,
+                "delta": effective_delta,
+            },
+        }
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/v2/mobile/device-token")
+async def register_mobile_device_token_v2(
+    body: MobileDeviceTokenRegisterRequest,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    device_token = normalize_id(body.device_token)
+    if not device_token:
+        return JSONResponse({"status": "error", "message": "device_token is required"}, status_code=400)
+
+    try:
+        registered = sync_mobile_device_token(
+            access=access,
+            business_ids=body.business_ids or [],
+            device_token=device_token,
+            platform=body.platform or "android",
+            device_label=body.device_label,
+            app_version=body.app_version,
+        )
+        return {
+            "status": "ok",
+            "data": {
+                "registered_business_ids": registered,
+                "firebase_ready": bool(get_firebase_admin_app()),
+                "firebase_error": FIREBASE_APP_CACHE_ERROR,
+            },
+        }
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/v2/mobile/device-token/unregister")
+async def unregister_mobile_device_token_v2(
+    body: MobileDeviceTokenUnregisterRequest,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    device_token = normalize_id(body.device_token)
+    if not device_token:
+        return JSONResponse({"status": "error", "message": "device_token is required"}, status_code=400)
+
+    try:
+        updated = deactivate_mobile_device_token(access, body.business_ids or [], device_token)
+        return {"status": "ok", "data": {"updated_business_ids": updated}}
+    except Exception as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+
+
 @app.post("/api/v2/businesses")
 async def create_business_v2(
     body: BusinessCreateRequest,
@@ -8176,10 +8877,10 @@ async def get_conversation_messages_v2(
             )
             rows = list(reversed(fallback_query.execute().data or []))
 
-        # Backfill old forwarded Instagram messages that were saved without preview URLs.
-        # This keeps forwarded reels stable in UI (no random "NO PREVIEW" regressions).
+        # Backfill old forwarded Instagram previews asynchronously so hot-path chat loads
+        # are not blocked by public preview scraping/network retries.
         if platform == "instagram" and rows:
-            update_rows = []
+            preview_candidates = []
             for row in rows:
                 media_type = normalize_id(row.get("media_type")).lower()
                 if media_type not in ("video", "file", "photo", "image"):
@@ -8192,54 +8893,55 @@ async def get_conversation_messages_v2(
                     or (row.get("raw_payload") or {}).get("post_permalink")
                     or extract_instagram_permalink_from_payload(row.get("raw_payload") or {})
                 )
-                if not post_permalink:
+                row_id = normalize_id(row.get("id"))
+                if not post_permalink or not row_id:
                     continue
 
-                preview = fetch_instagram_public_preview(post_permalink) or {}
-                preview_media_url = normalize_id(preview.get("media_url"))
-                preview_image_url = normalize_id(preview.get("post_image_url"))
-                preview_media_type = normalize_id(preview.get("post_media_type")).lower()
+                preview_candidates.append(
+                    {
+                        "id": row_id,
+                        "post_permalink": post_permalink,
+                        "existing_media_type": media_type,
+                        "existing_post_image_url": normalize_id(row.get("post_image_url")),
+                        "existing_post_media_type": normalize_id(row.get("post_media_type")).lower(),
+                    }
+                )
 
-                changed = False
-                if preview_media_url:
-                    row["media_url"] = preview_media_url
-                    changed = True
-                if preview_image_url and not normalize_id(row.get("post_image_url")):
-                    row["post_image_url"] = preview_image_url
-                    changed = True
-                if post_permalink and not normalize_id(row.get("post_permalink")):
-                    row["post_permalink"] = post_permalink
-                    changed = True
-                if preview_media_type and media_type in ("", "file"):
-                    row["media_type"] = "video" if "video" in preview_media_type else ("photo" if "image" in preview_media_type else media_type)
-                    changed = True
-
-                if changed and normalize_id(row.get("id")):
-                    update_rows.append({
-                        "id": normalize_id(row.get("id")),
-                        "media_url": normalize_id(row.get("media_url")),
-                        "post_image_url": normalize_id(row.get("post_image_url")),
-                        "post_permalink": normalize_id(row.get("post_permalink")),
-                        "post_media_type": normalize_id(preview_media_type or row.get("post_media_type")).lower(),
-                    })
-
-            if update_rows:
+            if preview_candidates:
                 def persist_preview_backfill(rows_to_update: list[dict]):
                     for item in rows_to_update:
                         try:
-                            supabase.table("inbox_messages").update({
-                                "media_url": item.get("media_url") or None,
-                                "post_image_url": item.get("post_image_url") or None,
-                                "post_permalink": item.get("post_permalink") or None,
-                                "post_media_type": item.get("post_media_type") or None,
-                            }).eq("id", item.get("id")).execute()
+                            preview = fetch_instagram_public_preview(item.get("post_permalink")) or {}
+                            preview_media_url = normalize_id(preview.get("media_url"))
+                            preview_image_url = normalize_id(preview.get("post_image_url"))
+                            preview_media_type = normalize_id(preview.get("post_media_type")).lower()
+
+                            update_data = {}
+                            if preview_media_url:
+                                update_data["media_url"] = preview_media_url
+                            if preview_image_url and not item.get("existing_post_image_url"):
+                                update_data["post_image_url"] = preview_image_url
+                            if item.get("post_permalink"):
+                                update_data["post_permalink"] = item.get("post_permalink")
+                            effective_media_type = item.get("existing_media_type") or ""
+                            if preview_media_type and effective_media_type in ("", "file"):
+                                update_data["media_type"] = (
+                                    "video"
+                                    if "video" in preview_media_type
+                                    else ("photo" if "image" in preview_media_type else effective_media_type)
+                                )
+                            if preview_media_type or item.get("existing_post_media_type"):
+                                update_data["post_media_type"] = preview_media_type or item.get("existing_post_media_type")
+
+                            if update_data:
+                                supabase.table("inbox_messages").update(update_data).eq("id", item.get("id")).execute()
                         except Exception:
                             pass
 
                 if background_tasks is not None:
-                    background_tasks.add_task(persist_preview_backfill, update_rows)
+                    background_tasks.add_task(persist_preview_backfill, preview_candidates)
                 else:
-                    persist_preview_backfill(update_rows)
+                    persist_preview_backfill(preview_candidates)
 
         messages = [transform_message_to_react(row) for row in rows]
 
