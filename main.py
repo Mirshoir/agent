@@ -2,6 +2,7 @@ import os
 import re
 import time
 import secrets
+import asyncio
 import base64
 import io
 import json
@@ -26,6 +27,7 @@ from fastapi.responses import PlainTextResponse, JSONResponse, RedirectResponse,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from supabase import create_client
+from starlette.concurrency import run_in_threadpool
 
 try:
     import telegram_bot as telegram_bot_module
@@ -1452,6 +1454,143 @@ def send_failure_response(result: dict, default_message: str = "Failed to send m
     )
 
 
+async def dispatch_outbound_message(
+    conversation_id: str,
+    text: str,
+    reply_to_comment_id: str = "",
+):
+    parts = str(conversation_id or "").split("::")
+    if len(parts) != 4:
+        return False, {"error": "Invalid conversation ID format"}, "", "", ""
+
+    platform, business_id, channel, customer_scope = parts
+    platform = normalize_id(platform).lower()
+    channel = standard_channel(platform, channel)
+    target_id = customer_scope
+    post_id = ""
+    if platform == "instagram" and "comment" in channel:
+        target_id, post_id = decode_comment_scope(customer_scope)
+
+    business = get_business_by_id(business_id)
+    if not business:
+        return False, {"error": "Business not found"}, target_id, post_id, business_id
+
+    ok = False
+    result = {}
+
+    if platform == "instagram":
+        access_token = get_business_access_token(business)
+        if not access_token:
+            return False, {"error": "Instagram access token not configured"}, target_id, post_id, business_id
+
+        if "comment" in channel:
+            if reply_to_comment_id:
+                anchor = get_instagram_comment_anchor_by_comment_id(
+                    business_id=business_id,
+                    comment_id=reply_to_comment_id,
+                    post_id=post_id,
+                )
+            else:
+                anchor = get_latest_instagram_comment_anchor(
+                    business_id=business_id,
+                    commenter_id=target_id,
+                    post_id=post_id,
+                )
+            if not target_id:
+                target_id = normalize_id(anchor.get("customer_id"))
+            comment_id = reply_to_comment_id or normalize_id(
+                anchor.get("external_message_id")
+                or (anchor.get("raw_payload") or {}).get("id")
+            )
+            if reply_to_comment_id and not comment_id:
+                comment_id = reply_to_comment_id
+            if not comment_id:
+                return False, {"error": "Comment anchor not found for this thread"}, target_id, post_id, business_id
+
+            send_result = await run_in_threadpool(reply_to_comment, access_token, comment_id, text, business)
+            ok = bool(send_result and send_result.ok)
+            result = safe_json(send_result) if send_result is not None else {"error": "Send failed"}
+        else:
+            ok, result = await run_in_threadpool(send_instagram_dm, access_token, target_id, text, business)
+
+    elif platform == "telegram":
+        if channel == "telegram_user_private":
+            ok, result = await send_telegram_user_message(customer_id=target_id, text=text)
+        else:
+            res = await run_in_threadpool(send_telegram_bot_message, target_id, text)
+            if res:
+                ok = res.ok
+                result = safe_json(res)
+            else:
+                result = {"error": "Send failed"}
+
+    elif platform == "whatsapp":
+        res = await run_in_threadpool(send_whatsapp_text, target_id, text, business)
+        if res:
+            ok = res.ok
+            try:
+                result = res.json()
+            except Exception:
+                result = {"text": res.text}
+        else:
+            result = {"error": "Send failed"}
+
+    else:
+        return False, {"error": "Unknown platform"}, target_id, post_id, business_id
+
+    return ok, result, target_id, post_id, business_id
+
+
+async def process_outbound_message_dispatch(
+    pending_message_id: str,
+    conversation_id: str,
+    text: str,
+    reply_to_comment_id: str = "",
+):
+    try:
+        ok, result, target_id, post_id, _business_id = await dispatch_outbound_message(
+            conversation_id=conversation_id,
+            text=text,
+            reply_to_comment_id=reply_to_comment_id,
+        )
+
+        if not ok:
+            update_inbox_message_delivery_state(
+                pending_message_id,
+                "failed",
+                provider_result=result if isinstance(result, dict) else {"error": normalize_id(result)},
+                error_message=normalize_id((result or {}).get("error") or (result or {}).get("message") or "Send failed"),
+                customer_id=target_id,
+            )
+            return
+
+        external_message_id = normalize_id(
+            result.get("message_id")
+            or result.get("id")
+            or result.get("messages", [{}])[0].get("id", "")
+        )
+        provider_payload = {
+            **(result or {}),
+            **({"post_id": post_id} if post_id else {}),
+            **({"reply_to_comment_id": reply_to_comment_id} if reply_to_comment_id else {}),
+        }
+        update_inbox_message_delivery_state(
+            pending_message_id,
+            "sent",
+            provider_result=provider_payload,
+            external_message_id=external_message_id,
+            customer_id=target_id,
+        )
+    except Exception as exc:
+        log("Queued outbound send failed", {"message_id": pending_message_id, "conversation_id": conversation_id, "error": str(exc)})
+        update_inbox_message_delivery_state(
+            pending_message_id,
+            "failed",
+            provider_result={"error": str(exc)},
+            error_message=str(exc),
+        )
+
+
 def unsupported_message_mutation_response(platform: str, action: str):
     platform_label = (platform or "this platform").title()
     return JSONResponse(
@@ -1834,6 +1973,12 @@ def transform_message_to_react(row: dict) -> dict:
         message['text'] = content
 
     raw_payload = row.get("raw_payload") or {}
+    delivery_status = normalize_id(raw_payload.get("delivery_status")).lower()
+    if delivery_status == "pending":
+        message["isPending"] = True
+    elif delivery_status == "failed":
+        message["isFailed"] = True
+        message["sendError"] = normalize_id(raw_payload.get("delivery_error") or raw_payload.get("error") or "")
     # Keep identifiers on every row (including plain text) so manual per-comment reply can target correctly.
     message['external_message_id'] = external_message_id
     message['comment_id'] = normalize_id(raw_payload.get("comment_id") or raw_payload.get("id") or external_message_id)
@@ -2441,6 +2586,7 @@ def save_inbox_message(
         post_image_url: Optional[str] = None,
         post_media_type: Optional[str] = None,
 ):
+    inserted_row = {}
     try:
         customer_id = sender_id if direction == "inbound" else recipient_id
         payload = dict(raw_payload or {})
@@ -2476,24 +2622,31 @@ def save_inbox_message(
         }
 
         try:
-            supabase.table("inbox_messages").insert(data).execute()
+            response = supabase.table("inbox_messages").insert(data).execute()
+            inserted = response.data or []
+            inserted_row = inserted[0] if inserted and isinstance(inserted[0], dict) else inserted_row
         except Exception:
             compatible_data = dict(data)
             for optional_key in ["post_permalink", "post_image_url", "post_media_type"]:
                 compatible_data.pop(optional_key, None)
             try:
-                supabase.table("inbox_messages").insert(compatible_data).execute()
+                response = supabase.table("inbox_messages").insert(compatible_data).execute()
+                inserted = response.data or []
+                inserted_row = inserted[0] if inserted and isinstance(inserted[0], dict) else inserted_row
             except Exception:
                 for optional_key in ["customer_name", "is_read", "media_type", "media_url", "file_name", "mime_type",
                                      "whatsapp_media_id"]:
                     compatible_data.pop(optional_key, None)
-                supabase.table("inbox_messages").insert(compatible_data).execute()
+                response = supabase.table("inbox_messages").insert(compatible_data).execute()
+                inserted = response.data or []
+                inserted_row = inserted[0] if inserted and isinstance(inserted[0], dict) else inserted_row
 
         # New data landed; keep dashboard reads fresh.
         clear_inbox_caches()
 
     except Exception as e:
         log("Could not save inbox message", str(e))
+    return inserted_row
 
 
 def load_inbox_message_by_external_id(
@@ -2529,6 +2682,64 @@ def load_inbox_message_by_external_id(
     except Exception as exc:
         log("Could not load inbox message by external id", {"business_id": business_id, "platform": platform, "external_message_id": external_message_id, "error": str(exc)})
         return {}
+
+
+def load_inbox_message_by_id(message_id: str) -> dict:
+    message_id = normalize_id(message_id)
+    if not message_id:
+        return {}
+    try:
+        rows = (
+            supabase.table("inbox_messages")
+            .select("*")
+            .eq("id", message_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return rows[0] if rows and isinstance(rows[0], dict) else {}
+    except Exception as exc:
+        log("Could not load inbox message by id", {"message_id": message_id, "error": str(exc)})
+        return {}
+
+
+def update_inbox_message_delivery_state(
+    message_id: str,
+    delivery_status: str,
+    *,
+    provider_result: dict | None = None,
+    error_message: str = "",
+    external_message_id: str = "",
+    customer_id: str = "",
+):
+    row = load_inbox_message_by_id(message_id)
+    if not row:
+        return
+
+    raw_payload = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
+    merged_payload = dict(raw_payload)
+    if isinstance(provider_result, dict):
+        merged_payload.update(provider_result)
+
+    merged_payload["delivery_status"] = normalize_id(delivery_status).lower() or "pending"
+    merged_payload["delivery_updated_at"] = datetime.utcnow().isoformat()
+    if error_message:
+        merged_payload["delivery_error"] = error_message
+    else:
+        merged_payload.pop("delivery_error", None)
+
+    update_data = {"raw_payload": merged_payload}
+    if external_message_id:
+        update_data["external_message_id"] = normalize_id(external_message_id)
+    if customer_id:
+        update_data["customer_id"] = normalize_id(customer_id)
+
+    try:
+        supabase.table("inbox_messages").update(update_data).eq("id", message_id).execute()
+        clear_inbox_caches()
+    except Exception as exc:
+        log("Could not update outbound delivery state", {"message_id": message_id, "status": delivery_status, "error": str(exc)})
 
 
 def has_outbound_reply_after(
@@ -8088,6 +8299,7 @@ async def get_conversation_messages_v2(
 @app.post("/api/v2/send-message")
 async def send_message_v2(
         request: Request,
+        background_tasks: BackgroundTasks,
         authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
@@ -8132,9 +8344,6 @@ async def send_message_v2(
                 status_code=404
             )
 
-        ok = False
-        result = {}
-
         if platform == "instagram":
             access_token = get_business_access_token(business)
             if not access_token:
@@ -8142,85 +8351,69 @@ async def send_message_v2(
                     {"error": "Instagram access token not configured"},
                     status_code=400
                 )
-
-            if "comment" in channel:
-                if reply_to_comment_id:
-                    anchor = get_instagram_comment_anchor_by_comment_id(
-                        business_id=business_id,
-                        comment_id=reply_to_comment_id,
-                        post_id=post_id,
-                    )
-                else:
-                    anchor = get_latest_instagram_comment_anchor(
-                        business_id=business_id,
-                        commenter_id=target_id,
-                        post_id=post_id,
-                    )
-                if not target_id:
-                    target_id = normalize_id(anchor.get("customer_id"))
-                comment_id = reply_to_comment_id or normalize_id(
-                    anchor.get("external_message_id")
-                    or (anchor.get("raw_payload") or {}).get("id")
-                )
-                if reply_to_comment_id and not comment_id:
-                    comment_id = reply_to_comment_id
-                if not comment_id:
-                    return JSONResponse(
-                        {"error": "Comment anchor not found for this thread"},
-                        status_code=400,
-                    )
-
-                send_result = reply_to_comment(access_token, comment_id, text, business)
-                ok = bool(send_result and send_result.ok)
-                result = safe_json(send_result) if send_result is not None else {"error": "Send failed"}
-            else:
-                ok, result = send_instagram_dm(access_token, target_id, text, business)
-
-        elif platform == "telegram":
-            if channel == "telegram_user_private":
-                ok, result = await send_telegram_user_message(customer_id=target_id, text=text)
-            else:
-                res = send_telegram_bot_message(target_id, text)
-                if res:
-                    ok = res.ok
-                    result = safe_json(res)
-                else:
-                    result = {"error": "Send failed"}
-
-        elif platform == "whatsapp":
-            res = send_whatsapp_text(target_id, text, business)
-            if res:
-                ok = res.ok
-                try:
-                    result = res.json()
-                except Exception:
-                    result = {"text": res.text}
-            else:
-                result = {"error": "Send failed"}
-
-        else:
+        elif platform not in {"telegram", "whatsapp"}:
             return JSONResponse(
                 {"error": "Unknown platform"},
                 status_code=400
             )
 
-        if not ok:
-            log("Message send failed", result)
-            return send_failure_response(result)
-
-        save_inbox_message(
+        pending_external_message_id = f"pending-{secrets.token_hex(8)}"
+        queued_payload = {
+            "delivery_status": "pending",
+            "queued_send": True,
+            "queued_at": datetime.utcnow().isoformat(),
+            **({"post_id": post_id} if post_id else {}),
+            **({"reply_to_comment_id": reply_to_comment_id} if reply_to_comment_id else {}),
+        }
+        pending_row = save_inbox_message(
             business=business,
             platform=platform,
             sender_id=business_id,
-            recipient_id=target_id,
+            recipient_id=target_id or customer_scope,
             message_text=text,
             direction="outbound",
-            platform_message_id=normalize_id(result.get("message_id") or result.get("id") or result.get("messages", [{}])[0].get("id", "")),
-            raw_payload={**(result or {}), **({"post_id": post_id} if post_id else {}), **({"reply_to_comment_id": reply_to_comment_id} if reply_to_comment_id else {})},
+            platform_message_id=pending_external_message_id,
+            raw_payload=queued_payload,
             channel=channel,
         )
+        pending_message_id = normalize_id((pending_row or {}).get("id"))
+        if not pending_message_id:
+            pending_row = load_inbox_message_by_external_id(
+                business_id=business_id,
+                platform=platform,
+                customer_id=target_id or customer_scope,
+                external_message_id=pending_external_message_id,
+                direction="outbound",
+            )
+            pending_message_id = normalize_id((pending_row or {}).get("id"))
 
-        return {'status': 'ok', 'data': result}
+        if pending_message_id and background_tasks is not None:
+            background_tasks.add_task(
+                process_outbound_message_dispatch,
+                pending_message_id,
+                conversation_id,
+                text,
+                reply_to_comment_id,
+            )
+        elif pending_message_id:
+            asyncio.create_task(
+                process_outbound_message_dispatch(
+                    pending_message_id,
+                    conversation_id,
+                    text,
+                    reply_to_comment_id,
+                )
+            )
+
+        return {
+            'status': 'ok',
+            'data': {
+                'queued': True,
+                'delivery_status': 'pending',
+                'pending_message_id': pending_message_id or pending_external_message_id,
+                'message_id': pending_external_message_id,
+            },
+        }
 
     except Exception as e:
         log("Error sending message", str(e))
