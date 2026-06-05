@@ -2,7 +2,6 @@ import os
 import re
 import time
 import secrets
-import asyncio
 import base64
 import io
 import json
@@ -27,14 +26,6 @@ from fastapi.responses import PlainTextResponse, JSONResponse, RedirectResponse,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from supabase import create_client
-from starlette.concurrency import run_in_threadpool
-try:
-    import firebase_admin
-    from firebase_admin import credentials as firebase_credentials, messaging as firebase_messaging
-except Exception:
-    firebase_admin = None
-    firebase_credentials = None
-    firebase_messaging = None
 
 try:
     import telegram_bot as telegram_bot_module
@@ -79,60 +70,15 @@ except Exception as exc:
     def get_active_business():
         return None
 
+try:
+    import catalog_matcher as catalog_matcher_module
+except Exception as exc:
+    catalog_matcher_module = None
+    CATALOG_MATCHER_IMPORT_ERROR = exc
+    print(f"catalog_matcher import disabled: {exc}")
+
 def env_list(name: str, default: str = ""):
     return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
-
-
-OPENAI_TRANSCRIBE_URL = "https://api.openai.com/v1/audio/transcriptions"
-OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe").strip() or "gpt-4o-mini-transcribe"
-MAX_AUDIO_TRANSCRIBE_BYTES = 25 * 1024 * 1024
-
-
-def transcribe_audio_bytes(
-    file_bytes: bytes,
-    *,
-    filename: str,
-    mime_type: str,
-    api_key: str,
-    prompt: str = "",
-    language: str = "",
-    timeout: int = 120,
-    logger=None,
-) -> str:
-    if not api_key or not file_bytes:
-        return ""
-    if len(file_bytes) > MAX_AUDIO_TRANSCRIBE_BYTES:
-        if logger:
-            logger("Audio transcription skipped", {"reason": "file_too_large", "bytes": len(file_bytes)})
-        return ""
-
-    data = {"model": OPENAI_TRANSCRIBE_MODEL}
-    if prompt:
-        data["prompt"] = prompt[:400]
-    if language:
-        data["language"] = language[:16]
-
-    try:
-        response = requests.post(
-            OPENAI_TRANSCRIBE_URL,
-            headers={"Authorization": f"Bearer {api_key}"},
-            data=data,
-            files={"file": (filename or "audio.webm", file_bytes, mime_type or "audio/webm")},
-            timeout=timeout,
-        )
-        if not response.ok:
-            if logger:
-                logger("Audio transcription failed", {"status": response.status_code, "body": response.text[:800]})
-            return ""
-        body = response.json() if response.content else {}
-        text = str(body.get("text") or "").strip()
-        if not text and logger:
-            logger("Audio transcription empty", {"status": response.status_code, "body": body})
-        return text
-    except Exception as exc:
-        if logger:
-            logger("Audio transcription error", str(exc))
-        return ""
 
 
 app = FastAPI()
@@ -253,13 +199,6 @@ SUPER_ADMIN_EMAILS = {
     for item in os.getenv("SUPER_ADMIN_EMAILS", "").split(",")
     if str(item).strip()
 }
-FIREBASE_SERVICE_ACCOUNT_JSON = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON", "")
-FIREBASE_SERVICE_ACCOUNT_PATH = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", "")
-FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "")
-FIREBASE_PUSH_ENABLED = str(os.getenv("FIREBASE_PUSH_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
-MOBILE_DEVICE_TOKEN_STALE_DAYS = max(1, min(90, int(os.getenv("MOBILE_DEVICE_TOKEN_STALE_DAYS", "30"))))
-FIREBASE_APP_CACHE = None
-FIREBASE_APP_CACHE_ERROR = ""
 
 # Fallback store used only when `dashboard_workspace_state` table is missing.
 # This keeps operator tasks usable until SQL migration is applied.
@@ -420,20 +359,6 @@ class DashboardVoiceFile(BaseModel):
     mime_type: str = "audio/ogg"
 
 
-class DashboardMediaFile(BaseModel):
-    business_id: str = ""
-    conversation_id: str = ""
-    platform: str
-    channel: str = ""
-    customer_id: str
-    chat_id: str = ""
-    caption: str = ""
-    file_data: str
-    filename: str = "attachment.bin"
-    mime_type: str = "application/octet-stream"
-    media_kind: str = ""
-
-
 class BusinessSettingsUpdate(BaseModel):
     business_id: str
     settings: dict
@@ -511,29 +436,6 @@ class OperatorTaskCreateRequest(BaseModel):
     text: str
     recipients: list[str] = []
     assign_mode: str = "all"
-
-
-class OperatorDealAdjustRequest(BaseModel):
-    business_id: str
-    operator_login_id: str
-    delta: int = 0
-    total_after: Optional[int] = None
-    reason: str = ""
-    conversation_id: str = ""
-    lead_id: str = ""
-
-
-class MobileDeviceTokenRegisterRequest(BaseModel):
-    business_ids: list[str] = []
-    device_token: str
-    platform: str = "android"
-    device_label: str = ""
-    app_version: str = ""
-
-
-class MobileDeviceTokenUnregisterRequest(BaseModel):
-    business_ids: list[str] = []
-    device_token: str
 
 
 # ============================================================================
@@ -653,95 +555,9 @@ def extract_customer_name_candidate(text: str) -> str:
             if _looks_like_customer_name(candidate):
                 return candidate
 
-    # Support common lead messages like "Masuma 990851815" or multi-line
-    # "Masuma\\n990851815" where the name is present but mixed with phone digits.
-    compact_source = re.sub(r"\s+", " ", source).strip()
-    leading_name_match = re.match(
-        r"^\s*([A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼ'`-]{2,}(?:\s+[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼ'`-]{2,}){0,3})\s+(?:\+?\d[\d\s().-]{6,}\d)\s*$",
-        compact_source,
-    )
-    if leading_name_match:
-        candidate = normalize_id(leading_name_match.group(1)).strip(" ,.!?:;")
-        if _looks_like_customer_name(candidate):
-            return candidate
-
-    for chunk in re.split(r"[\n,;|/]+", source):
-        candidate = normalize_id(chunk).strip(" ,.!?:;")
-        if _looks_like_customer_name(candidate):
-            return candidate
-
     if _looks_like_customer_name(source):
         return source
     return ""
-
-
-def extract_lead_state_from_payload(
-    raw_payload: dict = None,
-    current_state: dict = None,
-    customer_name_hint: str = "",
-    message_id: str = "",
-) -> dict:
-    state = normalize_lead_state(current_state)
-    payload = raw_payload if isinstance(raw_payload, dict) else {}
-    if not payload:
-        return state
-
-    phone_values = []
-    name_values = []
-
-    def collect(value, key_hint: str = ""):
-        hint = normalize_id(key_hint).lower()
-        if isinstance(value, dict):
-            for nested_key, nested_value in value.items():
-                collect(nested_value, nested_key)
-            return
-        if isinstance(value, list):
-            for item in value:
-                collect(item, key_hint)
-            return
-        if not isinstance(value, str):
-            return
-
-        text_value = normalize_id(value).strip()
-        if not text_value:
-            return
-
-        if any(token in hint for token in ("phone", "tel", "number", "mobile", "contact_number")):
-            phone_values.append(text_value)
-        elif any(token in hint for token in ("full_name", "display_name", "first_name", "last_name", "contact_name", "name")) and "username" not in hint:
-            name_values.append(text_value)
-        elif any(marker in text_value.lower() for marker in ("phone", "telefon", "raqam", "номер")):
-            phone_values.append(text_value)
-            name_values.append(text_value)
-
-    collect(payload)
-
-    for candidate in phone_values:
-        matches = extract_phone_candidates(candidate)
-        if matches:
-            state["phone"] = matches[0]
-            state["phone_collected"] = True
-            break
-
-    for candidate in name_values:
-        extracted = extract_customer_name_candidate(candidate)
-        if extracted:
-            state["customer_name"] = extracted
-            state["name_collected"] = True
-            break
-
-    if (not state.get("name_collected")) and customer_name_hint:
-        hinted_name = normalize_id(customer_name_hint)
-        if hinted_name and not _looks_like_generated_instagram_name(hinted_name) and _looks_like_customer_name(hinted_name):
-            state["customer_name"] = hinted_name
-            state["name_collected"] = True
-
-    if message_id:
-        state["last_message_id"] = normalize_id(message_id)
-    if phone_values or name_values:
-        state["last_lead_update"] = datetime.utcnow().isoformat()
-
-    return normalize_lead_state(state)
 
 
 def normalize_lead_state(state: dict = None) -> dict:
@@ -902,7 +718,6 @@ def derive_customer_lead_state(
     channel: str = "",
     recent_rows: list = None,
     current_text: str = "",
-    current_raw_payload: dict = None,
     customer_name_hint: str = "",
     message_id: str = "",
 ) -> dict:
@@ -929,12 +744,6 @@ def derive_customer_lead_state(
             if row_name and not _looks_like_generated_instagram_name(row_name) and _looks_like_customer_name(row_name):
                 row_state["customer_name"] = row_name
                 row_state["name_collected"] = True
-        row_state = extract_lead_state_from_payload(
-            row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {},
-            row_state,
-            row_name,
-            row.get("external_message_id"),
-        )
         state = normalize_lead_state({
             **state,
             **row_state,
@@ -942,7 +751,6 @@ def derive_customer_lead_state(
 
     if current_text or customer_name_hint:
         state = extract_lead_state_from_text(current_text, state, customer_name_hint, message_id)
-    state = extract_lead_state_from_payload(current_raw_payload, state, customer_name_hint, message_id)
 
     if state.get("customer_name") and _looks_like_generated_instagram_name(state.get("customer_name")):
         state["name_collected"] = False
@@ -1347,9 +1155,9 @@ def verify_dashboard_password(password: str, password_hash: str) -> bool:
 
 
 AUTH_TOKEN_TTL_SECONDS = int(os.getenv("DASHBOARD_AUTH_TTL_SECONDS", str(60 * 60 * 24 * 30)))
-CONVERSATIONS_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATIONS_CACHE_TTL_SECONDS", "2"))
+CONVERSATIONS_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATIONS_CACHE_TTL_SECONDS", "10"))
 _conversations_cache: dict[str, tuple[float, dict]] = {}
-CONVERSATION_MESSAGES_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATION_MESSAGES_CACHE_TTL_SECONDS", "2"))
+CONVERSATION_MESSAGES_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATION_MESSAGES_CACHE_TTL_SECONDS", "12"))
 _conversation_messages_cache: dict[str, tuple[float, dict]] = {}
 CONVERSATIONS_FAST_LOOKBACK_DAYS = max(7, min(365, int(os.getenv("CONVERSATIONS_FAST_LOOKBACK_DAYS", "120"))))
 CONVERSATIONS_FAST_FETCH_LIMIT = max(80, min(5000, int(os.getenv("CONVERSATIONS_FAST_FETCH_LIMIT", "800"))))
@@ -1651,143 +1459,6 @@ def send_failure_response(result: dict, default_message: str = "Failed to send m
     )
 
 
-async def dispatch_outbound_message(
-    conversation_id: str,
-    text: str,
-    reply_to_comment_id: str = "",
-):
-    parts = str(conversation_id or "").split("::")
-    if len(parts) != 4:
-        return False, {"error": "Invalid conversation ID format"}, "", "", ""
-
-    platform, business_id, channel, customer_scope = parts
-    platform = normalize_id(platform).lower()
-    channel = standard_channel(platform, channel)
-    target_id = customer_scope
-    post_id = ""
-    if platform == "instagram" and "comment" in channel:
-        target_id, post_id = decode_comment_scope(customer_scope)
-
-    business = get_business_by_id(business_id)
-    if not business:
-        return False, {"error": "Business not found"}, target_id, post_id, business_id
-
-    ok = False
-    result = {}
-
-    if platform == "instagram":
-        access_token = get_business_access_token(business)
-        if not access_token:
-            return False, {"error": "Instagram access token not configured"}, target_id, post_id, business_id
-
-        if "comment" in channel:
-            if reply_to_comment_id:
-                anchor = get_instagram_comment_anchor_by_comment_id(
-                    business_id=business_id,
-                    comment_id=reply_to_comment_id,
-                    post_id=post_id,
-                )
-            else:
-                anchor = get_latest_instagram_comment_anchor(
-                    business_id=business_id,
-                    commenter_id=target_id,
-                    post_id=post_id,
-                )
-            if not target_id:
-                target_id = normalize_id(anchor.get("customer_id"))
-            comment_id = reply_to_comment_id or normalize_id(
-                anchor.get("external_message_id")
-                or (anchor.get("raw_payload") or {}).get("id")
-            )
-            if reply_to_comment_id and not comment_id:
-                comment_id = reply_to_comment_id
-            if not comment_id:
-                return False, {"error": "Comment anchor not found for this thread"}, target_id, post_id, business_id
-
-            send_result = await run_in_threadpool(reply_to_comment, access_token, comment_id, text, business)
-            ok = bool(send_result and send_result.ok)
-            result = safe_json(send_result) if send_result is not None else {"error": "Send failed"}
-        else:
-            ok, result = await run_in_threadpool(send_instagram_dm, access_token, target_id, text, business)
-
-    elif platform == "telegram":
-        if channel == "telegram_user_private":
-            ok, result = await send_telegram_user_message(customer_id=target_id, text=text)
-        else:
-            res = await run_in_threadpool(send_telegram_bot_message, target_id, text)
-            if res:
-                ok = res.ok
-                result = safe_json(res)
-            else:
-                result = {"error": "Send failed"}
-
-    elif platform == "whatsapp":
-        res = await run_in_threadpool(send_whatsapp_text, target_id, text, business)
-        if res:
-            ok = res.ok
-            try:
-                result = res.json()
-            except Exception:
-                result = {"text": res.text}
-        else:
-            result = {"error": "Send failed"}
-
-    else:
-        return False, {"error": "Unknown platform"}, target_id, post_id, business_id
-
-    return ok, result, target_id, post_id, business_id
-
-
-async def process_outbound_message_dispatch(
-    pending_message_id: str,
-    conversation_id: str,
-    text: str,
-    reply_to_comment_id: str = "",
-):
-    try:
-        ok, result, target_id, post_id, _business_id = await dispatch_outbound_message(
-            conversation_id=conversation_id,
-            text=text,
-            reply_to_comment_id=reply_to_comment_id,
-        )
-
-        if not ok:
-            update_inbox_message_delivery_state(
-                pending_message_id,
-                "failed",
-                provider_result=result if isinstance(result, dict) else {"error": normalize_id(result)},
-                error_message=normalize_id((result or {}).get("error") or (result or {}).get("message") or "Send failed"),
-                customer_id=target_id,
-            )
-            return
-
-        external_message_id = normalize_id(
-            result.get("message_id")
-            or result.get("id")
-            or result.get("messages", [{}])[0].get("id", "")
-        )
-        provider_payload = {
-            **(result or {}),
-            **({"post_id": post_id} if post_id else {}),
-            **({"reply_to_comment_id": reply_to_comment_id} if reply_to_comment_id else {}),
-        }
-        update_inbox_message_delivery_state(
-            pending_message_id,
-            "sent",
-            provider_result=provider_payload,
-            external_message_id=external_message_id,
-            customer_id=target_id,
-        )
-    except Exception as exc:
-        log("Queued outbound send failed", {"message_id": pending_message_id, "conversation_id": conversation_id, "error": str(exc)})
-        update_inbox_message_delivery_state(
-            pending_message_id,
-            "failed",
-            provider_result={"error": str(exc)},
-            error_message=str(exc),
-        )
-
-
 def unsupported_message_mutation_response(platform: str, action: str):
     platform_label = (platform or "this platform").title()
     return JSONResponse(
@@ -1922,7 +1593,7 @@ def decode_upload_data(file_data: str, max_bytes: int = 10 * 1024 * 1024):
         raise ValueError("Empty file upload")
 
     if len(decoded) > max_bytes:
-        raise ValueError(f"File is too large. Maximum upload size is {max(1, round(max_bytes / (1024 * 1024)))} MB.")
+        raise ValueError("File is too large. Maximum upload size is 10 MB.")
 
     return decoded
 
@@ -2170,12 +1841,6 @@ def transform_message_to_react(row: dict) -> dict:
         message['text'] = content
 
     raw_payload = row.get("raw_payload") or {}
-    delivery_status = normalize_id(raw_payload.get("delivery_status")).lower()
-    if delivery_status == "pending":
-        message["isPending"] = True
-    elif delivery_status == "failed":
-        message["isFailed"] = True
-        message["sendError"] = normalize_id(raw_payload.get("delivery_error") or raw_payload.get("error") or "")
     # Keep identifiers on every row (including plain text) so manual per-comment reply can target correctly.
     message['external_message_id'] = external_message_id
     message['comment_id'] = normalize_id(raw_payload.get("comment_id") or raw_payload.get("id") or external_message_id)
@@ -2310,8 +1975,6 @@ def display_name_from_instagram_profile(profile: dict, fallback: str = "") -> st
         return fallback
     username = normalize_id(profile.get("username"))
     name = normalize_id(profile.get("name"))
-    if name and not _looks_like_numeric_id(name) and not _looks_like_generated_instagram_name(name):
-        return name
     if username:
         return username
     if name and not _looks_like_numeric_id(name):
@@ -2785,7 +2448,6 @@ def save_inbox_message(
         post_image_url: Optional[str] = None,
         post_media_type: Optional[str] = None,
 ):
-    inserted_row = {}
     try:
         customer_id = sender_id if direction == "inbound" else recipient_id
         payload = dict(raw_payload or {})
@@ -2821,37 +2483,24 @@ def save_inbox_message(
         }
 
         try:
-            response = supabase.table("inbox_messages").insert(data).execute()
-            inserted = response.data or []
-            inserted_row = inserted[0] if inserted and isinstance(inserted[0], dict) else inserted_row
+            supabase.table("inbox_messages").insert(data).execute()
         except Exception:
             compatible_data = dict(data)
             for optional_key in ["post_permalink", "post_image_url", "post_media_type"]:
                 compatible_data.pop(optional_key, None)
             try:
-                response = supabase.table("inbox_messages").insert(compatible_data).execute()
-                inserted = response.data or []
-                inserted_row = inserted[0] if inserted and isinstance(inserted[0], dict) else inserted_row
+                supabase.table("inbox_messages").insert(compatible_data).execute()
             except Exception:
                 for optional_key in ["customer_name", "is_read", "media_type", "media_url", "file_name", "mime_type",
                                      "whatsapp_media_id"]:
                     compatible_data.pop(optional_key, None)
-                response = supabase.table("inbox_messages").insert(compatible_data).execute()
-                inserted = response.data or []
-                inserted_row = inserted[0] if inserted and isinstance(inserted[0], dict) else inserted_row
+                supabase.table("inbox_messages").insert(compatible_data).execute()
 
         # New data landed; keep dashboard reads fresh.
         clear_inbox_caches()
-        if direction == "inbound" and business and normalize_id(business.get("id")):
-            schedule_operator_unread_push(
-                normalize_id(business.get("id")),
-                platform=platform,
-                customer_name=customer_name,
-            )
 
     except Exception as e:
         log("Could not save inbox message", str(e))
-    return inserted_row
 
 
 def load_inbox_message_by_external_id(
@@ -2887,64 +2536,6 @@ def load_inbox_message_by_external_id(
     except Exception as exc:
         log("Could not load inbox message by external id", {"business_id": business_id, "platform": platform, "external_message_id": external_message_id, "error": str(exc)})
         return {}
-
-
-def load_inbox_message_by_id(message_id: str) -> dict:
-    message_id = normalize_id(message_id)
-    if not message_id:
-        return {}
-    try:
-        rows = (
-            supabase.table("inbox_messages")
-            .select("*")
-            .eq("id", message_id)
-            .limit(1)
-            .execute()
-            .data
-            or []
-        )
-        return rows[0] if rows and isinstance(rows[0], dict) else {}
-    except Exception as exc:
-        log("Could not load inbox message by id", {"message_id": message_id, "error": str(exc)})
-        return {}
-
-
-def update_inbox_message_delivery_state(
-    message_id: str,
-    delivery_status: str,
-    *,
-    provider_result: dict | None = None,
-    error_message: str = "",
-    external_message_id: str = "",
-    customer_id: str = "",
-):
-    row = load_inbox_message_by_id(message_id)
-    if not row:
-        return
-
-    raw_payload = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
-    merged_payload = dict(raw_payload)
-    if isinstance(provider_result, dict):
-        merged_payload.update(provider_result)
-
-    merged_payload["delivery_status"] = normalize_id(delivery_status).lower() or "pending"
-    merged_payload["delivery_updated_at"] = datetime.utcnow().isoformat()
-    if error_message:
-        merged_payload["delivery_error"] = error_message
-    else:
-        merged_payload.pop("delivery_error", None)
-
-    update_data = {"raw_payload": merged_payload}
-    if external_message_id:
-        update_data["external_message_id"] = normalize_id(external_message_id)
-    if customer_id:
-        update_data["customer_id"] = normalize_id(customer_id)
-
-    try:
-        supabase.table("inbox_messages").update(update_data).eq("id", message_id).execute()
-        clear_inbox_caches()
-    except Exception as exc:
-        log("Could not update outbound delivery state", {"message_id": message_id, "status": delivery_status, "error": str(exc)})
 
 
 def has_outbound_reply_after(
@@ -3047,515 +2638,6 @@ def upsert_workspace_state(business_id: str, state_key: str, state_value, update
         if business_id not in WORKSPACE_STATE_FALLBACK:
             WORKSPACE_STATE_FALLBACK[business_id] = {}
         WORKSPACE_STATE_FALLBACK[business_id][state_key] = data.get("state_value")
-
-
-def has_business_admin_access(access: dict, business_id: str) -> bool:
-    business_id = normalize_id(business_id)
-    if not can_access_business(access, business_id):
-        return False
-    if access.get("is_admin"):
-        return True
-    role = get_user_business_role(access.get("email", ""), business_id) or normalize_id(access.get("role", ""))
-    return normalize_id(role).lower() in BUSINESS_ADMIN_ROLES
-
-
-def normalize_operator_login(value: str) -> str:
-    clean = normalize_id(value).strip()
-    if "@" in clean:
-        return normalize_email(clean)
-    return clean.lower()
-
-
-def load_operator_deal_counts(business_id: str) -> dict[str, int]:
-    state = get_workspace_state(business_id)
-    raw = state.get("operator_deals") if isinstance(state, dict) else {}
-    if not isinstance(raw, dict):
-        return {}
-
-    counts = {}
-    for key, value in raw.items():
-        login_id = normalize_operator_login(key)
-        if not login_id:
-            continue
-        try:
-            count = int(value)
-        except Exception:
-            count = 0
-        counts[login_id] = max(0, count)
-    return counts
-
-
-def save_operator_deal_counts(business_id: str, counts: dict[str, int], updated_by: str = "") -> dict[str, int]:
-    payload = {}
-    for key, value in (counts or {}).items():
-        login_id = normalize_operator_login(key)
-        if not login_id:
-            continue
-        try:
-            payload[login_id] = max(0, int(value))
-        except Exception:
-            payload[login_id] = 0
-    upsert_workspace_state(business_id, "operator_deals", payload, updated_by=updated_by)
-    return payload
-
-
-def parse_report_date_range(date_from: str = "", date_to: str = "") -> tuple[str, str, str, str]:
-    raw_from = normalize_id(date_from)
-    raw_to = normalize_id(date_to)
-    from_dt = None
-    to_dt = None
-
-    try:
-        if raw_from:
-            from_dt = datetime.strptime(raw_from, "%Y-%m-%d")
-        if raw_to:
-            to_dt = datetime.strptime(raw_to, "%Y-%m-%d")
-    except ValueError as exc:
-        raise ValueError("Dates must use YYYY-MM-DD format.") from exc
-
-    if from_dt and to_dt and from_dt > to_dt:
-        raise ValueError("date_from must be earlier than or equal to date_to.")
-
-    from_iso = from_dt.isoformat() if from_dt else ""
-    to_iso_exclusive = (to_dt + timedelta(days=1)).isoformat() if to_dt else ""
-    return raw_from, raw_to, from_iso, to_iso_exclusive
-
-
-def append_operator_deal_event_fallback(business_id: str, event: dict, updated_by: str = ""):
-    state = get_workspace_state(business_id)
-    legacy = state.get("operator_deal_events") if isinstance(state, dict) else {}
-    items = []
-    if isinstance(legacy, dict):
-        raw_items = legacy.get("items")
-        if isinstance(raw_items, list):
-            items = [item for item in raw_items if isinstance(item, dict)]
-    elif isinstance(legacy, list):
-        items = [item for item in legacy if isinstance(item, dict)]
-
-    items.append(event)
-    upsert_workspace_state(
-        business_id,
-        "operator_deal_events",
-        {"items": items[-5000:]},
-        updated_by=updated_by,
-    )
-
-
-def append_operator_deal_event(
-    business_id: str,
-    operator_login_id: str,
-    delta: int,
-    total_after: int,
-    created_by: str = "",
-    source: str = "manual_adjustment",
-    metadata: dict | None = None,
-    occurred_at: str = "",
-) -> dict:
-    business_id = normalize_id(business_id)
-    operator_login_id = normalize_operator_login(operator_login_id)
-    safe_created_by = normalize_email(created_by)
-    event = {
-        "business_id": business_id,
-        "operator_login_id": operator_login_id,
-        "delta": int(delta or 0),
-        "total_after": max(0, int(total_after or 0)),
-        "source": normalize_id(source) or "manual_adjustment",
-        "created_by": safe_created_by,
-        "metadata": metadata if isinstance(metadata, dict) else {},
-        "created_at": normalize_id(occurred_at) or datetime.utcnow().isoformat(),
-    }
-    if not business_id or not operator_login_id or not event["delta"]:
-        return event
-
-    try:
-        response = supabase.table("operator_deal_events").insert(event).execute()
-        rows = response.data or []
-        if rows and isinstance(rows[0], dict):
-            event = rows[0]
-    except Exception as exc:
-        log("Could not persist operator deal event to table, using workspace fallback", {"business_id": business_id, "error": str(exc)})
-        append_operator_deal_event_fallback(business_id, event, updated_by=safe_created_by)
-    return event
-
-
-def load_operator_deal_events_fallback(
-    business_id: str,
-    from_iso: str = "",
-    to_iso_exclusive: str = "",
-) -> list[dict]:
-    state = get_workspace_state(business_id)
-    legacy = state.get("operator_deal_events") if isinstance(state, dict) else {}
-    items = []
-    if isinstance(legacy, dict):
-        raw_items = legacy.get("items")
-        if isinstance(raw_items, list):
-            items = [item for item in raw_items if isinstance(item, dict)]
-    elif isinstance(legacy, list):
-        items = [item for item in legacy if isinstance(item, dict)]
-
-    filtered = []
-    for item in items:
-        created_at = normalize_id(item.get("created_at"))
-        if from_iso and created_at and created_at < from_iso:
-            continue
-        if to_iso_exclusive and created_at and created_at >= to_iso_exclusive:
-            continue
-        filtered.append(item)
-    filtered.sort(key=lambda item: normalize_id(item.get("created_at")), reverse=True)
-    return filtered
-
-
-def load_operator_deal_events(
-    business_id: str,
-    date_from: str = "",
-    date_to: str = "",
-) -> tuple[list[dict], str]:
-    business_id = normalize_id(business_id)
-    _, _, from_iso, to_iso_exclusive = parse_report_date_range(date_from, date_to)
-    if not business_id:
-        return [], "none"
-
-    try:
-        query = (
-            supabase.table("operator_deal_events")
-            .select("id,business_id,operator_login_id,delta,total_after,source,created_by,metadata,created_at")
-            .eq("business_id", business_id)
-            .order("created_at", desc=True)
-            .limit(5000)
-        )
-        if from_iso:
-            query = query.gte("created_at", from_iso)
-        if to_iso_exclusive:
-            query = query.lt("created_at", to_iso_exclusive)
-        rows = query.execute().data or []
-        return [row for row in rows if isinstance(row, dict)], "table"
-    except Exception as exc:
-        log("Could not load operator deal events from table, using workspace fallback", {"business_id": business_id, "error": str(exc)})
-        return load_operator_deal_events_fallback(business_id, from_iso, to_iso_exclusive), "workspace_state_fallback"
-
-
-def get_operator_deal_history_started_at(business_id: str) -> str:
-    business_id = normalize_id(business_id)
-    if not business_id:
-        return ""
-    try:
-        rows = (
-            supabase.table("operator_deal_events")
-            .select("created_at")
-            .eq("business_id", business_id)
-            .order("created_at", desc=False)
-            .limit(1)
-            .execute()
-            .data
-            or []
-        )
-        if rows and isinstance(rows[0], dict):
-            return normalize_id(rows[0].get("created_at"))
-    except Exception:
-        pass
-
-    fallback_rows = load_operator_deal_events_fallback(business_id)
-    if not fallback_rows:
-        return ""
-    created_values = [normalize_id(item.get("created_at")) for item in fallback_rows if normalize_id(item.get("created_at"))]
-    return min(created_values) if created_values else ""
-
-
-def build_operator_deal_report(business_id: str, date_from: str = "", date_to: str = "") -> dict:
-    business_id = normalize_id(business_id)
-    normalized_from, normalized_to, _, _ = parse_report_date_range(date_from, date_to)
-    counts = load_operator_deal_counts(business_id)
-    events, source = load_operator_deal_events(business_id, normalized_from, normalized_to)
-    aggregates = {}
-
-    for event in events:
-        login_id = normalize_operator_login(event.get("operator_login_id"))
-        if not login_id:
-            continue
-        try:
-            delta = int(event.get("delta") or 0)
-        except Exception:
-            delta = 0
-        item = aggregates.setdefault(
-            login_id,
-            {
-                "period_delta": 0,
-                "positive_events": 0,
-                "negative_events": 0,
-                "event_count": 0,
-                "last_event_at": "",
-            },
-        )
-        item["period_delta"] += delta
-        item["event_count"] += 1
-        if delta > 0:
-            item["positive_events"] += delta
-        elif delta < 0:
-            item["negative_events"] += abs(delta)
-        created_at = normalize_id(event.get("created_at"))
-        if created_at and created_at > normalize_id(item.get("last_event_at")):
-            item["last_event_at"] = created_at
-
-    rows = []
-    for login_id in sorted(set(counts.keys()) | set(aggregates.keys())):
-        aggregate = aggregates.get(login_id, {})
-        rows.append(
-            {
-                "operator_login_id": login_id,
-                "current_total": max(0, int(counts.get(login_id, 0) or 0)),
-                "period_delta": int(aggregate.get("period_delta") or 0),
-                "positive_events": int(aggregate.get("positive_events") or 0),
-                "negative_events": int(aggregate.get("negative_events") or 0),
-                "event_count": int(aggregate.get("event_count") or 0),
-                "last_event_at": normalize_id(aggregate.get("last_event_at")),
-            }
-        )
-
-    rows.sort(
-        key=lambda item: (
-            int(item.get("period_delta") or 0),
-            int(item.get("current_total") or 0),
-            normalize_operator_login(item.get("operator_login_id")),
-        ),
-        reverse=True,
-    )
-
-    return {
-        "rows": rows,
-        "summary": {
-            "date_from": normalized_from,
-            "date_to": normalized_to,
-            "period_total": sum(int(item.get("period_delta") or 0) for item in rows),
-            "current_total": sum(int(item.get("current_total") or 0) for item in rows),
-            "positive_events": sum(int(item.get("positive_events") or 0) for item in rows),
-            "negative_events": sum(int(item.get("negative_events") or 0) for item in rows),
-            "history_started_at": get_operator_deal_history_started_at(business_id),
-            "history_source": source,
-        },
-    }
-
-
-def get_firebase_admin_app():
-    global FIREBASE_APP_CACHE, FIREBASE_APP_CACHE_ERROR
-    if FIREBASE_APP_CACHE is not None:
-        return FIREBASE_APP_CACHE
-    if FIREBASE_APP_CACHE_ERROR or not FIREBASE_PUSH_ENABLED:
-        return None
-    if firebase_admin is None or firebase_credentials is None or firebase_messaging is None:
-        FIREBASE_APP_CACHE_ERROR = "firebase-admin is not installed"
-        return None
-
-    try:
-        if FIREBASE_SERVICE_ACCOUNT_JSON:
-            certificate = firebase_credentials.Certificate(json.loads(FIREBASE_SERVICE_ACCOUNT_JSON))
-        elif FIREBASE_SERVICE_ACCOUNT_PATH:
-            certificate = firebase_credentials.Certificate(FIREBASE_SERVICE_ACCOUNT_PATH)
-        else:
-            FIREBASE_APP_CACHE_ERROR = "Firebase service account is not configured"
-            return None
-
-        options = {"projectId": FIREBASE_PROJECT_ID} if FIREBASE_PROJECT_ID else None
-        try:
-            FIREBASE_APP_CACHE = firebase_admin.get_app()
-        except Exception:
-            FIREBASE_APP_CACHE = firebase_admin.initialize_app(certificate, options)
-        return FIREBASE_APP_CACHE
-    except Exception as exc:
-        FIREBASE_APP_CACHE_ERROR = str(exc)
-        log("Could not initialize Firebase Admin SDK", FIREBASE_APP_CACHE_ERROR)
-        return None
-
-
-def sync_mobile_device_token(
-    access: dict,
-    business_ids: list[str],
-    device_token: str,
-    platform: str = "android",
-    device_label: str = "",
-    app_version: str = "",
-) -> list[str]:
-    clean_token = normalize_id(device_token)
-    if not access or not clean_token:
-        return []
-
-    unique_business_ids = []
-    seen = set()
-    requested_ids = [normalize_id(item) for item in (business_ids or []) if normalize_id(item)]
-    source_ids = requested_ids or list(access.get("business_ids") or [])
-    for business_id in source_ids:
-        if business_id in seen or not can_access_business(access, business_id):
-            continue
-        seen.add(business_id)
-        unique_business_ids.append(business_id)
-
-    registered = []
-    for business_id in unique_business_ids:
-        role = get_user_business_role(access.get("email", ""), business_id) or normalize_id(access.get("role", "")) or "operator"
-        payload = {
-            "business_id": business_id,
-            "user_email": normalize_email(access.get("email", "")),
-            "user_role": normalize_id(role).lower() or "operator",
-            "platform": normalize_id(platform).lower() or "android",
-            "device_token": clean_token,
-            "device_label": normalize_id(device_label),
-            "app_version": normalize_id(app_version),
-            "is_active": True,
-            "last_seen_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
-            "metadata": {
-                "device_label": normalize_id(device_label),
-                "app_version": normalize_id(app_version),
-            },
-        }
-        try:
-            supabase.table("mobile_device_tokens").upsert(
-                payload,
-                on_conflict="business_id,user_email,device_token",
-            ).execute()
-            registered.append(business_id)
-        except Exception as exc:
-            log("Could not register mobile device token", {"business_id": business_id, "error": str(exc)})
-    return registered
-
-
-def deactivate_mobile_device_token(access: dict, business_ids: list[str], device_token: str) -> list[str]:
-    clean_token = normalize_id(device_token)
-    if not access or not clean_token:
-        return []
-
-    requested_ids = [normalize_id(item) for item in (business_ids or []) if normalize_id(item)]
-    source_ids = requested_ids or list(access.get("business_ids") or [])
-    updated = []
-    for business_id in source_ids:
-        if not can_access_business(access, business_id):
-            continue
-        try:
-            supabase.table("mobile_device_tokens").update(
-                {
-                    "is_active": False,
-                    "updated_at": datetime.utcnow().isoformat(),
-                }
-            ).eq("business_id", business_id).eq("user_email", normalize_email(access.get("email", ""))).eq("device_token", clean_token).execute()
-            updated.append(business_id)
-        except Exception as exc:
-            log("Could not unregister mobile device token", {"business_id": business_id, "error": str(exc)})
-    return updated
-
-
-def list_active_operator_device_tokens(business_id: str) -> list[dict]:
-    business_id = normalize_id(business_id)
-    if not business_id:
-        return []
-    try:
-        rows = (
-            supabase.table("mobile_device_tokens")
-            .select("id,business_id,user_email,user_role,device_token,last_seen_at,is_active")
-            .eq("business_id", business_id)
-            .eq("platform", "android")
-            .eq("user_role", "operator")
-            .eq("is_active", True)
-            .limit(500)
-            .execute()
-            .data
-            or []
-        )
-    except Exception as exc:
-        log("Could not load mobile device tokens", {"business_id": business_id, "error": str(exc)})
-        return []
-
-    stale_before = datetime.utcnow() - timedelta(days=MOBILE_DEVICE_TOKEN_STALE_DAYS)
-    active_rows = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        token = normalize_id(row.get("device_token"))
-        if not token:
-            continue
-        last_seen_at = normalize_id(row.get("last_seen_at"))
-        try:
-            if last_seen_at and datetime.fromisoformat(last_seen_at.replace("Z", "+00:00")).replace(tzinfo=None) < stale_before:
-                continue
-        except Exception:
-            pass
-        active_rows.append(row)
-    return active_rows
-
-
-async def send_operator_unread_push(business_id: str, platform: str = "", customer_name: str = ""):
-    business_id = normalize_id(business_id)
-    if not business_id:
-        return
-
-    firebase_app = get_firebase_admin_app()
-    if firebase_app is None:
-        return
-
-    token_rows = list_active_operator_device_tokens(business_id)
-    if not token_rows:
-        return
-
-    clean_platform = normalize_id(platform).lower()
-    clean_customer_name = normalize_id(customer_name)
-    title = "Unread customer messages"
-    body = clean_customer_name or (f"New unread {clean_platform} message received." if clean_platform else "New unread customer message received.")
-    messages = []
-    row_by_token = {}
-    for row in token_rows:
-        token = normalize_id(row.get("device_token"))
-        if not token:
-            continue
-        row_by_token[token] = row
-        messages.append(
-            firebase_messaging.Message(
-                token=token,
-                data={
-                    "type": "unread_sync",
-                    "business_id": business_id,
-                    "platform": clean_platform,
-                    "title": title,
-                    "body": body,
-                },
-                android=firebase_messaging.AndroidConfig(priority="high"),
-            )
-        )
-
-    if not messages:
-        return
-
-    try:
-        batch_response = await run_in_threadpool(lambda: firebase_messaging.send_each(messages, app=firebase_app))
-    except Exception as exc:
-        log("Could not send Firebase unread push", {"business_id": business_id, "error": str(exc)})
-        return
-
-    for index, response in enumerate(getattr(batch_response, "responses", []) or []):
-        if getattr(response, "success", False):
-            continue
-        error = getattr(response, "exception", None)
-        message = str(error or "")
-        token = normalize_id(messages[index].token)
-        if token and ("registration-token-not-registered" in message.lower() or "unregistered" in message.lower()):
-            row = row_by_token.get(token) or {}
-            try:
-                supabase.table("mobile_device_tokens").update(
-                    {
-                        "is_active": False,
-                        "updated_at": datetime.utcnow().isoformat(),
-                    }
-                ).eq("business_id", business_id).eq("device_token", token).execute()
-            except Exception:
-                pass
-
-
-def schedule_operator_unread_push(business_id: str, platform: str = "", customer_name: str = ""):
-    business_id = normalize_id(business_id)
-    if not business_id:
-        return
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return
-    loop.create_task(send_operator_unread_push(business_id, platform=platform, customer_name=customer_name))
 
 
 def instagram_processed_message_state_key(message_id: str) -> str:
@@ -3818,7 +2900,6 @@ Hard rules:
 Instagram rules:
 - Keep DMs concise and natural.
 - If customer asks catalog/price/model/photo, respond naturally and guide to DM flow.
-- Do not say you checked, recognized, analyzed, or understood any photo/video/media attachment.
 - Do not paste raw catalog links in Instagram replies.
 - For public comments containing "katalog", "narx", "qancha", "price": reply with:
   "Direktdan yozdik, iloji bo'lsa raqamingizni qoldiring."
@@ -3931,8 +3012,7 @@ Sales-agent rules:
 - Use wholesale/retail/minimum-order rules only when configured.
 - Use configured address and delivery process only.
 - Payment: ask the customer to leave name and phone number so the team can contact them.
-- Never claim to analyze, inspect, understand, compare, or verify a customer's photo/video/media attachment.
-- If product identification is unclear, ask for the exact model name/code instead of discussing the attachment.
+- When customer asks for photo/video/catalog, answer warmly with one light smile/emoji-style touch; do not over-explain.
 - Reply separately to each commenter; do not combine multiple customers into one response.
 - Sticker-only/simple reactions: answer with a simple friendly emoji/sticker-style short reply, not a sales paragraph.
 - If "qimmat": acknowledge and position value based on configured quality facts.
@@ -4396,15 +3476,15 @@ def contains_forbidden_product_photo_question(text: str) -> bool:
 
 def generic_price_fallback_reply(user_text: str, business: dict = None) -> str:
     lang = detect_customer_language(user_text)
-    summary = customer_safe_price_summary(business)
-    if summary:
+    prices = normalize_id((business or {}).get("prices"))
+    if prices:
         if lang == "en":
-            return f"{summary} Which product/model do you need?"
+            return f"Our current price information: {prices}. Which product/model do you need?"
         if lang == "ru":
-            return f"{summary} Какая модель или товар вам нужен?"
+            return f"Актуальная информация по ценам: {prices}. Какая модель или товар вам нужен?"
         if lang == "kk":
-            return f"{summary} Қай тауар немесе модель керек?"
-        return f"{summary} Sizga qaysi mahsulot yoki model kerak?"
+            return f"Қазіргі баға мәліметі: {prices}. Қай тауар немесе модель керек?"
+        return f"Narx bo'yicha ma'lumot: {prices}. Sizga qaysi mahsulot yoki model kerak?"
 
     if lang == "en":
         return "Our manager will confirm the exact price. Which product/model do you need?"
@@ -4415,171 +3495,15 @@ def generic_price_fallback_reply(user_text: str, business: dict = None) -> str:
     return "Aniq narxni menejerimiz tasdiqlaydi. Sizga qaysi mahsulot yoki model kerak?"
 
 
-def _extract_first_price_range(raw_text: str) -> str:
-    text = normalize_id(raw_text)
-    if not text:
-        return ""
-    match = re.search(r"(\d[\d\s]{0,6}(?:[–-]\d[\d\s]{0,6}))\s*(\$|usd|dollar|dollor|доллар|so['’]?m|sum)?", text, re.IGNORECASE)
-    if not match:
-        match = re.search(r"(?<!\+)(\d{2,6})\s*(\$|usd|dollar|dollor|доллар|so['’]?m|sum)", text, re.IGNORECASE)
-    if not match:
-        return ""
-    amount = re.sub(r"\s+", "", match.group(1) or "")
-    currency = normalize_id(match.group(2))
-    return f"{amount} {currency}".strip()
-
-
-def customer_safe_price_summary(business: dict = None) -> str:
-    business = business or {}
-    raw_prices = normalize_id(business.get("prices"))
-    if not raw_prices:
-        return ""
-
-    lower = raw_prices.lower()
-    phone = normalize_id(business.get("sales_phone"))
-    approx_price = _extract_first_price_range(raw_prices)
-    has_internal_rules = any(marker in lower for marker in [
-        "bot ",
-        "bot-",
-        "mijozni",
-        "yo'naltir",
-        "aytmasin",
-        "so'rasa",
-        "menejerimiz",
-        "sotuvch",
-        "minimal buyurtma",
-    ])
-
-    if has_internal_rules:
-        if approx_price and phone:
-            return f"Taxminiy narx {approx_price} atrofida. Aniq narx bo'yicha menejer yordam beradi: {phone}."
-        if approx_price:
-            return f"Taxminiy narx {approx_price} atrofida. Aniq narx modelga qarab tasdiqlanadi."
-        if phone:
-            return f"Aniq narxni menejer tasdiqlaydi: {phone}."
-        return "Aniq narx modelga va buyurtmaga qarab tasdiqlanadi."
-
-    first_sentence = re.split(r"(?<=[.!?])\s+|\n+", raw_prices)[0].strip(" -")
-    first_sentence = re.sub(r"\s+", " ", first_sentence).strip()
-    return first_sentence[:220] if first_sentence else ""
-
-
-def looks_like_internal_prompt_leak(text: str) -> bool:
-    clean = normalize_id(text).lower()
-    if not clean:
-        return False
-    leak_markers = [
-        "bot aniq narx aytmasin",
-        "narx so'ragan mijozni",
-        "mijozni telegram",
-        "mijozni sotuv agentiga",
-        "bot:",
-        "do not",
-        "you are a real human sales assistant",
-        "ai reply rules",
-        "business facts",
-        "opening message",
-    ]
-    return any(marker in clean for marker in leak_markers)
-
-
-def mentions_media_analysis_or_attachment_ack(text: str) -> bool:
-    clean = normalize_id(text).lower()
-    if not clean:
-        return False
-    patterns = [
-        "thanks for the photo",
-        "thank you for the photo",
-        "thanks for the video",
-        "rasm uchun rahmat",
-        "foto uchun rahmat",
-        "video uchun rahmat",
-        "спасибо за фото",
-        "спасибо за видео",
-        "фото үшін рахмет",
-        "видео үшін рахмет",
-        "clear photo",
-        "aniqroq rasm",
-        "четкое фото",
-        "анық фото",
-        "i checked the photo",
-        "i checked the video",
-        "we checked the photo",
-        "we checked the video",
-        "analys",
-        "recogniz",
-        "identified from the photo",
-        "identified from the video",
-    ]
-    return any(pattern in clean for pattern in patterns)
-
-
-def neutral_media_redirect_reply(user_text: str, business: dict = None) -> str:
-    lang = detect_customer_language(user_text)
-    if is_price_question(user_text):
-        summary = customer_safe_price_summary(business)
-        if summary:
-            if lang == "en":
-                return f"{summary} Please send the exact model name/code."
-            if lang == "ru":
-                return f"{summary} Отправьте точное название или код модели."
-            if lang == "kk":
-                return f"{summary} Нақты модель атауын не кодын жіберіңіз."
-            return f"{summary} Aniq model nomi yoki kodini yuboring."
-        if lang == "en":
-            return "The exact price should be confirmed. Please send the exact model name/code."
-        if lang == "ru":
-            return "Точную цену нужно подтвердить. Отправьте точное название или код модели."
-        if lang == "kk":
-            return "Нақты бағаны растау керек. Нақты модель атауын не кодын жіберіңіз."
-        return "Aniq narxni tasdiqlash kerak. Aniq model nomi yoki kodini yuboring."
-    if lang == "en":
-        return "Please send the exact model name/code, and I will help further."
-    if lang == "ru":
-        return "Отправьте точное название или код модели, и я помогу дальше."
-    if lang == "kk":
-        return "Нақты модель атауын не кодын жіберіңіз, мен ары қарай көмектесемін."
-    return "Aniq model nomi yoki kodini yuboring, men keyin davom ettiraman."
-
-
 def product_media_price_fallback_reply(user_text: str, business: dict = None) -> str:
     lang = detect_customer_language(user_text)
     if lang == "en":
-        return "I need to confirm the exact price for this model. Which size or quantity are you interested in?"
+        return "Thanks for the photo. I need to confirm the exact price for this model. Which size or quantity are you interested in?"
     if lang == "ru":
-        return "Точную цену этой модели нужно подтвердить. Какой размер или количество вас интересует?"
+        return "Спасибо за фото. Точную цену этой модели нужно подтвердить. Какой размер или количество вас интересует?"
     if lang == "kk":
-        return "Бұл модельдің нақты бағасын нақтылау керек. Қай өлшем немесе қанша дана қызықтырады?"
-    return "Bu modelning aniq narxini tekshirib aytamiz. Qaysi razmer yoki nechta kerak?"
-
-
-def product_media_unverified_followup_reply(user_text: str, business: dict = None) -> str:
-    lang = detect_customer_language(user_text)
-    if wants_deal_handoff(user_text):
-        if lang == "en":
-            return "Understood. Please send the exact model name or code, and our manager will confirm the wholesale price and availability."
-        if lang == "ru":
-            return "Понял. Отправьте точное название или код модели, и наш менеджер подтвердит оптовую цену и наличие."
-        if lang == "kk":
-            return "Түсіндім. Дәл модель атауын не кодын жіберіңіз, менеджеріміз көтерме баға мен қолжетімділікті нақтылап береді."
-        return "Tushundim. Aniq model nomi yoki kodini yuboring, menejerimiz optim narx va mavjudligini tekshirib aytadi."
-
-    if wants_catalog(user_text):
-        if lang == "en":
-            return "Of course. Please send the exact model name or code, and I will help with the right item."
-        if lang == "ru":
-            return "Конечно. Отправьте точное название или код модели, и я помогу с нужным товаром."
-        if lang == "kk":
-            return "Әрине. Дәл модель атауын не кодын жіберіңіз, мен керек тауарды нақтылап беремін."
-        return "Albatta. Aniq model nomi yoki kodini yuboring, kerakli mahsulotni aniqlab beraman."
-
-    if lang == "en":
-        return "Understood. Please send the exact model name or code, and I will confirm the price and availability."
-    if lang == "ru":
-        return "Понял. Отправьте точное название или код модели, и я подтвержу цену и наличие."
-    if lang == "kk":
-        return "Түсіндім. Дәл модель атауын не кодын жіберіңіз, мен бағасы мен қолжетімділігін нақтылаймын."
-    return "Tushundim. Aniq model nomi yoki kodini yuboring, narxi va mavjudligini tekshirib aytaman."
+        return "Фото үшін рахмет. Бұл модельдің нақты бағасын нақтылау керек. Қай өлшем немесе қанша дана қызықтырады?"
+    return "Rasm uchun rahmat. Bu modelning aniq narxini tekshirib aytamiz. Qaysi razmer yoki nechta kerak?"
 
 
 def business_products_summary(business: dict = None, limit: int = 4) -> str:
@@ -4602,19 +3526,19 @@ def replacement_for_forbidden_product_photo_question(user_text: str = "", busine
     lang = detect_customer_language(user_text)
     if lang == "en":
         if is_price_question(user_text):
-            return "Our manager will confirm the exact price."
-        return "Our manager will confirm the details."
+            return "Thanks for the photo. Our manager will confirm the exact price."
+        return "Thanks for the photo. Our manager will confirm the details."
     if lang == "ru":
         if is_price_question(user_text):
-            return "Точную цену подтвердит менеджер."
-        return "Менеджер подтвердит детали."
+            return "Спасибо за фото. Точную цену подтвердит менеджер."
+        return "Спасибо за фото. Менеджер подтвердит детали."
     if lang == "kk":
         if is_price_question(user_text):
-            return "Нақты бағаны менеджер растайды."
-        return "Менеджер егжей-тегжейін растайды."
+            return "Фото үшін рахмет. Нақты бағаны менеджер растайды."
+        return "Фото үшін рахмет. Менеджер егжей-тегжейін растайды."
     if is_price_question(user_text):
-        return "Aniq narxni menejerimiz tasdiqlaydi."
-    return "Menejerimiz tafsilotlarni tasdiqlaydi."
+        return "Rasm uchun rahmat. Aniq narxni menejerimiz tasdiqlaydi."
+    return "Rasm uchun rahmat. Menejerimiz tafsilotlarni tasdiqlaydi."
 
 
 def get_sales_phone(business: dict) -> str:
@@ -4625,87 +3549,6 @@ def get_sales_phone(business: dict) -> str:
         or os.getenv("BUSINESS_PHONE", "")
         or os.getenv("MILANA_SALES_PHONE", "")
     )
-
-
-def wants_business_location(text: str) -> bool:
-    s = normalize_id(text).lower()
-    if not s:
-        return False
-    markers = [
-        "qayerda", "manzil", "address", "location", "where are you", "where located",
-        "joylashgan", "uzbekistan", "o'zbekiston", "uzbekiston", "andijan", "andijon",
-        "адрес", "где вы", "локация", "узбекистан", "андижан",
-    ]
-    return any(marker in s for marker in markers)
-
-
-def extract_business_location_summary(business: dict = None) -> str:
-    business = business or {}
-    combined = "\n".join([
-        normalize_id(business.get("faq")),
-        normalize_id(business.get("knowledge")),
-        normalize_id(business.get("delivery_info")),
-    ]).strip()
-    if not combined:
-        return ""
-
-    lines = [re.sub(r"\s+", " ", line).strip(" -") for line in combined.splitlines() if normalize_id(line)]
-    location_lines = []
-    for line in lines:
-        lower = line.lower()
-        if lower.endswith("?") or "qayerda" in lower or "address?" in lower or "адрес" == lower.strip():
-            continue
-        if any(token in lower for token in [
-            "manzil", "address", "o'zbekiston", "uzbekiston", "uzbekistan",
-            "andijon", "andijan", "qoratut", "aeroport", "airport",
-            "адрес", "узбекистан", "андижан",
-        ]):
-            location_lines.append(line)
-        if len(location_lines) >= 2:
-            break
-
-    summary = " ".join(location_lines).strip()
-    summary = re.sub(r"^\d+\.\s*", "", summary)
-    summary = re.sub(r"\s+", " ", summary).strip()
-    return summary[:320]
-
-
-def business_location_reply(user_text: str, business: dict = None) -> str:
-    lang = detect_customer_language(user_text)
-    summary = extract_business_location_summary(business)
-    if summary:
-        return summary
-    if lang == "en":
-        return "Yes, we are located in Uzbekistan, Andijan. Please contact our manager for the exact address details."
-    if lang == "ru":
-        return "Да, мы находимся в Узбекистане, Андижане. За точными деталями адреса можно обратиться к менеджеру."
-    if lang == "kk":
-        return "Иә, біз Өзбекстан, Әндіжан қаласында орналасқанбыз. Нақты мекенжайды менеджер нақтылап береді."
-    return "Ha, biz O'zbekiston, Andijonda joylashganmiz. Aniq manzilni menejerimiz tasdiqlab beradi."
-
-
-def wants_business_scope_intro(text: str) -> bool:
-    s = normalize_id(text).lower()
-    if not s:
-        return False
-    markers = [
-        "which factory", "what factory", "what do you produce", "do you produce", "factory?",
-        "qanaqa fabrika", "qaysi fabrika", "nima ishlab chiqarasiz", "nima tikasiz",
-        "какая фабрика", "что производите", "что шьете",
-    ]
-    return any(marker in s for marker in markers)
-
-
-def business_scope_reply(user_text: str, business: dict = None) -> str:
-    lang = detect_customer_language(user_text)
-    business_name = normalize_id((business or {}).get("business_name")) or "Milana Premium"
-    if lang == "en":
-        return f"{business_name} is a clothing manufacturer in Uzbekistan. We mostly produce women's wear, and we also make kids' and men's clothing."
-    if lang == "ru":
-        return f"{business_name} — швейная фабрика в Узбекистане. В основном мы производим женскую одежду, а также шьем детскую и мужскую одежду."
-    if lang == "kk":
-        return f"{business_name} — Өзбекстандағы тігін фабрикасы. Негізінен әйелдер киімін тігеміз, сонымен қатар балалар мен ерлер киімін де шығарамыз."
-    return f"{business_name} O'zbekistondagi kiyim ishlab chiqaruvchi fabrika. Asosan ayollar kiyimlarini ishlab chiqaramiz, shu bilan birga bolalar va erkaklar kiyimlari ham tikamiz."
 
 
 def wants_business_phone_number(text: str) -> bool:
@@ -4985,7 +3828,7 @@ def strip_incomplete_reply(text: str) -> str:
     return text.rstrip(" :：,;-").strip()
 
 
-def complete_sentence_reply(text: str, limit: int = 950) -> str:
+def complete_sentence_reply(text: str, limit: int = 1000) -> str:
     text = strip_incomplete_reply(text)
     if not text:
         return ""
@@ -5133,7 +3976,7 @@ def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
     reply_text = reply_text.strip()
     if not reply_text:
         reply_text = "Albatta 😊 Katalogni quyidagi tugma orqali ko'rishingiz mumkin."
-    return reply_text[:1000]
+    return complete_sentence_reply(reply_text, limit=1000)
 
 
 def catalog_card_subtitle(business: dict) -> str:
@@ -5243,7 +4086,7 @@ def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
     model = business.get("ai_model") or AI_DEFAULT_MODELS[provider]
     api_key = get_ai_api_key(business, provider)
     temperature = float(business.get("ai_temperature", 0.5) or 0.5)
-    max_tokens = max(220, int(business.get("ai_max_tokens", 220) or 220))
+    max_tokens = max(500, int(business.get("ai_max_tokens", 500) or 500))
 
     if not api_key:
         log("Missing AI API key", {"provider": provider, "model": model})
@@ -5411,10 +4254,6 @@ def clean_sales_reply(reply_text: str, user_text: str = "", business: dict = Non
         return "Tushunarli 😊 Muammo emas, qachon qulay bo'lsa yozing."
 
     text = normalize_id(reply_text)
-    if looks_like_internal_prompt_leak(text):
-        text = generic_price_fallback_reply(user_text, business) if is_price_question(user_text) else (
-            lead_followup_reply(user_text, business, lead_state) or "Xabaringiz qabul qilindi 😊"
-        )
     if not text:
         if lang == "en":
             return "Your message has been received."
@@ -5477,9 +4316,6 @@ def clean_sales_reply(reply_text: str, user_text: str = "", business: dict = Non
 
     if contains_forbidden_product_photo_question(text):
         text = replacement_for_forbidden_product_photo_question(user_text, business)
-
-    if mentions_media_analysis_or_attachment_ack(text):
-        text = neutral_media_redirect_reply(user_text, business)
 
     # Strong language guard: if customer wrote in English but reply is not English, return safe English fallback.
     if lang == "en":
@@ -6025,6 +4861,16 @@ def _score_local_catalog_row(row: dict, code_set: set, keyword_set: set, media_s
 
 
 def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_type: str = "", access_token: str = "") -> dict:
+    if catalog_matcher_module is not None:
+        try:
+            return catalog_matcher_module.analyze_media_for_sales_reply_local(
+                media_url=media_url,
+                user_text=user_text,
+                media_type=media_type,
+                access_token=access_token,
+            )
+        except Exception as exc:
+            log("catalog_matcher local delegation failed", {"error": str(exc)})
     if not PRODUCT_MATCHER_LOCAL_ENABLED:
         return {}
     media_type = normalize_id(media_type).lower()
@@ -6156,6 +5002,16 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
 
 
 def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: str = "", access_token: str = "") -> dict:
+    if catalog_matcher_module is not None:
+        try:
+            return catalog_matcher_module.analyze_media_for_sales_reply(
+                media_url=media_url,
+                user_text=user_text,
+                media_type=media_type,
+                access_token=access_token,
+            )
+        except Exception as exc:
+            log("catalog_matcher delegation failed", {"error": str(exc)})
     media_url = normalize_id(media_url)
     if not PRODUCT_MATCHER_ENABLED or not PRODUCT_MATCHER_API_URLS or not media_url:
         if PRODUCT_MATCHER_LOCAL_ENABLED and PRODUCT_MATCHER_ENABLED and media_url:
@@ -6612,16 +5468,6 @@ def get_ai_reply(
     lead_state: dict = None,
 ):
     try:
-        if wants_business_location(user_text):
-            direct_location_reply = business_location_reply(user_text, business)
-            if direct_location_reply:
-                return direct_location_reply
-
-        if wants_business_scope_intro(user_text):
-            direct_scope_reply = business_scope_reply(user_text, business)
-            if direct_scope_reply:
-                return direct_scope_reply
-
         if wants_business_phone_number(user_text):
             direct_phone_reply = sales_phone_reply(user_text, business)
             if direct_phone_reply:
@@ -6719,6 +5565,9 @@ def send_dm(access_token: str, recipient_id: str, text: str, business: dict = No
         return None
 
     business = business or {}
+    text = complete_sentence_reply(remove_urls(text), limit=1000)
+    if not text:
+        return None
 
     payload = {
         "recipient": {"id": recipient_id},
@@ -7025,7 +5874,6 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             "dm",
             recent_rows=recent_lead_rows,
             current_text=message_text,
-            current_raw_payload=messaging,
             customer_name_hint=customer_display_name,
             message_id=message_id,
         )
@@ -7350,13 +6198,11 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                     "Answer with a short price-confirmation fallback and do not ask for name or phone."
                 )
                 force_direct_media_reply = True
-            elif recent_media_context_found:
-                media_reply_hint = product_media_unverified_followup_reply(message_text, business)
+            elif media_type in {"photo", "video", "file"}:
+                media_reply_hint = replacement_for_forbidden_product_photo_question(message_text or "photo", business)
                 media_match_context = (
-                    "The customer is continuing a recent product-photo conversation, "
-                    "but the product matcher still does not have a verified catalog match. "
-                    "Reply with a short helpful fallback, keep it in the customer's language, "
-                    "and ask for the exact model or a clearer photo instead of staying silent."
+                    "The customer sent product media, but the product matcher did not return a verified catalog match. "
+                    "Acknowledge the media briefly and do not ask for name or phone."
                 )
                 force_direct_media_reply = True
             else:
@@ -7371,10 +6217,10 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 return
 
         if force_direct_media_reply:
-            log("Instagram DM product photo price fallback", {
+            log("Instagram DM media fallback reply", {
                 "customer_id": sender_id,
                 "message_id": message_id,
-                "reason": "recent_media_match_missing",
+                "reason": "media_match_missing",
             })
 
         use_direct_matcher_reply = force_direct_media_reply or (bool(media_reply_hint) and (
@@ -7412,7 +6258,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             send_result = send_catalog_button(access_token, sender_id, business, reply_text)
             saved_reply_text = clean_ai_reply_for_catalog(reply_text, business) + "\n[Catalog button sent]"
         else:
-            reply_text = remove_urls(reply_text)
+            reply_text = complete_sentence_reply(remove_urls(reply_text), limit=1000)
             send_result = send_dm(access_token, sender_id, reply_text, business)
             saved_reply_text = reply_text
 
@@ -7540,7 +6386,7 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
             reply_text = "Katalogni DM orqali yuborish uchun bizga xabar yozing."
     else:
         reply_text = get_ai_reply(comment_text, business, "instagram", commenter_id or comment_id, "instagram_comment")
-        reply_text = remove_urls(reply_text)
+        reply_text = complete_sentence_reply(remove_urls(reply_text), limit=1000)
 
     send_result = reply_to_comment(access_token, comment_id, reply_text, business)
     raw_result = safe_json(send_result) if send_result is not None else {}
@@ -7639,72 +6485,10 @@ def send_whatsapp_text(to: str, text: str, business: dict = None):
     return res
 
 
-def infer_media_kind(mime_type: str = "", filename: str = "", requested_kind: str = ""):
-    requested = normalize_id(requested_kind).lower()
-    if requested in {"photo", "image", "video", "voice", "audio", "file", "document"}:
-        return "photo" if requested == "image" else ("file" if requested == "document" else requested)
-
-    guessed_mime = normalize_id(mime_type).lower()
-    guessed_name = normalize_id(filename).lower()
-
-    if guessed_mime.startswith("image/"):
-        return "photo"
-    if guessed_mime.startswith("video/"):
-        return "video"
-    if guessed_mime.startswith("audio/"):
-        return "voice"
-    if guessed_mime.startswith("application/"):
-        return "file"
-
-    ext = os.path.splitext(guessed_name)[1].lower()
-    if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".heif"}:
-        return "photo"
-    if ext in {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}:
-        return "video"
-    if ext in {".ogg", ".oga", ".opus", ".mp3", ".m4a", ".wav", ".aac"}:
-        return "voice"
-    return "file"
-
-
-def default_media_text(media_kind: str, filename: str = ""):
-    labels = {
-        "photo": "📸 Photo",
-        "video": "🎥 Video",
-        "voice": "🎤 Voice message",
-        "audio": "🎤 Audio",
-        "file": "📎 Document",
-    }
-    if media_kind == "file" and normalize_id(filename):
-        return normalize_id(filename)
-    return labels.get(media_kind, "📎 Attachment")
-
-
-def normalize_saved_media_type(media_kind: str):
-    return {
-        "photo": "photo",
-        "video": "video",
-        "voice": "voice",
-        "audio": "voice",
-        "file": "file",
-    }.get(media_kind, "file")
-
-
-def whatsapp_payload_key(media_kind: str):
-    return {
-        "photo": "image",
-        "video": "video",
-        "voice": "audio",
-        "audio": "audio",
-        "file": "document",
-    }.get(media_kind, "document")
-
-
-def send_whatsapp_media_upload(to: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = "",
-                               business: dict = None, media_kind: str = ""):
+def send_whatsapp_image_upload(to: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = "",
+                               business: dict = None):
     token = get_whatsapp_access_token(business)
     phone_number_id = get_whatsapp_phone_number_id(business)
-    media_kind = infer_media_kind(mime_type, filename, media_kind)
-    payload_type = whatsapp_payload_key(media_kind)
 
     if not token or not phone_number_id:
         return False, {"error": "Missing WhatsApp access token or phone number id"}, ""
@@ -7714,14 +6498,14 @@ def send_whatsapp_media_upload(to: str, file_bytes: bytes, filename: str, mime_t
         headers={"Authorization": f"Bearer {token}"},
         data={
             "messaging_product": "whatsapp",
-            "type": mime_type or "application/octet-stream",
+            "type": mime_type or "image/jpeg",
         },
-        files={"file": (filename or "attachment.bin", file_bytes, mime_type or "application/octet-stream")},
+        files={"file": (filename or "image.jpg", file_bytes, mime_type or "image/jpeg")},
         timeout=60,
     )
 
     upload_result = safe_json(upload_res)
-    log("WhatsApp media upload", {"kind": media_kind, "status": upload_res.status_code, "body": upload_result})
+    log("WhatsApp media upload", {"status": upload_res.status_code, "body": upload_result})
 
     if not upload_res.ok:
         return False, upload_result, ""
@@ -7730,23 +6514,56 @@ def send_whatsapp_media_upload(to: str, file_bytes: bytes, filename: str, mime_t
     if not media_id:
         return False, {"error": "WhatsApp media upload returned no media id", "meta": upload_result}, ""
 
-    json_payload = {
-        "messaging_product": "whatsapp",
-        "to": normalize_id(to),
-        "type": payload_type,
-    }
-    if payload_type == "image":
-        json_payload["image"] = {"id": media_id, **({"caption": caption[:1024]} if caption else {})}
-    elif payload_type == "video":
-        json_payload["video"] = {"id": media_id, **({"caption": caption[:1024]} if caption else {})}
-    elif payload_type == "document":
-        json_payload["document"] = {
-            "id": media_id,
-            "filename": filename or "attachment",
-            **({"caption": caption[:1024]} if caption else {}),
-        }
-    else:
-        json_payload["audio"] = {"id": media_id}
+    send_res = requests.post(
+        f"{GRAPH_FACEBOOK}/{phone_number_id}/messages",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "messaging_product": "whatsapp",
+            "to": normalize_id(to),
+            "type": "image",
+            "image": {
+                "id": media_id,
+                **({"caption": caption[:1024]} if caption else {}),
+            },
+        },
+        timeout=30,
+    )
+
+    send_result = safe_json(send_res)
+    log("WhatsApp image send", {"status": send_res.status_code, "body": send_result})
+    return send_res.ok, send_result, media_id
+
+
+def send_whatsapp_audio_upload(to: str, file_bytes: bytes, filename: str, mime_type: str, business: dict = None):
+    token = get_whatsapp_access_token(business)
+    phone_number_id = get_whatsapp_phone_number_id(business)
+
+    if not token or not phone_number_id:
+        return False, {"error": "Missing WhatsApp access token or phone number id"}, ""
+
+    upload_res = requests.post(
+        f"{GRAPH_FACEBOOK}/{phone_number_id}/media",
+        headers={"Authorization": f"Bearer {token}"},
+        data={
+            "messaging_product": "whatsapp",
+            "type": mime_type or "audio/ogg",
+        },
+        files={"file": (filename or "voice.ogg", file_bytes, mime_type or "audio/ogg")},
+        timeout=60,
+    )
+
+    upload_result = safe_json(upload_res)
+    log("WhatsApp audio upload", {"status": upload_res.status_code, "body": upload_result})
+
+    if not upload_res.ok:
+        return False, upload_result, ""
+
+    media_id = upload_result.get("id", "")
+    if not media_id:
+        return False, {"error": "WhatsApp audio upload returned no media id", "meta": upload_result}, ""
 
     send_res = requests.post(
         f"{GRAPH_FACEBOOK}/{phone_number_id}/messages",
@@ -7754,37 +6571,18 @@ def send_whatsapp_media_upload(to: str, file_bytes: bytes, filename: str, mime_t
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         },
-        json=json_payload,
+        json={
+            "messaging_product": "whatsapp",
+            "to": normalize_id(to),
+            "type": "audio",
+            "audio": {"id": media_id},
+        },
         timeout=30,
     )
 
     send_result = safe_json(send_res)
-    log("WhatsApp media send", {"kind": media_kind, "status": send_res.status_code, "body": send_result})
+    log("WhatsApp audio send", {"status": send_res.status_code, "body": send_result})
     return send_res.ok, send_result, media_id
-
-
-def send_whatsapp_image_upload(to: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = "",
-                               business: dict = None):
-    return send_whatsapp_media_upload(
-        to=to,
-        file_bytes=file_bytes,
-        filename=filename,
-        mime_type=mime_type,
-        caption=caption,
-        business=business,
-        media_kind="photo",
-    )
-
-
-def send_whatsapp_audio_upload(to: str, file_bytes: bytes, filename: str, mime_type: str, business: dict = None):
-    return send_whatsapp_media_upload(
-        to=to,
-        file_bytes=file_bytes,
-        filename=filename,
-        mime_type=mime_type,
-        business=business,
-        media_kind="voice",
-    )
 
 
 def send_telegram_bot_photo_upload(chat_id: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = "", business: dict = None):
@@ -7819,86 +6617,8 @@ def send_telegram_bot_voice_upload(chat_id: str, file_bytes: bytes, filename: st
     )
 
 
-def send_telegram_bot_video_upload(chat_id: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = "", business: dict = None):
-    token = get_telegram_bot_token(business)
-
-    if not token:
-        return None
-
-    data = {"chat_id": chat_id}
-    if caption:
-        data["caption"] = caption[:1024]
-
-    return requests.post(
-        f"https://api.telegram.org/bot{token}/sendVideo",
-        data=data,
-        files={"video": (filename or "video.mp4", file_bytes, mime_type or "video/mp4")},
-        timeout=60,
-    )
-
-
-def send_telegram_bot_document_upload(chat_id: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = "", business: dict = None):
-    token = get_telegram_bot_token(business)
-
-    if not token:
-        return None
-
-    data = {"chat_id": chat_id}
-    if caption:
-        data["caption"] = caption[:1024]
-
-    return requests.post(
-        f"https://api.telegram.org/bot{token}/sendDocument",
-        data=data,
-        files={"document": (filename or "attachment.bin", file_bytes, mime_type or "application/octet-stream")},
-        timeout=60,
-    )
-
-
 def get_whatsapp_media_proxy_url(media_id: str):
     return f"{PUBLIC_BASE_URL}/api/whatsapp/media/{media_id}"
-
-
-def fetch_whatsapp_media_bytes(media_id: str, business: dict = None):
-    token = get_whatsapp_access_token(business)
-    clean_media_id = normalize_id(media_id)
-    if not token or not clean_media_id:
-        return b"", "", ""
-
-    meta_res = requests.get(
-        f"{GRAPH_FACEBOOK}/{clean_media_id}",
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=30,
-    )
-    if not meta_res.ok:
-        log("WhatsApp media meta failed", {"media_id": clean_media_id, "status": meta_res.status_code, "body": meta_res.text[:500]})
-        return b"", "", ""
-
-    meta = safe_json(meta_res)
-    media_url = normalize_id(meta.get("url"))
-    mime_type = normalize_id(meta.get("mime_type"))
-    filename = normalize_id(meta.get("sha256")) or f"whatsapp-{clean_media_id}"
-    if not media_url:
-        return b"", mime_type, filename
-
-    file_res = requests.get(
-        media_url,
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=60,
-    )
-    if not file_res.ok:
-        log("WhatsApp media download failed", {"media_id": clean_media_id, "status": file_res.status_code, "body": file_res.text[:500]})
-        return b"", mime_type, filename
-
-    return file_res.content or b"", mime_type or file_res.headers.get("Content-Type", ""), filename
-
-
-def append_voice_transcript(message_text: str, transcript: str):
-    base = normalize_text(message_text)
-    clean_transcript = normalize_text(transcript)
-    if not clean_transcript:
-        return base
-    return f"{base}\nTranscript: {clean_transcript}" if base else f"Transcript: {clean_transcript}"
 
 
 def cleanup_whatsapp_chat_memory(ttl_seconds: int = 24 * 60 * 60):
@@ -8048,7 +6768,7 @@ async def process_whatsapp_message(change: dict):
                 media_type = {
                     "image": "photo",
                     "video": "video",
-                    "audio": "voice",
+                    "audio": "audio",
                     "document": "file",
                     "sticker": "photo",
                 }.get(msg_type, "file")
@@ -8065,17 +6785,6 @@ async def process_whatsapp_message(change: dict):
 
                 if whatsapp_media_id:
                     media_url = get_whatsapp_media_proxy_url(whatsapp_media_id)
-                    if msg_type == "audio":
-                        audio_bytes, audio_mime, audio_name = fetch_whatsapp_media_bytes(whatsapp_media_id, business)
-                        transcript = transcribe_audio_bytes(
-                            audio_bytes,
-                            filename=audio_name or file_name or f"{message_id}.ogg",
-                            mime_type=audio_mime or mime_type or "audio/ogg",
-                            api_key=business.get("openai_api_key") or OPENAI_API_KEY,
-                            prompt="Transcribe customer voice messages clearly and keep the original language.",
-                            logger=log,
-                        )
-                        text = append_voice_transcript(text, transcript)
 
             elif msg_type == "button":
                 text = msg.get("button", {}).get("text", "")
@@ -8909,155 +7618,6 @@ async def list_operator_tasks_v2(
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
-@app.get("/api/v2/operator-deals/report")
-async def operator_deal_report_v2(
-    business_id: str = "",
-    date_from: str = "",
-    date_to: str = "",
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    business_id = normalize_id(business_id)
-    if not business_id:
-        return JSONResponse({"status": "error", "message": "Missing business_id"}, status_code=400)
-    if not has_business_admin_access(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    try:
-        report = build_operator_deal_report(business_id, date_from=date_from, date_to=date_to)
-        return {"status": "ok", "data": report}
-    except ValueError as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
-    except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-
-@app.post("/api/v2/operator-deals/adjust")
-async def adjust_operator_deal_v2(
-    body: OperatorDealAdjustRequest,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    business_id = normalize_id(body.business_id)
-    operator_login_id = normalize_operator_login(body.operator_login_id)
-    if not business_id or not operator_login_id:
-        return JSONResponse({"status": "error", "message": "business_id and operator_login_id are required"}, status_code=400)
-    if not has_business_admin_access(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    try:
-        counts = load_operator_deal_counts(business_id)
-        previous_total = max(0, int(counts.get(operator_login_id, 0) or 0))
-        requested_delta = int(body.delta or 0)
-        if body.total_after is None:
-            next_total = max(0, previous_total + requested_delta)
-        else:
-            next_total = max(0, int(body.total_after or 0))
-        effective_delta = next_total - previous_total
-
-        counts[operator_login_id] = next_total
-        saved_counts = save_operator_deal_counts(
-            business_id,
-            counts,
-            updated_by=access.get("email", ""),
-        )
-
-        event = {}
-        if effective_delta:
-            event = append_operator_deal_event(
-                business_id=business_id,
-                operator_login_id=operator_login_id,
-                delta=effective_delta,
-                total_after=next_total,
-                created_by=access.get("email", ""),
-                source="android_admin_adjustment",
-                metadata={
-                    "reason": normalize_id(body.reason),
-                    "conversation_id": normalize_id(body.conversation_id),
-                    "lead_id": normalize_id(body.lead_id),
-                },
-            )
-
-        report = build_operator_deal_report(business_id)
-        return {
-            "status": "ok",
-            "data": {
-                "operator_deals": saved_counts,
-                "report": report,
-                "event": event,
-                "operator_login_id": operator_login_id,
-                "current_total": next_total,
-                "delta": effective_delta,
-            },
-        }
-    except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-
-@app.post("/api/v2/mobile/device-token")
-async def register_mobile_device_token_v2(
-    body: MobileDeviceTokenRegisterRequest,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    device_token = normalize_id(body.device_token)
-    if not device_token:
-        return JSONResponse({"status": "error", "message": "device_token is required"}, status_code=400)
-
-    try:
-        registered = sync_mobile_device_token(
-            access=access,
-            business_ids=body.business_ids or [],
-            device_token=device_token,
-            platform=body.platform or "android",
-            device_label=body.device_label,
-            app_version=body.app_version,
-        )
-        return {
-            "status": "ok",
-            "data": {
-                "registered_business_ids": registered,
-                "firebase_ready": bool(get_firebase_admin_app()),
-                "firebase_error": FIREBASE_APP_CACHE_ERROR,
-            },
-        }
-    except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-
-@app.post("/api/v2/mobile/device-token/unregister")
-async def unregister_mobile_device_token_v2(
-    body: MobileDeviceTokenUnregisterRequest,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    device_token = normalize_id(body.device_token)
-    if not device_token:
-        return JSONResponse({"status": "error", "message": "device_token is required"}, status_code=400)
-
-    try:
-        updated = deactivate_mobile_device_token(access, body.business_ids or [], device_token)
-        return {"status": "ok", "data": {"updated_business_ids": updated}}
-    except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-
 @app.post("/api/v2/businesses")
 async def create_business_v2(
     body: BusinessCreateRequest,
@@ -9442,10 +8002,10 @@ async def get_conversation_messages_v2(
             )
             rows = list(reversed(fallback_query.execute().data or []))
 
-        # Backfill old forwarded Instagram previews asynchronously so hot-path chat loads
-        # are not blocked by public preview scraping/network retries.
+        # Backfill old forwarded Instagram messages that were saved without preview URLs.
+        # This keeps forwarded reels stable in UI (no random "NO PREVIEW" regressions).
         if platform == "instagram" and rows:
-            preview_candidates = []
+            update_rows = []
             for row in rows:
                 media_type = normalize_id(row.get("media_type")).lower()
                 if media_type not in ("video", "file", "photo", "image"):
@@ -9458,55 +8018,54 @@ async def get_conversation_messages_v2(
                     or (row.get("raw_payload") or {}).get("post_permalink")
                     or extract_instagram_permalink_from_payload(row.get("raw_payload") or {})
                 )
-                row_id = normalize_id(row.get("id"))
-                if not post_permalink or not row_id:
+                if not post_permalink:
                     continue
 
-                preview_candidates.append(
-                    {
-                        "id": row_id,
-                        "post_permalink": post_permalink,
-                        "existing_media_type": media_type,
-                        "existing_post_image_url": normalize_id(row.get("post_image_url")),
-                        "existing_post_media_type": normalize_id(row.get("post_media_type")).lower(),
-                    }
-                )
+                preview = fetch_instagram_public_preview(post_permalink) or {}
+                preview_media_url = normalize_id(preview.get("media_url"))
+                preview_image_url = normalize_id(preview.get("post_image_url"))
+                preview_media_type = normalize_id(preview.get("post_media_type")).lower()
 
-            if preview_candidates:
+                changed = False
+                if preview_media_url:
+                    row["media_url"] = preview_media_url
+                    changed = True
+                if preview_image_url and not normalize_id(row.get("post_image_url")):
+                    row["post_image_url"] = preview_image_url
+                    changed = True
+                if post_permalink and not normalize_id(row.get("post_permalink")):
+                    row["post_permalink"] = post_permalink
+                    changed = True
+                if preview_media_type and media_type in ("", "file"):
+                    row["media_type"] = "video" if "video" in preview_media_type else ("photo" if "image" in preview_media_type else media_type)
+                    changed = True
+
+                if changed and normalize_id(row.get("id")):
+                    update_rows.append({
+                        "id": normalize_id(row.get("id")),
+                        "media_url": normalize_id(row.get("media_url")),
+                        "post_image_url": normalize_id(row.get("post_image_url")),
+                        "post_permalink": normalize_id(row.get("post_permalink")),
+                        "post_media_type": normalize_id(preview_media_type or row.get("post_media_type")).lower(),
+                    })
+
+            if update_rows:
                 def persist_preview_backfill(rows_to_update: list[dict]):
                     for item in rows_to_update:
                         try:
-                            preview = fetch_instagram_public_preview(item.get("post_permalink")) or {}
-                            preview_media_url = normalize_id(preview.get("media_url"))
-                            preview_image_url = normalize_id(preview.get("post_image_url"))
-                            preview_media_type = normalize_id(preview.get("post_media_type")).lower()
-
-                            update_data = {}
-                            if preview_media_url:
-                                update_data["media_url"] = preview_media_url
-                            if preview_image_url and not item.get("existing_post_image_url"):
-                                update_data["post_image_url"] = preview_image_url
-                            if item.get("post_permalink"):
-                                update_data["post_permalink"] = item.get("post_permalink")
-                            effective_media_type = item.get("existing_media_type") or ""
-                            if preview_media_type and effective_media_type in ("", "file"):
-                                update_data["media_type"] = (
-                                    "video"
-                                    if "video" in preview_media_type
-                                    else ("photo" if "image" in preview_media_type else effective_media_type)
-                                )
-                            if preview_media_type or item.get("existing_post_media_type"):
-                                update_data["post_media_type"] = preview_media_type or item.get("existing_post_media_type")
-
-                            if update_data:
-                                supabase.table("inbox_messages").update(update_data).eq("id", item.get("id")).execute()
+                            supabase.table("inbox_messages").update({
+                                "media_url": item.get("media_url") or None,
+                                "post_image_url": item.get("post_image_url") or None,
+                                "post_permalink": item.get("post_permalink") or None,
+                                "post_media_type": item.get("post_media_type") or None,
+                            }).eq("id", item.get("id")).execute()
                         except Exception:
                             pass
 
                 if background_tasks is not None:
-                    background_tasks.add_task(persist_preview_backfill, preview_candidates)
+                    background_tasks.add_task(persist_preview_backfill, update_rows)
                 else:
-                    persist_preview_backfill(preview_candidates)
+                    persist_preview_backfill(update_rows)
 
         messages = [transform_message_to_react(row) for row in rows]
 
@@ -9566,7 +8125,6 @@ async def get_conversation_messages_v2(
 @app.post("/api/v2/send-message")
 async def send_message_v2(
         request: Request,
-        background_tasks: BackgroundTasks,
         authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
@@ -9611,6 +8169,9 @@ async def send_message_v2(
                 status_code=404
             )
 
+        ok = False
+        result = {}
+
         if platform == "instagram":
             access_token = get_business_access_token(business)
             if not access_token:
@@ -9618,69 +8179,85 @@ async def send_message_v2(
                     {"error": "Instagram access token not configured"},
                     status_code=400
                 )
-        elif platform not in {"telegram", "whatsapp"}:
+
+            if "comment" in channel:
+                if reply_to_comment_id:
+                    anchor = get_instagram_comment_anchor_by_comment_id(
+                        business_id=business_id,
+                        comment_id=reply_to_comment_id,
+                        post_id=post_id,
+                    )
+                else:
+                    anchor = get_latest_instagram_comment_anchor(
+                        business_id=business_id,
+                        commenter_id=target_id,
+                        post_id=post_id,
+                    )
+                if not target_id:
+                    target_id = normalize_id(anchor.get("customer_id"))
+                comment_id = reply_to_comment_id or normalize_id(
+                    anchor.get("external_message_id")
+                    or (anchor.get("raw_payload") or {}).get("id")
+                )
+                if reply_to_comment_id and not comment_id:
+                    comment_id = reply_to_comment_id
+                if not comment_id:
+                    return JSONResponse(
+                        {"error": "Comment anchor not found for this thread"},
+                        status_code=400,
+                    )
+
+                send_result = reply_to_comment(access_token, comment_id, text, business)
+                ok = bool(send_result and send_result.ok)
+                result = safe_json(send_result) if send_result is not None else {"error": "Send failed"}
+            else:
+                ok, result = send_instagram_dm(access_token, target_id, text, business)
+
+        elif platform == "telegram":
+            if channel == "telegram_user_private":
+                ok, result = await send_telegram_user_message(customer_id=target_id, text=text)
+            else:
+                res = send_telegram_bot_message(target_id, text)
+                if res:
+                    ok = res.ok
+                    result = safe_json(res)
+                else:
+                    result = {"error": "Send failed"}
+
+        elif platform == "whatsapp":
+            res = send_whatsapp_text(target_id, text, business)
+            if res:
+                ok = res.ok
+                try:
+                    result = res.json()
+                except Exception:
+                    result = {"text": res.text}
+            else:
+                result = {"error": "Send failed"}
+
+        else:
             return JSONResponse(
                 {"error": "Unknown platform"},
                 status_code=400
             )
 
-        pending_external_message_id = f"pending-{secrets.token_hex(8)}"
-        queued_payload = {
-            "delivery_status": "pending",
-            "queued_send": True,
-            "queued_at": datetime.utcnow().isoformat(),
-            **({"post_id": post_id} if post_id else {}),
-            **({"reply_to_comment_id": reply_to_comment_id} if reply_to_comment_id else {}),
-        }
-        pending_row = save_inbox_message(
+        if not ok:
+            log("Message send failed", result)
+            return send_failure_response(result)
+
+        save_inbox_message(
             business=business,
             platform=platform,
             sender_id=business_id,
-            recipient_id=target_id or customer_scope,
+            recipient_id=target_id,
             message_text=text,
             direction="outbound",
-            platform_message_id=pending_external_message_id,
-            raw_payload=queued_payload,
+            platform_message_id=normalize_id(result.get("message_id") or result.get("id") or result.get("messages", [{}])[0].get("id", "")),
+            raw_payload={**(result or {}), **({"post_id": post_id} if post_id else {}), **({"reply_to_comment_id": reply_to_comment_id} if reply_to_comment_id else {})},
             channel=channel,
         )
-        pending_message_id = normalize_id((pending_row or {}).get("id"))
-        if not pending_message_id:
-            pending_row = load_inbox_message_by_external_id(
-                business_id=business_id,
-                platform=platform,
-                customer_id=target_id or customer_scope,
-                external_message_id=pending_external_message_id,
-                direction="outbound",
-            )
-            pending_message_id = normalize_id((pending_row or {}).get("id"))
 
-        if pending_message_id and background_tasks is not None:
-            background_tasks.add_task(
-                process_outbound_message_dispatch,
-                pending_message_id,
-                conversation_id,
-                text,
-                reply_to_comment_id,
-            )
-        elif pending_message_id:
-            asyncio.create_task(
-                process_outbound_message_dispatch(
-                    pending_message_id,
-                    conversation_id,
-                    text,
-                    reply_to_comment_id,
-                )
-            )
-
-        return {
-            'status': 'ok',
-            'data': {
-                'queued': True,
-                'delivery_status': 'pending',
-                'pending_message_id': pending_message_id or pending_external_message_id,
-                'message_id': pending_external_message_id,
-            },
-        }
+        return {'status': 'ok', 'data': result}
 
     except Exception as e:
         log("Error sending message", str(e))
@@ -10769,47 +9346,138 @@ async def dashboard_send_image_file(
         authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
-    generic_payload = DashboardMediaFile(
-        business_id=payload.business_id,
-        conversation_id=payload.conversation_id,
-        platform=payload.platform,
-        channel=payload.channel,
-        customer_id=payload.customer_id,
-        chat_id=payload.chat_id,
-        caption=payload.caption,
-        file_data=payload.file_data,
-        filename=payload.filename,
-        mime_type=payload.mime_type,
-        media_kind="photo",
-    )
-    return await dashboard_send_media_file(generic_payload, authorization, x_dashboard_secret)
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    clean_business_id = normalize_id(payload.business_id)
+    if clean_business_id and not can_access_business(access, clean_business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+
+    if not str(payload.mime_type or "").startswith("image/"):
+        return JSONResponse({"status": "error", "message": "Only image files are supported right now"}, status_code=400)
+
+    try:
+        file_bytes = decode_upload_data(payload.file_data)
+    except ValueError as exc:
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
+
+    business = get_business_by_id(clean_business_id) if clean_business_id else get_active_business()
+    if not business:
+        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
+    if not can_access_business(access, normalize_id(business.get("id"))):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+
+    customer_id = normalize_id(payload.customer_id)
+    chat_id = normalize_id(payload.chat_id or payload.customer_id)
+    caption = (payload.caption or "").strip()
+    platform = normalize_id(payload.platform).lower()
+    channel = normalize_id(payload.channel)
+
+    if not customer_id:
+        return JSONResponse({"status": "error", "message": "Missing customer_id"}, status_code=400)
+
+    if platform == "telegram" and channel == "telegram_user_private":
+        ok, result = await send_telegram_user_file(
+            customer_id=customer_id,
+            file_bytes=file_bytes,
+            filename=payload.filename,
+            caption=caption,
+        )
+
+        if ok:
+            save_telegram_message(
+                business=business,
+                customer_id=customer_id,
+                text=caption or "📸 Photo",
+                direction="outbound",
+                message_id=result.get("message_id", ""),
+                raw_payload=result,
+                channel="telegram_user_private",
+                customer_name=result.get("customer_name", customer_id),
+                chat_id=result.get("chat_id", chat_id),
+                media_type="photo",
+            )
+
+        return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
+
+    if platform == "telegram":
+        res = send_telegram_bot_photo_upload(
+            chat_id=chat_id,
+            file_bytes=file_bytes,
+            filename=payload.filename,
+            mime_type=payload.mime_type,
+            caption=caption,
+            business=business,
+        )
+        result = safe_json(res) if res is not None else {"error": "Send failed — no bot token configured"}
+        ok = res is not None and res.ok
+
+        if ok:
+            photos = result.get("result", {}).get("photo", []) if isinstance(result, dict) else []
+            media_file_id = photos[-1].get("file_id", "") if photos else ""
+            save_telegram_message(
+                business=business,
+                customer_id=customer_id,
+                text=caption or "📸 Photo",
+                direction="outbound",
+                message_id=result.get("result", {}).get("message_id", ""),
+                raw_payload=result,
+                channel=channel or "telegram_bot_private",
+                customer_name=customer_id,
+                chat_id=chat_id,
+                media_type="photo",
+                media_file_id=media_file_id,
+            )
+
+        return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
+
+    if platform == "whatsapp":
+        ok, result, media_id = send_whatsapp_image_upload(
+            to=customer_id,
+            file_bytes=file_bytes,
+            filename=payload.filename,
+            mime_type=payload.mime_type,
+            caption=caption,
+            business=business,
+        )
+
+        if ok:
+            save_inbox_message(
+                business=business,
+                platform="whatsapp",
+                sender_id=get_whatsapp_phone_number_id(business),
+                recipient_id=customer_id,
+                message_text=caption or "📸 Photo",
+                direction="outbound",
+                platform_message_id=result.get("messages", [{}])[0].get("id", ""),
+                raw_payload=result,
+                is_read=True,
+                media_type="photo",
+                media_url=get_whatsapp_media_proxy_url(media_id) if media_id else None,
+                channel=channel or "whatsapp",
+                file_name=payload.filename,
+                mime_type=payload.mime_type,
+                whatsapp_media_id=media_id,
+            )
+
+        return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
+
+    if platform == "instagram":
+        return JSONResponse(
+            {
+                "status": "error",
+                "message": "Instagram image uploads need public media hosting. Add Supabase Storage/S3, then send the public URL through Instagram DM.",
+            },
+            status_code=400,
+        )
+
+    return JSONResponse({"status": "error", "message": "Unknown platform"}, status_code=400)
 
 
 @app.post("/dashboard/send-voice-file")
 async def dashboard_send_voice_file(
         payload: DashboardVoiceFile,
-        authorization: str = Header(default=""),
-        x_dashboard_secret: str = Header(default=""),
-):
-    generic_payload = DashboardMediaFile(
-        business_id=payload.business_id,
-        conversation_id=payload.conversation_id,
-        platform=payload.platform,
-        channel=payload.channel,
-        customer_id=payload.customer_id,
-        chat_id=payload.chat_id,
-        caption="",
-        file_data=payload.file_data,
-        filename=payload.filename,
-        mime_type=payload.mime_type,
-        media_kind="voice",
-    )
-    return await dashboard_send_media_file(generic_payload, authorization, x_dashboard_secret)
-
-
-@app.post("/dashboard/send-media-file")
-async def dashboard_send_media_file(
-        payload: DashboardMediaFile,
         authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
@@ -10821,20 +9489,15 @@ async def dashboard_send_media_file(
     if clean_business_id and not can_access_business(access, clean_business_id):
         return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
-    media_kind = infer_media_kind(payload.mime_type, payload.filename, payload.media_kind)
-    if media_kind == "voice" and not str(payload.mime_type or "").startswith("audio/"):
+    if not str(payload.mime_type or "").startswith("audio/"):
         return JSONResponse({"status": "error", "message": "Only audio files are supported for voice notes"}, status_code=400)
 
     try:
-        file_bytes = decode_upload_data(payload.file_data, max_bytes=25 * 1024 * 1024)
+        file_bytes = decode_upload_data(payload.file_data)
     except ValueError as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
 
-    try:
-        business = get_business_by_id(clean_business_id) if clean_business_id else get_active_business()
-    except Exception as exc:
-        log("Dashboard media business lookup failed", str(exc))
-        return JSONResponse({"status": "error", "message": "Business lookup failed. Check local Supabase/backend configuration."}, status_code=503)
+    business = get_business_by_id(clean_business_id) if clean_business_id else get_active_business()
     if not business:
         return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
     if not can_access_business(access, normalize_id(business.get("id"))):
@@ -10842,120 +9505,76 @@ async def dashboard_send_media_file(
 
     customer_id = normalize_id(payload.customer_id)
     chat_id = normalize_id(payload.chat_id or payload.customer_id)
-    caption = (payload.caption or "").strip()
     platform = normalize_id(payload.platform).lower()
     channel = normalize_id(payload.channel)
-    message_text = caption or default_media_text(media_kind, payload.filename)
-    saved_media_type = normalize_saved_media_type(media_kind)
 
     if not customer_id:
         return JSONResponse({"status": "error", "message": "Missing customer_id"}, status_code=400)
 
     if platform == "telegram" and channel == "telegram_user_private":
-        if media_kind == "voice":
-            ok, result = await send_telegram_user_voice_file(
-                customer_id=customer_id,
-                file_bytes=file_bytes,
-                filename=payload.filename,
-            )
-        else:
-            ok, result = await send_telegram_user_file(
-                customer_id=customer_id,
-                file_bytes=file_bytes,
-                filename=payload.filename,
-                caption=caption,
-            )
+        ok, result = await send_telegram_user_voice_file(
+            customer_id=customer_id,
+            file_bytes=file_bytes,
+            filename=payload.filename,
+        )
 
         if ok:
             save_telegram_message(
                 business=business,
                 customer_id=customer_id,
-                text=message_text,
+                text="🎤 Voice message",
                 direction="outbound",
                 message_id=result.get("message_id", ""),
                 raw_payload=result,
                 channel="telegram_user_private",
                 customer_name=result.get("customer_name", customer_id),
                 chat_id=result.get("chat_id", chat_id),
-                media_type=saved_media_type,
+                media_type="voice",
             )
 
         return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
 
     if platform == "telegram":
-        if media_kind == "photo":
-            res = send_telegram_bot_photo_upload(
-                chat_id=chat_id,
-                file_bytes=file_bytes,
-                filename=payload.filename,
-                mime_type=payload.mime_type,
-                caption=caption,
-                business=business,
-            )
-        elif media_kind == "video":
-            res = send_telegram_bot_video_upload(
-                chat_id=chat_id,
-                file_bytes=file_bytes,
-                filename=payload.filename,
-                mime_type=payload.mime_type,
-                caption=caption,
-                business=business,
-            )
-        elif media_kind == "voice":
-            res = send_telegram_bot_voice_upload(
-                chat_id=chat_id,
-                file_bytes=file_bytes,
-                filename=payload.filename,
-                mime_type=payload.mime_type,
-                business=business,
-            )
-        else:
-            res = send_telegram_bot_document_upload(
-                chat_id=chat_id,
-                file_bytes=file_bytes,
-                filename=payload.filename,
-                mime_type=payload.mime_type,
-                caption=caption,
-                business=business,
-            )
+        res = send_telegram_bot_voice_upload(
+            chat_id=chat_id,
+            file_bytes=file_bytes,
+            filename=payload.filename,
+            mime_type=payload.mime_type,
+            business=business,
+        )
         result = safe_json(res) if res is not None else {"error": "Send failed — no bot token configured"}
         ok = res is not None and res.ok
 
         if ok:
             body = result.get("result", {}) if isinstance(result, dict) else {}
             media_file_id = (
-                (body.get("photo", [])[-1].get("file_id", "") if body.get("photo") else "")
-                or body.get("video", {}).get("file_id", "")
-                or body.get("voice", {}).get("file_id")
+                body.get("voice", {}).get("file_id")
                 or body.get("audio", {}).get("file_id")
-                or body.get("document", {}).get("file_id")
                 or ""
             )
             save_telegram_message(
                 business=business,
                 customer_id=customer_id,
-                text=message_text,
+                text="🎤 Voice message",
                 direction="outbound",
                 message_id=body.get("message_id", ""),
                 raw_payload=result,
                 channel=channel or "telegram_bot_private",
                 customer_name=customer_id,
                 chat_id=chat_id,
-                media_type=saved_media_type,
+                media_type="voice",
                 media_file_id=media_file_id,
             )
 
         return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
 
     if platform == "whatsapp":
-        ok, result, media_id = send_whatsapp_media_upload(
+        ok, result, media_id = send_whatsapp_audio_upload(
             to=customer_id,
             file_bytes=file_bytes,
             filename=payload.filename,
             mime_type=payload.mime_type,
-            caption=caption,
             business=business,
-            media_kind=media_kind,
         )
 
         if ok:
@@ -10964,12 +9583,12 @@ async def dashboard_send_media_file(
                 platform="whatsapp",
                 sender_id=get_whatsapp_phone_number_id(business),
                 recipient_id=customer_id,
-                message_text=message_text,
+                message_text="🎤 Voice message",
                 direction="outbound",
                 platform_message_id=result.get("messages", [{}])[0].get("id", ""),
                 raw_payload=result,
                 is_read=True,
-                media_type=saved_media_type,
+                media_type="voice",
                 media_url=get_whatsapp_media_proxy_url(media_id) if media_id else None,
                 channel=channel or "whatsapp",
                 file_name=payload.filename,
@@ -10980,16 +9599,10 @@ async def dashboard_send_media_file(
         return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
 
     if platform == "instagram":
-        media_label = {
-            "photo": "image",
-            "video": "video",
-            "voice": "voice",
-            "file": "file",
-        }.get(media_kind, "media")
         return JSONResponse(
             {
                 "status": "error",
-                "message": f"Instagram {media_label} uploads need public media hosting and a supported attachment URL.",
+                "message": "Instagram voice uploads need public media hosting and a supported attachment URL.",
             },
             status_code=400,
         )
