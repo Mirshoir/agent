@@ -320,6 +320,17 @@ def crop_focus_region(image_bytes: bytes, mode: str) -> bytes:
         return buf.getvalue()
 
 
+def crop_code_region(image_bytes: bytes) -> bytes:
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        image = ImageOps.exif_transpose(image).convert("RGB")
+        width, height = image.size
+        box = (0, int(height * 0.08), int(width * 0.42), int(height * 0.88))
+        cropped = image.crop(box)
+        buf = io.BytesIO()
+        cropped.save(buf, format="JPEG", quality=95)
+        return buf.getvalue()
+
+
 def compute_color_histogram(image_bytes: bytes) -> list[float]:
     with Image.open(io.BytesIO(image_bytes)) as image:
         rgb = ImageOps.exif_transpose(image).convert("RGB").resize((256, 256))
@@ -388,6 +399,20 @@ def find_exact_code_matches(analysis: CustomerImageAnalysis, products: list[Prod
             matches.append(product)
             seen.add(key)
     return matches
+
+
+def has_strong_visible_codes(analysis: CustomerImageAnalysis) -> bool:
+    return any(re.fullmatch(r"[A-Z]{1,4}-?\d{2,6}", normalize_text(code).upper()) for code in analysis.visible_codes)
+
+
+def build_code_not_found_reply(analysis: CustomerImageAnalysis) -> str:
+    visible_codes = [normalize_product_code(code) for code in analysis.visible_codes if normalize_product_code(code)]
+    if visible_codes:
+        return (
+            f"Rasmda {', '.join(visible_codes[:2])} kodi ko'rinmoqda, lekin bu model hozirgi katalog bazamizda topilmadi. "
+            "Aniq narx va mavjudlikni menejerimiz tekshirib beradi."
+        )
+    return "Rasmdagi model kodi katalog bazamizda topilmadi. Aniq narx va mavjudlikni menejerimiz tekshirib beradi."
 
 
 def rank_by_embedding(query_embedding: list[float], products: list[ProductRecord], limit: int) -> list[ProductRecord]:
@@ -488,12 +513,18 @@ def _gemini_post(payload: dict[str, Any], attempts: int = 3) -> dict[str, Any]:
 
 def analyze_customer_image(image_bytes: bytes) -> CustomerImageAnalysis:
     crop = crop_focus_region(image_bytes, mode="customer")
+    code_crop = crop_code_region(image_bytes)
     payload = {
         "contents": [{
             "parts": [
-                {"text": "Extract garment attributes and any visible product text/codes. Focus on the garment only, not the person's face or room. Return JSON."},
+                {"text": (
+                    "Extract garment attributes and any visible product text/codes. "
+                    "Prioritize OCR from catalog labels, especially MODEL and CODE values printed on the image. "
+                    "Use all image crops. Focus on the garment only, not the person's face or room. Return JSON."
+                )},
                 {"inlineData": {"mimeType": detect_mime_type(image_bytes), "data": _b64(image_bytes)}},
                 {"inlineData": {"mimeType": detect_mime_type(crop), "data": _b64(crop)}},
+                {"inlineData": {"mimeType": detect_mime_type(code_crop), "data": _b64(code_crop)}},
             ]
         }],
         "generationConfig": {
@@ -630,6 +661,29 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
         strategy = "exact_code_match"
         matches = [top]
         warning = ""
+    elif has_strong_visible_codes(analysis) and not exact_matches:
+        db_counts = build_database_counts(all_products, scoped_products, visual_products)
+        warning = "Visible product codes were extracted from the image, but those codes do not exist in the current catalog database."
+        return {
+            "context": "\n".join([
+                "Product media analysis (high-priority context for this customer message):",
+                "- Match strategy: code_not_found",
+                f"- Catalog scope: {PRODUCT_MATCHER_CATALOG_SCOPE}",
+                f"- Extracted codes from media: {', '.join(analysis.visible_codes[:8])}",
+                f"- Warning: {warning}",
+                f"- Catalog coverage: {json.dumps(db_counts, ensure_ascii=False)}",
+                "- Do not invent another product code, model, or price. Tell the customer the model needs manual verification.",
+            ]),
+            "reply_hint": build_code_not_found_reply(analysis),
+            "top_score": 0.0,
+            "top_match_code": "",
+            "top_match_model": "",
+            "matches": [],
+            "analysis": asdict(analysis),
+            "database_counts": db_counts,
+            "match_strategy": "code_not_found",
+            "model_warning": warning,
+        }
     else:
         if not visual_products:
             return {}
