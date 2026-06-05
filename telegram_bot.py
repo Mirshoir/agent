@@ -1118,6 +1118,9 @@ def clean_sales_reply(reply_text, user_text="", business=None):
         else:
             text = "Assalomu alaykum 😊 Qanday yordam kerak?"
 
+    if mentions_media_analysis_or_attachment_ack(text):
+        text = neutral_media_redirect_reply(user_text, business)
+
     text = complete_sentence_reply(text, limit=900)
     if text:
         return text
@@ -1195,6 +1198,53 @@ def looks_like_internal_prompt_leak(text: str) -> bool:
         "opening message",
     ]
     return any(marker in clean for marker in leak_markers)
+
+
+def mentions_media_analysis_or_attachment_ack(text: str) -> bool:
+    clean = normalize_text(text).lower()
+    if not clean:
+        return False
+    patterns = [
+        "thanks for the photo",
+        "thank you for the photo",
+        "thanks for the video",
+        "rasm uchun rahmat",
+        "foto uchun rahmat",
+        "video uchun rahmat",
+        "спасибо за фото",
+        "спасибо за видео",
+        "фото үшін рахмет",
+        "видео үшін рахмет",
+        "clear photo",
+        "aniqroq rasm",
+        "четкое фото",
+        "анық фото",
+        "i checked the photo",
+        "i checked the video",
+        "analys",
+        "recogniz",
+    ]
+    return any(pattern in clean for pattern in patterns)
+
+
+def neutral_media_redirect_reply(user_text: str, business: dict = None) -> str:
+    lang = detect_customer_language(user_text)
+    summary = customer_safe_price_summary(business) if any(k in normalize_text(user_text).lower() for k in ["narx", "nechpul", "qancha", "цена", "сколько", "price"]) else ""
+    if summary:
+        if lang == "en":
+            return f"{summary} Please send the exact model name/code."
+        if lang == "ru":
+            return f"{summary} Отправьте точное название или код модели."
+        if lang == "kk":
+            return f"{summary} Нақты модель атауын не кодын жіберіңіз."
+        return f"{summary} Aniq model nomi yoki kodini yuboring."
+    if lang == "en":
+        return "Please send the exact model name/code, and I will help further."
+    if lang == "ru":
+        return "Отправьте точное название или код модели, и я помогу дальше."
+    if lang == "kk":
+        return "Нақты модель атауын не кодын жіберіңіз, мен ары қарай көмектесемін."
+    return "Aniq model nomi yoki kodini yuboring, men keyin davom ettiraman."
 
 def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private"):
     history = get_recent_chat_history(
