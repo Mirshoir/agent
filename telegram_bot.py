@@ -378,6 +378,85 @@ def get_catalog_link(business: dict) -> str:
     return link
 
 
+def wants_business_location(text: str) -> bool:
+    s = normalize_text(text).lower()
+    if not s:
+        return False
+    markers = [
+        "qayerda", "manzil", "address", "location", "where are you", "where located",
+        "joylashgan", "uzbekistan", "o'zbekiston", "uzbekiston", "andijan", "andijon",
+        "адрес", "где вы", "локация", "узбекистан", "андижан",
+    ]
+    return any(marker in s for marker in markers)
+
+
+def extract_business_location_summary(business: dict = None) -> str:
+    business = business or {}
+    combined = "\n".join([
+        normalize_text(business.get("faq")),
+        normalize_text(business.get("knowledge")),
+        normalize_text(business.get("delivery_info")),
+    ]).strip()
+    if not combined:
+        return ""
+    lines = [re.sub(r"\s+", " ", line).strip(" -") for line in combined.splitlines() if normalize_text(line)]
+    location_lines = []
+    for line in lines:
+        lower = line.lower()
+        if lower.endswith("?") or "qayerda" in lower or "address?" in lower or "адрес" == lower.strip():
+            continue
+        if any(token in lower for token in [
+            "manzil", "address", "o'zbekiston", "uzbekiston", "uzbekistan",
+            "andijon", "andijan", "qoratut", "aeroport", "airport",
+            "адрес", "узбекистан", "андижан",
+        ]):
+            location_lines.append(line)
+        if len(location_lines) >= 2:
+            break
+    summary = " ".join(location_lines).strip()
+    summary = re.sub(r"^\d+\.\s*", "", summary)
+    summary = re.sub(r"\s+", " ", summary).strip()
+    return summary[:320]
+
+
+def business_location_reply(user_text: str, business: dict = None) -> str:
+    lang = detect_customer_language(user_text)
+    summary = extract_business_location_summary(business)
+    if summary:
+        return summary
+    if lang == "en":
+        return "Yes, we are located in Uzbekistan, Andijan. Please contact our manager for the exact address details."
+    if lang == "ru":
+        return "Да, мы находимся в Узбекистане, Андижане. За точными деталями адреса можно обратиться к менеджеру."
+    if lang == "kk":
+        return "Иә, біз Өзбекстан, Әндіжан қаласында орналасқанбыз. Нақты мекенжайды менеджер нақтылап береді."
+    return "Ha, biz O'zbekiston, Andijonda joylashganmiz. Aniq manzilni menejerimiz tasdiqlab beradi."
+
+
+def wants_business_scope_intro(text: str) -> bool:
+    s = normalize_text(text).lower()
+    if not s:
+        return False
+    markers = [
+        "which factory", "what factory", "what do you produce", "do you produce", "factory?",
+        "qanaqa fabrika", "qaysi fabrika", "nima ishlab chiqarasiz", "nima tikasiz",
+        "какая фабрика", "что производите", "что шьете",
+    ]
+    return any(marker in s for marker in markers)
+
+
+def business_scope_reply(user_text: str, business: dict = None) -> str:
+    lang = detect_customer_language(user_text)
+    business_name = normalize_text((business or {}).get("business_name")) or "Milana Premium"
+    if lang == "en":
+        return f"{business_name} is a clothing manufacturer in Uzbekistan. We mostly produce women's wear, and we also make kids' and men's clothing."
+    if lang == "ru":
+        return f"{business_name} — швейная фабрика в Узбекистане. В основном мы производим женскую одежду, а также шьем детскую и мужскую одежду."
+    if lang == "kk":
+        return f"{business_name} — Өзбекстандағы тігін фабрикасы. Негізінен әйелдер киімін тігеміз, сонымен қатар балалар мен ерлер киімін де шығарамыз."
+    return f"{business_name} O'zbekistondagi kiyim ishlab chiqaruvchi fabrika. Asosan ayollar kiyimlarini ishlab chiqaramiz, shu bilan birga bolalar va erkaklar kiyimlari ham tikamiz."
+
+
 def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
     catalog_link = get_catalog_link(business)
     if catalog_link and catalog_link in (reply_text or ""):
@@ -1247,6 +1326,12 @@ def neutral_media_redirect_reply(user_text: str, business: dict = None) -> str:
     return "Aniq model nomi yoki kodini yuboring, men keyin davom ettiraman."
 
 def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private"):
+    if wants_business_location(user_text):
+        return business_location_reply(user_text, business)
+
+    if wants_business_scope_intro(user_text):
+        return business_scope_reply(user_text, business)
+
     history = get_recent_chat_history(
         customer_id=customer_id,
         platform="telegram",
