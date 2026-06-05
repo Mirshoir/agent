@@ -28,6 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from supabase import create_client
 from starlette.concurrency import run_in_threadpool
+from audio_transcription import transcribe_audio_bytes
 try:
     import firebase_admin
     from firebase_admin import credentials as firebase_credentials, messaging as firebase_messaging
@@ -368,6 +369,20 @@ class DashboardVoiceFile(BaseModel):
     mime_type: str = "audio/ogg"
 
 
+class DashboardMediaFile(BaseModel):
+    business_id: str = ""
+    conversation_id: str = ""
+    platform: str
+    channel: str = ""
+    customer_id: str
+    chat_id: str = ""
+    caption: str = ""
+    file_data: str
+    filename: str = "attachment.bin"
+    mime_type: str = "application/octet-stream"
+    media_kind: str = ""
+
+
 class BusinessSettingsUpdate(BaseModel):
     business_id: str
     settings: dict
@@ -587,9 +602,95 @@ def extract_customer_name_candidate(text: str) -> str:
             if _looks_like_customer_name(candidate):
                 return candidate
 
+    # Support common lead messages like "Masuma 990851815" or multi-line
+    # "Masuma\\n990851815" where the name is present but mixed with phone digits.
+    compact_source = re.sub(r"\s+", " ", source).strip()
+    leading_name_match = re.match(
+        r"^\s*([A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼ'`-]{2,}(?:\s+[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼ'`-]{2,}){0,3})\s+(?:\+?\d[\d\s().-]{6,}\d)\s*$",
+        compact_source,
+    )
+    if leading_name_match:
+        candidate = normalize_id(leading_name_match.group(1)).strip(" ,.!?:;")
+        if _looks_like_customer_name(candidate):
+            return candidate
+
+    for chunk in re.split(r"[\n,;|/]+", source):
+        candidate = normalize_id(chunk).strip(" ,.!?:;")
+        if _looks_like_customer_name(candidate):
+            return candidate
+
     if _looks_like_customer_name(source):
         return source
     return ""
+
+
+def extract_lead_state_from_payload(
+    raw_payload: dict = None,
+    current_state: dict = None,
+    customer_name_hint: str = "",
+    message_id: str = "",
+) -> dict:
+    state = normalize_lead_state(current_state)
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
+    if not payload:
+        return state
+
+    phone_values = []
+    name_values = []
+
+    def collect(value, key_hint: str = ""):
+        hint = normalize_id(key_hint).lower()
+        if isinstance(value, dict):
+            for nested_key, nested_value in value.items():
+                collect(nested_value, nested_key)
+            return
+        if isinstance(value, list):
+            for item in value:
+                collect(item, key_hint)
+            return
+        if not isinstance(value, str):
+            return
+
+        text_value = normalize_id(value).strip()
+        if not text_value:
+            return
+
+        if any(token in hint for token in ("phone", "tel", "number", "mobile", "contact_number")):
+            phone_values.append(text_value)
+        elif any(token in hint for token in ("full_name", "display_name", "first_name", "last_name", "contact_name", "name")) and "username" not in hint:
+            name_values.append(text_value)
+        elif any(marker in text_value.lower() for marker in ("phone", "telefon", "raqam", "номер")):
+            phone_values.append(text_value)
+            name_values.append(text_value)
+
+    collect(payload)
+
+    for candidate in phone_values:
+        matches = extract_phone_candidates(candidate)
+        if matches:
+            state["phone"] = matches[0]
+            state["phone_collected"] = True
+            break
+
+    for candidate in name_values:
+        extracted = extract_customer_name_candidate(candidate)
+        if extracted:
+            state["customer_name"] = extracted
+            state["name_collected"] = True
+            break
+
+    if (not state.get("name_collected")) and customer_name_hint:
+        hinted_name = normalize_id(customer_name_hint)
+        if hinted_name and not _looks_like_generated_instagram_name(hinted_name) and _looks_like_customer_name(hinted_name):
+            state["customer_name"] = hinted_name
+            state["name_collected"] = True
+
+    if message_id:
+        state["last_message_id"] = normalize_id(message_id)
+    if phone_values or name_values:
+        state["last_lead_update"] = datetime.utcnow().isoformat()
+
+    return normalize_lead_state(state)
 
 
 def normalize_lead_state(state: dict = None) -> dict:
@@ -750,6 +851,7 @@ def derive_customer_lead_state(
     channel: str = "",
     recent_rows: list = None,
     current_text: str = "",
+    current_raw_payload: dict = None,
     customer_name_hint: str = "",
     message_id: str = "",
 ) -> dict:
@@ -776,6 +878,12 @@ def derive_customer_lead_state(
             if row_name and not _looks_like_generated_instagram_name(row_name) and _looks_like_customer_name(row_name):
                 row_state["customer_name"] = row_name
                 row_state["name_collected"] = True
+        row_state = extract_lead_state_from_payload(
+            row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {},
+            row_state,
+            row_name,
+            row.get("external_message_id"),
+        )
         state = normalize_lead_state({
             **state,
             **row_state,
@@ -783,6 +891,7 @@ def derive_customer_lead_state(
 
     if current_text or customer_name_hint:
         state = extract_lead_state_from_text(current_text, state, customer_name_hint, message_id)
+    state = extract_lead_state_from_payload(current_raw_payload, state, customer_name_hint, message_id)
 
     if state.get("customer_name") and _looks_like_generated_instagram_name(state.get("customer_name")):
         state["name_collected"] = False
@@ -1762,7 +1871,7 @@ def decode_upload_data(file_data: str, max_bytes: int = 10 * 1024 * 1024):
         raise ValueError("Empty file upload")
 
     if len(decoded) > max_bytes:
-        raise ValueError("File is too large. Maximum upload size is 10 MB.")
+        raise ValueError(f"File is too large. Maximum upload size is {max(1, round(max_bytes / (1024 * 1024)))} MB.")
 
     return decoded
 
@@ -2150,6 +2259,8 @@ def display_name_from_instagram_profile(profile: dict, fallback: str = "") -> st
         return fallback
     username = normalize_id(profile.get("username"))
     name = normalize_id(profile.get("name"))
+    if name and not _looks_like_numeric_id(name) and not _looks_like_generated_instagram_name(name):
+        return name
     if username:
         return username
     if name and not _looks_like_numeric_id(name):
@@ -4232,15 +4343,15 @@ def contains_forbidden_product_photo_question(text: str) -> bool:
 
 def generic_price_fallback_reply(user_text: str, business: dict = None) -> str:
     lang = detect_customer_language(user_text)
-    prices = normalize_id((business or {}).get("prices"))
-    if prices:
+    summary = customer_safe_price_summary(business)
+    if summary:
         if lang == "en":
-            return f"Our current price information: {prices}. Which product/model do you need?"
+            return f"{summary} Which product/model do you need?"
         if lang == "ru":
-            return f"Актуальная информация по ценам: {prices}. Какая модель или товар вам нужен?"
+            return f"{summary} Какая модель или товар вам нужен?"
         if lang == "kk":
-            return f"Қазіргі баға мәліметі: {prices}. Қай тауар немесе модель керек?"
-        return f"Narx bo'yicha ma'lumot: {prices}. Sizga qaysi mahsulot yoki model kerak?"
+            return f"{summary} Қай тауар немесе модель керек?"
+        return f"{summary} Sizga qaysi mahsulot yoki model kerak?"
 
     if lang == "en":
         return "Our manager will confirm the exact price. Which product/model do you need?"
@@ -4249,6 +4360,74 @@ def generic_price_fallback_reply(user_text: str, business: dict = None) -> str:
     if lang == "kk":
         return "Нақты бағаны менеджер растайды. Қай тауар немесе модель керек?"
     return "Aniq narxni menejerimiz tasdiqlaydi. Sizga qaysi mahsulot yoki model kerak?"
+
+
+def _extract_first_price_range(raw_text: str) -> str:
+    text = normalize_id(raw_text)
+    if not text:
+        return ""
+    match = re.search(r"(\d[\d\s]{0,6}(?:[–-]\d[\d\s]{0,6}))\s*(\$|usd|dollar|dollor|доллар|so['’]?m|sum)?", text, re.IGNORECASE)
+    if not match:
+        match = re.search(r"(?<!\+)(\d{2,6})\s*(\$|usd|dollar|dollor|доллар|so['’]?m|sum)", text, re.IGNORECASE)
+    if not match:
+        return ""
+    amount = re.sub(r"\s+", "", match.group(1) or "")
+    currency = normalize_id(match.group(2))
+    return f"{amount} {currency}".strip()
+
+
+def customer_safe_price_summary(business: dict = None) -> str:
+    business = business or {}
+    raw_prices = normalize_id(business.get("prices"))
+    if not raw_prices:
+        return ""
+
+    lower = raw_prices.lower()
+    phone = normalize_id(business.get("sales_phone"))
+    approx_price = _extract_first_price_range(raw_prices)
+    has_internal_rules = any(marker in lower for marker in [
+        "bot ",
+        "bot-",
+        "mijozni",
+        "yo'naltir",
+        "aytmasin",
+        "so'rasa",
+        "menejerimiz",
+        "sotuvch",
+        "minimal buyurtma",
+    ])
+
+    if has_internal_rules:
+        if approx_price and phone:
+            return f"Taxminiy narx {approx_price} atrofida. Aniq narx bo'yicha menejer yordam beradi: {phone}."
+        if approx_price:
+            return f"Taxminiy narx {approx_price} atrofida. Aniq narx modelga qarab tasdiqlanadi."
+        if phone:
+            return f"Aniq narxni menejer tasdiqlaydi: {phone}."
+        return "Aniq narx modelga va buyurtmaga qarab tasdiqlanadi."
+
+    first_sentence = re.split(r"(?<=[.!?])\s+|\n+", raw_prices)[0].strip(" -")
+    first_sentence = re.sub(r"\s+", " ", first_sentence).strip()
+    return first_sentence[:220] if first_sentence else ""
+
+
+def looks_like_internal_prompt_leak(text: str) -> bool:
+    clean = normalize_id(text).lower()
+    if not clean:
+        return False
+    leak_markers = [
+        "bot aniq narx aytmasin",
+        "narx so'ragan mijozni",
+        "mijozni telegram",
+        "mijozni sotuv agentiga",
+        "bot:",
+        "do not",
+        "you are a real human sales assistant",
+        "ai reply rules",
+        "business facts",
+        "opening message",
+    ]
+    return any(marker in clean for marker in leak_markers)
 
 
 def product_media_price_fallback_reply(user_text: str, business: dict = None) -> str:
@@ -4260,6 +4439,35 @@ def product_media_price_fallback_reply(user_text: str, business: dict = None) ->
     if lang == "kk":
         return "Фото үшін рахмет. Бұл модельдің нақты бағасын нақтылау керек. Қай өлшем немесе қанша дана қызықтырады?"
     return "Rasm uchun rahmat. Bu modelning aniq narxini tekshirib aytamiz. Qaysi razmer yoki nechta kerak?"
+
+
+def product_media_unverified_followup_reply(user_text: str, business: dict = None) -> str:
+    lang = detect_customer_language(user_text)
+    if wants_deal_handoff(user_text):
+        if lang == "en":
+            return "Understood. Please send the exact model or one more clear photo, and our manager will confirm the wholesale price and availability."
+        if lang == "ru":
+            return "Понял. Отправьте точную модель или еще одно четкое фото, и наш менеджер подтвердит оптовую цену и наличие."
+        if lang == "kk":
+            return "Түсіндім. Дәл моделін немесе тағы бір анық фото жіберіңіз, менеджеріміз көтерме баға мен қолжетімділікті нақтылап береді."
+        return "Tushundim. Aniq modelini yoki yana bitta aniqroq rasm yuboring, menejerimiz optim narx va mavjudligini tekshirib aytadi."
+
+    if wants_catalog(user_text):
+        if lang == "en":
+            return "Of course. Please send the exact model or one more clear photo, and I will check the right item for you."
+        if lang == "ru":
+            return "Конечно. Отправьте точную модель или еще одно четкое фото, и я проверю нужный товар."
+        if lang == "kk":
+            return "Әрине. Дәл моделін немесе тағы бір анық фото жіберіңіз, мен керек тауарды нақтылап беремін."
+        return "Albatta. Aniq modelini yoki yana bitta aniqroq rasm yuboring, kerakli mahsulotni tekshirib aytaman."
+
+    if lang == "en":
+        return "Understood. Please send the exact model or one more clear photo, and I will confirm the price and availability."
+    if lang == "ru":
+        return "Понял. Отправьте точную модель или еще одно четкое фото, и я подтвержу цену и наличие."
+    if lang == "kk":
+        return "Түсіндім. Дәл моделін немесе тағы бір анық фото жіберіңіз, мен бағасы мен қолжетімділігін нақтылаймын."
+    return "Tushundim. Aniq modelini yoki yana bitta aniqroq rasm yuboring, narxi va mavjudligini tekshirib aytaman."
 
 
 def business_products_summary(business: dict = None, limit: int = 4) -> str:
@@ -5010,6 +5218,10 @@ def clean_sales_reply(reply_text: str, user_text: str = "", business: dict = Non
         return "Tushunarli 😊 Muammo emas, qachon qulay bo'lsa yozing."
 
     text = normalize_id(reply_text)
+    if looks_like_internal_prompt_leak(text):
+        text = generic_price_fallback_reply(user_text, business) if is_price_question(user_text) else (
+            lead_followup_reply(user_text, business, lead_state) or "Xabaringiz qabul qilindi 😊"
+        )
     if not text:
         if lang == "en":
             return "Your message has been received."
@@ -6607,6 +6819,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             "dm",
             recent_rows=recent_lead_rows,
             current_text=message_text,
+            current_raw_payload=messaging,
             customer_name_hint=customer_display_name,
             message_id=message_id,
         )
@@ -6931,6 +7144,15 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                     "Answer with a short price-confirmation fallback and do not ask for name or phone."
                 )
                 force_direct_media_reply = True
+            elif recent_media_context_found:
+                media_reply_hint = product_media_unverified_followup_reply(message_text, business)
+                media_match_context = (
+                    "The customer is continuing a recent product-photo conversation, "
+                    "but the product matcher still does not have a verified catalog match. "
+                    "Reply with a short helpful fallback, keep it in the customer's language, "
+                    "and ask for the exact model or a clearer photo instead of staying silent."
+                )
+                force_direct_media_reply = True
             else:
                 log("Instagram DM skipped auto-reply: no verified media match", {
                     "customer_id": sender_id,
@@ -7211,10 +7433,72 @@ def send_whatsapp_text(to: str, text: str, business: dict = None):
     return res
 
 
-def send_whatsapp_image_upload(to: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = "",
-                               business: dict = None):
+def infer_media_kind(mime_type: str = "", filename: str = "", requested_kind: str = ""):
+    requested = normalize_id(requested_kind).lower()
+    if requested in {"photo", "image", "video", "voice", "audio", "file", "document"}:
+        return "photo" if requested == "image" else ("file" if requested == "document" else requested)
+
+    guessed_mime = normalize_id(mime_type).lower()
+    guessed_name = normalize_id(filename).lower()
+
+    if guessed_mime.startswith("image/"):
+        return "photo"
+    if guessed_mime.startswith("video/"):
+        return "video"
+    if guessed_mime.startswith("audio/"):
+        return "voice"
+    if guessed_mime.startswith("application/"):
+        return "file"
+
+    ext = os.path.splitext(guessed_name)[1].lower()
+    if ext in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".heic", ".heif"}:
+        return "photo"
+    if ext in {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}:
+        return "video"
+    if ext in {".ogg", ".oga", ".opus", ".mp3", ".m4a", ".wav", ".aac"}:
+        return "voice"
+    return "file"
+
+
+def default_media_text(media_kind: str, filename: str = ""):
+    labels = {
+        "photo": "📸 Photo",
+        "video": "🎥 Video",
+        "voice": "🎤 Voice message",
+        "audio": "🎤 Audio",
+        "file": "📎 Document",
+    }
+    if media_kind == "file" and normalize_id(filename):
+        return normalize_id(filename)
+    return labels.get(media_kind, "📎 Attachment")
+
+
+def normalize_saved_media_type(media_kind: str):
+    return {
+        "photo": "photo",
+        "video": "video",
+        "voice": "voice",
+        "audio": "voice",
+        "file": "file",
+    }.get(media_kind, "file")
+
+
+def whatsapp_payload_key(media_kind: str):
+    return {
+        "photo": "image",
+        "video": "video",
+        "voice": "audio",
+        "audio": "audio",
+        "file": "document",
+    }.get(media_kind, "document")
+
+
+def send_whatsapp_media_upload(to: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = "",
+                               business: dict = None, media_kind: str = ""):
     token = get_whatsapp_access_token(business)
     phone_number_id = get_whatsapp_phone_number_id(business)
+    media_kind = infer_media_kind(mime_type, filename, media_kind)
+    payload_type = whatsapp_payload_key(media_kind)
 
     if not token or not phone_number_id:
         return False, {"error": "Missing WhatsApp access token or phone number id"}, ""
@@ -7224,14 +7508,14 @@ def send_whatsapp_image_upload(to: str, file_bytes: bytes, filename: str, mime_t
         headers={"Authorization": f"Bearer {token}"},
         data={
             "messaging_product": "whatsapp",
-            "type": mime_type or "image/jpeg",
+            "type": mime_type or "application/octet-stream",
         },
-        files={"file": (filename or "image.jpg", file_bytes, mime_type or "image/jpeg")},
+        files={"file": (filename or "attachment.bin", file_bytes, mime_type or "application/octet-stream")},
         timeout=60,
     )
 
     upload_result = safe_json(upload_res)
-    log("WhatsApp media upload", {"status": upload_res.status_code, "body": upload_result})
+    log("WhatsApp media upload", {"kind": media_kind, "status": upload_res.status_code, "body": upload_result})
 
     if not upload_res.ok:
         return False, upload_result, ""
@@ -7240,75 +7524,61 @@ def send_whatsapp_image_upload(to: str, file_bytes: bytes, filename: str, mime_t
     if not media_id:
         return False, {"error": "WhatsApp media upload returned no media id", "meta": upload_result}, ""
 
+    json_payload = {
+        "messaging_product": "whatsapp",
+        "to": normalize_id(to),
+        "type": payload_type,
+    }
+    if payload_type == "image":
+        json_payload["image"] = {"id": media_id, **({"caption": caption[:1024]} if caption else {})}
+    elif payload_type == "video":
+        json_payload["video"] = {"id": media_id, **({"caption": caption[:1024]} if caption else {})}
+    elif payload_type == "document":
+        json_payload["document"] = {
+            "id": media_id,
+            "filename": filename or "attachment",
+            **({"caption": caption[:1024]} if caption else {}),
+        }
+    else:
+        json_payload["audio"] = {"id": media_id}
+
     send_res = requests.post(
         f"{GRAPH_FACEBOOK}/{phone_number_id}/messages",
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         },
-        json={
-            "messaging_product": "whatsapp",
-            "to": normalize_id(to),
-            "type": "image",
-            "image": {
-                "id": media_id,
-                **({"caption": caption[:1024]} if caption else {}),
-            },
-        },
+        json=json_payload,
         timeout=30,
     )
 
     send_result = safe_json(send_res)
-    log("WhatsApp image send", {"status": send_res.status_code, "body": send_result})
+    log("WhatsApp media send", {"kind": media_kind, "status": send_res.status_code, "body": send_result})
     return send_res.ok, send_result, media_id
+
+
+def send_whatsapp_image_upload(to: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = "",
+                               business: dict = None):
+    return send_whatsapp_media_upload(
+        to=to,
+        file_bytes=file_bytes,
+        filename=filename,
+        mime_type=mime_type,
+        caption=caption,
+        business=business,
+        media_kind="photo",
+    )
 
 
 def send_whatsapp_audio_upload(to: str, file_bytes: bytes, filename: str, mime_type: str, business: dict = None):
-    token = get_whatsapp_access_token(business)
-    phone_number_id = get_whatsapp_phone_number_id(business)
-
-    if not token or not phone_number_id:
-        return False, {"error": "Missing WhatsApp access token or phone number id"}, ""
-
-    upload_res = requests.post(
-        f"{GRAPH_FACEBOOK}/{phone_number_id}/media",
-        headers={"Authorization": f"Bearer {token}"},
-        data={
-            "messaging_product": "whatsapp",
-            "type": mime_type or "audio/ogg",
-        },
-        files={"file": (filename or "voice.ogg", file_bytes, mime_type or "audio/ogg")},
-        timeout=60,
+    return send_whatsapp_media_upload(
+        to=to,
+        file_bytes=file_bytes,
+        filename=filename,
+        mime_type=mime_type,
+        business=business,
+        media_kind="voice",
     )
-
-    upload_result = safe_json(upload_res)
-    log("WhatsApp audio upload", {"status": upload_res.status_code, "body": upload_result})
-
-    if not upload_res.ok:
-        return False, upload_result, ""
-
-    media_id = upload_result.get("id", "")
-    if not media_id:
-        return False, {"error": "WhatsApp audio upload returned no media id", "meta": upload_result}, ""
-
-    send_res = requests.post(
-        f"{GRAPH_FACEBOOK}/{phone_number_id}/messages",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "messaging_product": "whatsapp",
-            "to": normalize_id(to),
-            "type": "audio",
-            "audio": {"id": media_id},
-        },
-        timeout=30,
-    )
-
-    send_result = safe_json(send_res)
-    log("WhatsApp audio send", {"status": send_res.status_code, "body": send_result})
-    return send_res.ok, send_result, media_id
 
 
 def send_telegram_bot_photo_upload(chat_id: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = "", business: dict = None):
@@ -7343,8 +7613,86 @@ def send_telegram_bot_voice_upload(chat_id: str, file_bytes: bytes, filename: st
     )
 
 
+def send_telegram_bot_video_upload(chat_id: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = "", business: dict = None):
+    token = get_telegram_bot_token(business)
+
+    if not token:
+        return None
+
+    data = {"chat_id": chat_id}
+    if caption:
+        data["caption"] = caption[:1024]
+
+    return requests.post(
+        f"https://api.telegram.org/bot{token}/sendVideo",
+        data=data,
+        files={"video": (filename or "video.mp4", file_bytes, mime_type or "video/mp4")},
+        timeout=60,
+    )
+
+
+def send_telegram_bot_document_upload(chat_id: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = "", business: dict = None):
+    token = get_telegram_bot_token(business)
+
+    if not token:
+        return None
+
+    data = {"chat_id": chat_id}
+    if caption:
+        data["caption"] = caption[:1024]
+
+    return requests.post(
+        f"https://api.telegram.org/bot{token}/sendDocument",
+        data=data,
+        files={"document": (filename or "attachment.bin", file_bytes, mime_type or "application/octet-stream")},
+        timeout=60,
+    )
+
+
 def get_whatsapp_media_proxy_url(media_id: str):
     return f"{PUBLIC_BASE_URL}/api/whatsapp/media/{media_id}"
+
+
+def fetch_whatsapp_media_bytes(media_id: str, business: dict = None):
+    token = get_whatsapp_access_token(business)
+    clean_media_id = normalize_id(media_id)
+    if not token or not clean_media_id:
+        return b"", "", ""
+
+    meta_res = requests.get(
+        f"{GRAPH_FACEBOOK}/{clean_media_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30,
+    )
+    if not meta_res.ok:
+        log("WhatsApp media meta failed", {"media_id": clean_media_id, "status": meta_res.status_code, "body": meta_res.text[:500]})
+        return b"", "", ""
+
+    meta = safe_json(meta_res)
+    media_url = normalize_id(meta.get("url"))
+    mime_type = normalize_id(meta.get("mime_type"))
+    filename = normalize_id(meta.get("sha256")) or f"whatsapp-{clean_media_id}"
+    if not media_url:
+        return b"", mime_type, filename
+
+    file_res = requests.get(
+        media_url,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=60,
+    )
+    if not file_res.ok:
+        log("WhatsApp media download failed", {"media_id": clean_media_id, "status": file_res.status_code, "body": file_res.text[:500]})
+        return b"", mime_type, filename
+
+    return file_res.content or b"", mime_type or file_res.headers.get("Content-Type", ""), filename
+
+
+def append_voice_transcript(message_text: str, transcript: str):
+    base = normalize_text(message_text)
+    clean_transcript = normalize_text(transcript)
+    if not clean_transcript:
+        return base
+    return f"{base}\nTranscript: {clean_transcript}" if base else f"Transcript: {clean_transcript}"
 
 
 def cleanup_whatsapp_chat_memory(ttl_seconds: int = 24 * 60 * 60):
@@ -7494,7 +7842,7 @@ async def process_whatsapp_message(change: dict):
                 media_type = {
                     "image": "photo",
                     "video": "video",
-                    "audio": "audio",
+                    "audio": "voice",
                     "document": "file",
                     "sticker": "photo",
                 }.get(msg_type, "file")
@@ -7511,6 +7859,17 @@ async def process_whatsapp_message(change: dict):
 
                 if whatsapp_media_id:
                     media_url = get_whatsapp_media_proxy_url(whatsapp_media_id)
+                    if msg_type == "audio":
+                        audio_bytes, audio_mime, audio_name = fetch_whatsapp_media_bytes(whatsapp_media_id, business)
+                        transcript = transcribe_audio_bytes(
+                            audio_bytes,
+                            filename=audio_name or file_name or f"{message_id}.ogg",
+                            mime_type=audio_mime or mime_type or "audio/ogg",
+                            api_key=business.get("openai_api_key") or OPENAI_API_KEY,
+                            prompt="Transcribe customer voice messages clearly and keep the original language.",
+                            logger=log,
+                        )
+                        text = append_voice_transcript(text, transcript)
 
             elif msg_type == "button":
                 text = msg.get("button", {}).get("text", "")
@@ -10204,138 +10563,47 @@ async def dashboard_send_image_file(
         authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    clean_business_id = normalize_id(payload.business_id)
-    if clean_business_id and not can_access_business(access, clean_business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    if not str(payload.mime_type or "").startswith("image/"):
-        return JSONResponse({"status": "error", "message": "Only image files are supported right now"}, status_code=400)
-
-    try:
-        file_bytes = decode_upload_data(payload.file_data)
-    except ValueError as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
-
-    business = get_business_by_id(clean_business_id) if clean_business_id else get_active_business()
-    if not business:
-        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-    if not can_access_business(access, normalize_id(business.get("id"))):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    customer_id = normalize_id(payload.customer_id)
-    chat_id = normalize_id(payload.chat_id or payload.customer_id)
-    caption = (payload.caption or "").strip()
-    platform = normalize_id(payload.platform).lower()
-    channel = normalize_id(payload.channel)
-
-    if not customer_id:
-        return JSONResponse({"status": "error", "message": "Missing customer_id"}, status_code=400)
-
-    if platform == "telegram" and channel == "telegram_user_private":
-        ok, result = await send_telegram_user_file(
-            customer_id=customer_id,
-            file_bytes=file_bytes,
-            filename=payload.filename,
-            caption=caption,
-        )
-
-        if ok:
-            save_telegram_message(
-                business=business,
-                customer_id=customer_id,
-                text=caption or "📸 Photo",
-                direction="outbound",
-                message_id=result.get("message_id", ""),
-                raw_payload=result,
-                channel="telegram_user_private",
-                customer_name=result.get("customer_name", customer_id),
-                chat_id=result.get("chat_id", chat_id),
-                media_type="photo",
-            )
-
-        return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
-
-    if platform == "telegram":
-        res = send_telegram_bot_photo_upload(
-            chat_id=chat_id,
-            file_bytes=file_bytes,
-            filename=payload.filename,
-            mime_type=payload.mime_type,
-            caption=caption,
-            business=business,
-        )
-        result = safe_json(res) if res is not None else {"error": "Send failed — no bot token configured"}
-        ok = res is not None and res.ok
-
-        if ok:
-            photos = result.get("result", {}).get("photo", []) if isinstance(result, dict) else []
-            media_file_id = photos[-1].get("file_id", "") if photos else ""
-            save_telegram_message(
-                business=business,
-                customer_id=customer_id,
-                text=caption or "📸 Photo",
-                direction="outbound",
-                message_id=result.get("result", {}).get("message_id", ""),
-                raw_payload=result,
-                channel=channel or "telegram_bot_private",
-                customer_name=customer_id,
-                chat_id=chat_id,
-                media_type="photo",
-                media_file_id=media_file_id,
-            )
-
-        return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
-
-    if platform == "whatsapp":
-        ok, result, media_id = send_whatsapp_image_upload(
-            to=customer_id,
-            file_bytes=file_bytes,
-            filename=payload.filename,
-            mime_type=payload.mime_type,
-            caption=caption,
-            business=business,
-        )
-
-        if ok:
-            save_inbox_message(
-                business=business,
-                platform="whatsapp",
-                sender_id=get_whatsapp_phone_number_id(business),
-                recipient_id=customer_id,
-                message_text=caption or "📸 Photo",
-                direction="outbound",
-                platform_message_id=result.get("messages", [{}])[0].get("id", ""),
-                raw_payload=result,
-                is_read=True,
-                media_type="photo",
-                media_url=get_whatsapp_media_proxy_url(media_id) if media_id else None,
-                channel=channel or "whatsapp",
-                file_name=payload.filename,
-                mime_type=payload.mime_type,
-                whatsapp_media_id=media_id,
-            )
-
-        return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
-
-    if platform == "instagram":
-        return JSONResponse(
-            {
-                "status": "error",
-                "message": "Instagram image uploads need public media hosting. Add Supabase Storage/S3, then send the public URL through Instagram DM.",
-            },
-            status_code=400,
-        )
-
-    return JSONResponse({"status": "error", "message": "Unknown platform"}, status_code=400)
+    generic_payload = DashboardMediaFile(
+        business_id=payload.business_id,
+        conversation_id=payload.conversation_id,
+        platform=payload.platform,
+        channel=payload.channel,
+        customer_id=payload.customer_id,
+        chat_id=payload.chat_id,
+        caption=payload.caption,
+        file_data=payload.file_data,
+        filename=payload.filename,
+        mime_type=payload.mime_type,
+        media_kind="photo",
+    )
+    return await dashboard_send_media_file(generic_payload, authorization, x_dashboard_secret)
 
 
 @app.post("/dashboard/send-voice-file")
 async def dashboard_send_voice_file(
         payload: DashboardVoiceFile,
+        authorization: str = Header(default=""),
+        x_dashboard_secret: str = Header(default=""),
+):
+    generic_payload = DashboardMediaFile(
+        business_id=payload.business_id,
+        conversation_id=payload.conversation_id,
+        platform=payload.platform,
+        channel=payload.channel,
+        customer_id=payload.customer_id,
+        chat_id=payload.chat_id,
+        caption="",
+        file_data=payload.file_data,
+        filename=payload.filename,
+        mime_type=payload.mime_type,
+        media_kind="voice",
+    )
+    return await dashboard_send_media_file(generic_payload, authorization, x_dashboard_secret)
+
+
+@app.post("/dashboard/send-media-file")
+async def dashboard_send_media_file(
+        payload: DashboardMediaFile,
         authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
@@ -10347,15 +10615,20 @@ async def dashboard_send_voice_file(
     if clean_business_id and not can_access_business(access, clean_business_id):
         return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
 
-    if not str(payload.mime_type or "").startswith("audio/"):
+    media_kind = infer_media_kind(payload.mime_type, payload.filename, payload.media_kind)
+    if media_kind == "voice" and not str(payload.mime_type or "").startswith("audio/"):
         return JSONResponse({"status": "error", "message": "Only audio files are supported for voice notes"}, status_code=400)
 
     try:
-        file_bytes = decode_upload_data(payload.file_data)
+        file_bytes = decode_upload_data(payload.file_data, max_bytes=25 * 1024 * 1024)
     except ValueError as exc:
         return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
 
-    business = get_business_by_id(clean_business_id) if clean_business_id else get_active_business()
+    try:
+        business = get_business_by_id(clean_business_id) if clean_business_id else get_active_business()
+    except Exception as exc:
+        log("Dashboard media business lookup failed", str(exc))
+        return JSONResponse({"status": "error", "message": "Business lookup failed. Check local Supabase/backend configuration."}, status_code=503)
     if not business:
         return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
     if not can_access_business(access, normalize_id(business.get("id"))):
@@ -10363,76 +10636,120 @@ async def dashboard_send_voice_file(
 
     customer_id = normalize_id(payload.customer_id)
     chat_id = normalize_id(payload.chat_id or payload.customer_id)
+    caption = (payload.caption or "").strip()
     platform = normalize_id(payload.platform).lower()
     channel = normalize_id(payload.channel)
+    message_text = caption or default_media_text(media_kind, payload.filename)
+    saved_media_type = normalize_saved_media_type(media_kind)
 
     if not customer_id:
         return JSONResponse({"status": "error", "message": "Missing customer_id"}, status_code=400)
 
     if platform == "telegram" and channel == "telegram_user_private":
-        ok, result = await send_telegram_user_voice_file(
-            customer_id=customer_id,
-            file_bytes=file_bytes,
-            filename=payload.filename,
-        )
+        if media_kind == "voice":
+            ok, result = await send_telegram_user_voice_file(
+                customer_id=customer_id,
+                file_bytes=file_bytes,
+                filename=payload.filename,
+            )
+        else:
+            ok, result = await send_telegram_user_file(
+                customer_id=customer_id,
+                file_bytes=file_bytes,
+                filename=payload.filename,
+                caption=caption,
+            )
 
         if ok:
             save_telegram_message(
                 business=business,
                 customer_id=customer_id,
-                text="🎤 Voice message",
+                text=message_text,
                 direction="outbound",
                 message_id=result.get("message_id", ""),
                 raw_payload=result,
                 channel="telegram_user_private",
                 customer_name=result.get("customer_name", customer_id),
                 chat_id=result.get("chat_id", chat_id),
-                media_type="voice",
+                media_type=saved_media_type,
             )
 
         return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
 
     if platform == "telegram":
-        res = send_telegram_bot_voice_upload(
-            chat_id=chat_id,
-            file_bytes=file_bytes,
-            filename=payload.filename,
-            mime_type=payload.mime_type,
-            business=business,
-        )
+        if media_kind == "photo":
+            res = send_telegram_bot_photo_upload(
+                chat_id=chat_id,
+                file_bytes=file_bytes,
+                filename=payload.filename,
+                mime_type=payload.mime_type,
+                caption=caption,
+                business=business,
+            )
+        elif media_kind == "video":
+            res = send_telegram_bot_video_upload(
+                chat_id=chat_id,
+                file_bytes=file_bytes,
+                filename=payload.filename,
+                mime_type=payload.mime_type,
+                caption=caption,
+                business=business,
+            )
+        elif media_kind == "voice":
+            res = send_telegram_bot_voice_upload(
+                chat_id=chat_id,
+                file_bytes=file_bytes,
+                filename=payload.filename,
+                mime_type=payload.mime_type,
+                business=business,
+            )
+        else:
+            res = send_telegram_bot_document_upload(
+                chat_id=chat_id,
+                file_bytes=file_bytes,
+                filename=payload.filename,
+                mime_type=payload.mime_type,
+                caption=caption,
+                business=business,
+            )
         result = safe_json(res) if res is not None else {"error": "Send failed — no bot token configured"}
         ok = res is not None and res.ok
 
         if ok:
             body = result.get("result", {}) if isinstance(result, dict) else {}
             media_file_id = (
-                body.get("voice", {}).get("file_id")
+                (body.get("photo", [])[-1].get("file_id", "") if body.get("photo") else "")
+                or body.get("video", {}).get("file_id", "")
+                or body.get("voice", {}).get("file_id")
                 or body.get("audio", {}).get("file_id")
+                or body.get("document", {}).get("file_id")
                 or ""
             )
             save_telegram_message(
                 business=business,
                 customer_id=customer_id,
-                text="🎤 Voice message",
+                text=message_text,
                 direction="outbound",
                 message_id=body.get("message_id", ""),
                 raw_payload=result,
                 channel=channel or "telegram_bot_private",
                 customer_name=customer_id,
                 chat_id=chat_id,
-                media_type="voice",
+                media_type=saved_media_type,
                 media_file_id=media_file_id,
             )
 
         return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
 
     if platform == "whatsapp":
-        ok, result, media_id = send_whatsapp_audio_upload(
+        ok, result, media_id = send_whatsapp_media_upload(
             to=customer_id,
             file_bytes=file_bytes,
             filename=payload.filename,
             mime_type=payload.mime_type,
+            caption=caption,
             business=business,
+            media_kind=media_kind,
         )
 
         if ok:
@@ -10441,12 +10758,12 @@ async def dashboard_send_voice_file(
                 platform="whatsapp",
                 sender_id=get_whatsapp_phone_number_id(business),
                 recipient_id=customer_id,
-                message_text="🎤 Voice message",
+                message_text=message_text,
                 direction="outbound",
                 platform_message_id=result.get("messages", [{}])[0].get("id", ""),
                 raw_payload=result,
                 is_read=True,
-                media_type="voice",
+                media_type=saved_media_type,
                 media_url=get_whatsapp_media_proxy_url(media_id) if media_id else None,
                 channel=channel or "whatsapp",
                 file_name=payload.filename,
@@ -10457,10 +10774,16 @@ async def dashboard_send_voice_file(
         return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
 
     if platform == "instagram":
+        media_label = {
+            "photo": "image",
+            "video": "video",
+            "voice": "voice",
+            "file": "file",
+        }.get(media_kind, "media")
         return JSONResponse(
             {
                 "status": "error",
-                "message": "Instagram voice uploads need public media hosting and a supported attachment URL.",
+                "message": f"Instagram {media_label} uploads need public media hosting and a supported attachment URL.",
             },
             status_code=400,
         )
