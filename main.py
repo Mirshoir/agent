@@ -4261,6 +4261,10 @@ def clean_sales_reply(reply_text: str, user_text: str = "", business: dict = Non
             return "Ваше сообщение получено."
         return "Xabaringiz qabul qilindi 😊"
 
+    if looks_like_internal_prompt_leak(text):
+        log("Prompt leak blocked", {"reply_preview": text[:300], "user_text": user_text[:120]})
+        return safe_prompt_leak_fallback(user_text, business, lead_state)
+
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
     text = re.sub(r"__([^_]+)__", r"\1", text)
     text = re.sub(r"^[\-•]+\s*", "", text, flags=re.MULTILINE)
@@ -4339,6 +4343,10 @@ def clean_sales_reply(reply_text: str, user_text: str = "", business: dict = Non
         else:
             text = "Assalomu alaykum 😊 Qanday yordam kerak?"
 
+    if looks_like_internal_prompt_leak(text):
+        log("Prompt leak blocked after cleanup", {"reply_preview": text[:300], "user_text": user_text[:120]})
+        return safe_prompt_leak_fallback(user_text, business, lead_state)
+
     text = complete_sentence_reply(text, limit=900)
     text = enforce_lead_reply_guardrails(text, user_text, business, lead_state)
 
@@ -4354,6 +4362,64 @@ def clean_sales_reply(reply_text: str, user_text: str = "", business: dict = Non
     if lang == "ru":
         return "Понял."
     return "Tushunarli 👍"
+
+
+PROMPT_LEAK_MARKERS = (
+    "narx bo'yicha ma'lumot",
+    "if customer",
+    "agar mijoz",
+    "bot aniq narx aytmasin",
+    "do not ask",
+    "do not mention",
+    "always enforce these rules",
+    "internal system",
+    "system prompt",
+    "reply separately",
+    "never mention ai",
+    "suggested product answer",
+)
+
+
+def looks_like_internal_prompt_leak(text: str) -> bool:
+    low = normalize_id(text).lower()
+    if not low:
+        return False
+
+    marker_hits = sum(1 for marker in PROMPT_LEAK_MARKERS if marker in low)
+    rule_line_hits = len(re.findall(r"(?:^|\n)\s*[-•]\s*(?:if|do not|never|always|agar|bot|reply|narx)", low))
+    imperative_hits = len(re.findall(r"\b(?:if customer|agar mijoz|do not|never|always enforce|reply separately)\b", low))
+
+    if marker_hits >= 1 and (rule_line_hits >= 1 or imperative_hits >= 1):
+        return True
+    if marker_hits >= 2:
+        return True
+    return False
+
+
+def safe_prompt_leak_fallback(user_text: str, business: dict = None, lead_state: dict = None) -> str:
+    lang = detect_customer_language(user_text)
+    if is_price_question(user_text):
+        return generic_price_fallback_reply(user_text, business)
+    if is_greeting_only(user_text):
+        if lang == "en":
+            return "Hello! How can I help you today?"
+        if lang == "ru":
+            return "Здравствуйте! Чем могу помочь?"
+        if lang == "kk":
+            return "Сәлеметсіз бе! Қалай көмектесе аламын?"
+        return "Assalomu alaykum 😊 Qanday yordam kerak?"
+
+    lead_fallback = lead_followup_reply(user_text, business, lead_state)
+    if lead_fallback:
+        return lead_fallback
+
+    if lang == "en":
+        return "Of course. Which product are you interested in?"
+    if lang == "ru":
+        return "Конечно. Какой товар вас интересует?"
+    if lang == "kk":
+        return "Әрине. Сізді қай тауар қызықтырады?"
+    return "Albatta. Sizga qaysi mahsulot kerak?"
 
 
 def _safe_score(value) -> float:
