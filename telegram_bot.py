@@ -7,6 +7,7 @@ import requests
 from fastapi import APIRouter, Request, Header
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from supabase import create_client
+from audio_transcription import transcribe_audio_bytes
 from catalog_matcher import analyze_media_for_sales_reply_local as analyze_catalog_media
 
 try:
@@ -985,6 +986,12 @@ def clean_sales_reply(reply_text, user_text="", business=None):
         return "Tushunarli 😊 Muammo emas, qachon qulay bo'lsa yozing."
 
     text = normalize_text(reply_text)
+    if looks_like_internal_prompt_leak(text):
+        summary = customer_safe_price_summary(business)
+        if any(k in user for k in ["narx", "nechpul", "qancha", "цена", "сколько", "price"]):
+            if summary:
+                return f"{summary} Sizga qaysi mahsulot yoki model kerak?"
+            return "Aniq narxni menejerimiz tasdiqlaydi. Sizga qaysi mahsulot yoki model kerak?"
     if not text:
         if lang == "en":
             return "Hello! How can I help you?"
@@ -1072,6 +1079,73 @@ def clean_sales_reply(reply_text, user_text="", business=None):
     if lang == "kk":
         return "Түсіндім."
     return "Tushunarli 👍"
+
+
+def _extract_first_price_range(raw_text: str) -> str:
+    text = normalize_text(raw_text)
+    if not text:
+        return ""
+    match = re.search(r"(\d[\d\s]{0,6}(?:[–-]\d[\d\s]{0,6}))\s*(\$|usd|dollar|dollor|доллар|so['’]?m|sum)?", text, re.IGNORECASE)
+    if not match:
+        match = re.search(r"(?<!\+)(\d{2,6})\s*(\$|usd|dollar|dollor|доллар|so['’]?m|sum)", text, re.IGNORECASE)
+    if not match:
+        return ""
+    amount = re.sub(r"\s+", "", match.group(1) or "")
+    currency = normalize_text(match.group(2))
+    return f"{amount} {currency}".strip()
+
+
+def customer_safe_price_summary(business: dict = None) -> str:
+    business = business or {}
+    raw_prices = normalize_text(business.get("prices"))
+    if not raw_prices:
+        return ""
+
+    lower = raw_prices.lower()
+    phone = normalize_text(business.get("sales_phone"))
+    approx_price = _extract_first_price_range(raw_prices)
+    has_internal_rules = any(marker in lower for marker in [
+        "bot ",
+        "bot-",
+        "mijozni",
+        "yo'naltir",
+        "aytmasin",
+        "so'rasa",
+        "menejerimiz",
+        "sotuvch",
+        "minimal buyurtma",
+    ])
+
+    if has_internal_rules:
+        if approx_price and phone:
+            return f"Taxminiy narx {approx_price} atrofida. Aniq narx bo'yicha menejer yordam beradi: {phone}."
+        if approx_price:
+            return f"Taxminiy narx {approx_price} atrofida. Aniq narx modelga qarab tasdiqlanadi."
+        if phone:
+            return f"Aniq narxni menejer tasdiqlaydi: {phone}."
+        return "Aniq narx modelga va buyurtmaga qarab tasdiqlanadi."
+
+    first_sentence = re.split(r"(?<=[.!?])\s+|\n+", raw_prices)[0].strip(" -")
+    first_sentence = re.sub(r"\s+", " ", first_sentence).strip()
+    return first_sentence[:220] if first_sentence else ""
+
+
+def looks_like_internal_prompt_leak(text: str) -> bool:
+    clean = normalize_text(text).lower()
+    if not clean:
+        return False
+    leak_markers = [
+        "bot aniq narx aytmasin",
+        "narx so'ragan mijozni",
+        "mijozni telegram",
+        "mijozni sotuv agentiga",
+        "bot:",
+        "do not",
+        "ai reply rules",
+        "business facts",
+        "opening message",
+    ]
+    return any(marker in clean for marker in leak_markers)
 
 def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private"):
     history = get_recent_chat_history(
@@ -1314,6 +1388,36 @@ def get_file_url(file_id, business: dict = None):
         log("Could not get Telegram file URL", str(exc))
 
     return None
+
+
+def append_voice_transcript(message_text: str, transcript: str):
+    base = normalize_text(message_text)
+    clean_transcript = normalize_text(transcript)
+    if not clean_transcript:
+        return base
+    return f"{base}\nTranscript: {clean_transcript}" if base else f"Transcript: {clean_transcript}"
+
+
+def transcribe_telegram_audio_url(file_url: str, filename: str, mime_type: str, business: dict = None):
+    clean_url = normalize_text(file_url)
+    if not clean_url:
+        return ""
+    try:
+        res = requests.get(clean_url, timeout=60)
+        if not res.ok:
+            log("Telegram audio download failed", {"status": res.status_code, "body": res.text[:500]})
+            return ""
+        return transcribe_audio_bytes(
+            res.content or b"",
+            filename=filename or "telegram-audio.ogg",
+            mime_type=mime_type or res.headers.get("Content-Type", "audio/ogg"),
+            api_key=(business or {}).get("openai_api_key") or OPENAI_API_KEY,
+            prompt="Transcribe customer voice messages clearly and keep the original language.",
+            logger=log,
+        )
+    except Exception as exc:
+        log("Telegram audio transcription download error", str(exc))
+        return ""
 
 
 def build_customer_name(user):
@@ -1691,11 +1795,18 @@ async def telegram_webhook(request: Request):
             voice = message.get("voice", {})
             file_id = voice.get("file_id")
             duration = voice.get("duration", 0)
+            media_url = get_file_url(file_id, business)
+            transcript = transcribe_telegram_audio_url(
+                media_url,
+                filename=f"{message_id or file_id or 'telegram-voice'}.ogg",
+                mime_type="audio/ogg",
+                business=business,
+            )
 
             save_telegram_message(
                 business=business,
                 customer_id=customer_id,
-                text=f"🎤 Voice message ({duration}s)",
+                text=append_voice_transcript(f"🎤 Voice message ({duration}s)", transcript),
                 direction="inbound",
                 message_id=message_id,
                 raw_payload=update,
@@ -1703,7 +1814,7 @@ async def telegram_webhook(request: Request):
                 customer_name=customer_name,
                 chat_id=chat_id,
                 media_type="voice",
-                media_url=get_file_url(file_id, business),
+                media_url=media_url,
                 media_file_id=file_id,
             )
 
@@ -1805,9 +1916,23 @@ async def process_telegram_user_event(event):
                     media_type = "file"
 
             if media_type:
-                if hasattr(event.media, "photo") or media_type == "file":
-                    base_url = normalize_text(PUBLIC_BASE_URL).rstrip("/")
-                    media_url = f"{base_url}/api/telegram-user-media/{sender_id}/{message_id}" if base_url else f"/api/telegram-user-media/{sender_id}/{message_id}"
+                base_url = normalize_text(PUBLIC_BASE_URL).rstrip("/")
+                media_url = f"{base_url}/api/telegram-user-media/{sender_id}/{message_id}" if base_url else f"/api/telegram-user-media/{sender_id}/{message_id}"
+                if media_type == "voice":
+                    try:
+                        voice_bytes = await event.download_media(file=bytes)
+                    except Exception as exc:
+                        log("Telegram user voice download error", str(exc))
+                        voice_bytes = b""
+                    transcript = transcribe_audio_bytes(
+                        voice_bytes,
+                        filename=f"{message_id}.ogg",
+                        mime_type="audio/ogg",
+                        api_key=(business or {}).get("openai_api_key") or OPENAI_API_KEY,
+                        prompt="Transcribe customer voice messages clearly and keep the original language.",
+                        logger=log,
+                    )
+                    caption = append_voice_transcript(caption, transcript)
 
                 save_telegram_message(
                     business=business,
