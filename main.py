@@ -28,7 +28,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from supabase import create_client
 from starlette.concurrency import run_in_threadpool
-from audio_transcription import transcribe_audio_bytes
 try:
     import firebase_admin
     from firebase_admin import credentials as firebase_credentials, messaging as firebase_messaging
@@ -82,6 +81,58 @@ except Exception as exc:
 
 def env_list(name: str, default: str = ""):
     return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
+
+
+OPENAI_TRANSCRIBE_URL = "https://api.openai.com/v1/audio/transcriptions"
+OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe").strip() or "gpt-4o-mini-transcribe"
+MAX_AUDIO_TRANSCRIBE_BYTES = 25 * 1024 * 1024
+
+
+def transcribe_audio_bytes(
+    file_bytes: bytes,
+    *,
+    filename: str,
+    mime_type: str,
+    api_key: str,
+    prompt: str = "",
+    language: str = "",
+    timeout: int = 120,
+    logger=None,
+) -> str:
+    if not api_key or not file_bytes:
+        return ""
+    if len(file_bytes) > MAX_AUDIO_TRANSCRIBE_BYTES:
+        if logger:
+            logger("Audio transcription skipped", {"reason": "file_too_large", "bytes": len(file_bytes)})
+        return ""
+
+    data = {"model": OPENAI_TRANSCRIBE_MODEL}
+    if prompt:
+        data["prompt"] = prompt[:400]
+    if language:
+        data["language"] = language[:16]
+
+    try:
+        response = requests.post(
+            OPENAI_TRANSCRIBE_URL,
+            headers={"Authorization": f"Bearer {api_key}"},
+            data=data,
+            files={"file": (filename or "audio.webm", file_bytes, mime_type or "audio/webm")},
+            timeout=timeout,
+        )
+        if not response.ok:
+            if logger:
+                logger("Audio transcription failed", {"status": response.status_code, "body": response.text[:800]})
+            return ""
+        body = response.json() if response.content else {}
+        text = str(body.get("text") or "").strip()
+        if not text and logger:
+            logger("Audio transcription empty", {"status": response.status_code, "body": body})
+        return text
+    except Exception as exc:
+        if logger:
+            logger("Audio transcription error", str(exc))
+        return ""
 
 
 app = FastAPI()
