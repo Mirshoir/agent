@@ -3818,6 +3818,7 @@ Hard rules:
 Instagram rules:
 - Keep DMs concise and natural.
 - If customer asks catalog/price/model/photo, respond naturally and guide to DM flow.
+- Do not say you checked, recognized, analyzed, or understood any photo/video/media attachment.
 - Do not paste raw catalog links in Instagram replies.
 - For public comments containing "katalog", "narx", "qancha", "price": reply with:
   "Direktdan yozdik, iloji bo'lsa raqamingizni qoldiring."
@@ -3930,7 +3931,8 @@ Sales-agent rules:
 - Use wholesale/retail/minimum-order rules only when configured.
 - Use configured address and delivery process only.
 - Payment: ask the customer to leave name and phone number so the team can contact them.
-- When customer asks for photo/video/catalog, answer warmly with one light smile/emoji-style touch; do not over-explain.
+- Never claim to analyze, inspect, understand, compare, or verify a customer's photo/video/media attachment.
+- If product identification is unclear, ask for the exact model name/code instead of discussing the attachment.
 - Reply separately to each commenter; do not combine multiple customers into one response.
 - Sticker-only/simple reactions: answer with a simple friendly emoji/sticker-style short reply, not a sales paragraph.
 - If "qimmat": acknowledge and position value based on configured quality facts.
@@ -4481,44 +4483,103 @@ def looks_like_internal_prompt_leak(text: str) -> bool:
     return any(marker in clean for marker in leak_markers)
 
 
+def mentions_media_analysis_or_attachment_ack(text: str) -> bool:
+    clean = normalize_id(text).lower()
+    if not clean:
+        return False
+    patterns = [
+        "thanks for the photo",
+        "thank you for the photo",
+        "thanks for the video",
+        "rasm uchun rahmat",
+        "foto uchun rahmat",
+        "video uchun rahmat",
+        "спасибо за фото",
+        "спасибо за видео",
+        "фото үшін рахмет",
+        "видео үшін рахмет",
+        "clear photo",
+        "aniqroq rasm",
+        "четкое фото",
+        "анық фото",
+        "i checked the photo",
+        "i checked the video",
+        "we checked the photo",
+        "we checked the video",
+        "analys",
+        "recogniz",
+        "identified from the photo",
+        "identified from the video",
+    ]
+    return any(pattern in clean for pattern in patterns)
+
+
+def neutral_media_redirect_reply(user_text: str, business: dict = None) -> str:
+    lang = detect_customer_language(user_text)
+    if is_price_question(user_text):
+        summary = customer_safe_price_summary(business)
+        if summary:
+            if lang == "en":
+                return f"{summary} Please send the exact model name/code."
+            if lang == "ru":
+                return f"{summary} Отправьте точное название или код модели."
+            if lang == "kk":
+                return f"{summary} Нақты модель атауын не кодын жіберіңіз."
+            return f"{summary} Aniq model nomi yoki kodini yuboring."
+        if lang == "en":
+            return "The exact price should be confirmed. Please send the exact model name/code."
+        if lang == "ru":
+            return "Точную цену нужно подтвердить. Отправьте точное название или код модели."
+        if lang == "kk":
+            return "Нақты бағаны растау керек. Нақты модель атауын не кодын жіберіңіз."
+        return "Aniq narxni tasdiqlash kerak. Aniq model nomi yoki kodini yuboring."
+    if lang == "en":
+        return "Please send the exact model name/code, and I will help further."
+    if lang == "ru":
+        return "Отправьте точное название или код модели, и я помогу дальше."
+    if lang == "kk":
+        return "Нақты модель атауын не кодын жіберіңіз, мен ары қарай көмектесемін."
+    return "Aniq model nomi yoki kodini yuboring, men keyin davom ettiraman."
+
+
 def product_media_price_fallback_reply(user_text: str, business: dict = None) -> str:
     lang = detect_customer_language(user_text)
     if lang == "en":
-        return "Thanks for the photo. I need to confirm the exact price for this model. Which size or quantity are you interested in?"
+        return "I need to confirm the exact price for this model. Which size or quantity are you interested in?"
     if lang == "ru":
-        return "Спасибо за фото. Точную цену этой модели нужно подтвердить. Какой размер или количество вас интересует?"
+        return "Точную цену этой модели нужно подтвердить. Какой размер или количество вас интересует?"
     if lang == "kk":
-        return "Фото үшін рахмет. Бұл модельдің нақты бағасын нақтылау керек. Қай өлшем немесе қанша дана қызықтырады?"
-    return "Rasm uchun rahmat. Bu modelning aniq narxini tekshirib aytamiz. Qaysi razmer yoki nechta kerak?"
+        return "Бұл модельдің нақты бағасын нақтылау керек. Қай өлшем немесе қанша дана қызықтырады?"
+    return "Bu modelning aniq narxini tekshirib aytamiz. Qaysi razmer yoki nechta kerak?"
 
 
 def product_media_unverified_followup_reply(user_text: str, business: dict = None) -> str:
     lang = detect_customer_language(user_text)
     if wants_deal_handoff(user_text):
         if lang == "en":
-            return "Understood. Please send the exact model or one more clear photo, and our manager will confirm the wholesale price and availability."
+            return "Understood. Please send the exact model name or code, and our manager will confirm the wholesale price and availability."
         if lang == "ru":
-            return "Понял. Отправьте точную модель или еще одно четкое фото, и наш менеджер подтвердит оптовую цену и наличие."
+            return "Понял. Отправьте точное название или код модели, и наш менеджер подтвердит оптовую цену и наличие."
         if lang == "kk":
-            return "Түсіндім. Дәл моделін немесе тағы бір анық фото жіберіңіз, менеджеріміз көтерме баға мен қолжетімділікті нақтылап береді."
-        return "Tushundim. Aniq modelini yoki yana bitta aniqroq rasm yuboring, menejerimiz optim narx va mavjudligini tekshirib aytadi."
+            return "Түсіндім. Дәл модель атауын не кодын жіберіңіз, менеджеріміз көтерме баға мен қолжетімділікті нақтылап береді."
+        return "Tushundim. Aniq model nomi yoki kodini yuboring, menejerimiz optim narx va mavjudligini tekshirib aytadi."
 
     if wants_catalog(user_text):
         if lang == "en":
-            return "Of course. Please send the exact model or one more clear photo, and I will check the right item for you."
+            return "Of course. Please send the exact model name or code, and I will help with the right item."
         if lang == "ru":
-            return "Конечно. Отправьте точную модель или еще одно четкое фото, и я проверю нужный товар."
+            return "Конечно. Отправьте точное название или код модели, и я помогу с нужным товаром."
         if lang == "kk":
-            return "Әрине. Дәл моделін немесе тағы бір анық фото жіберіңіз, мен керек тауарды нақтылап беремін."
-        return "Albatta. Aniq modelini yoki yana bitta aniqroq rasm yuboring, kerakli mahsulotni tekshirib aytaman."
+            return "Әрине. Дәл модель атауын не кодын жіберіңіз, мен керек тауарды нақтылап беремін."
+        return "Albatta. Aniq model nomi yoki kodini yuboring, kerakli mahsulotni aniqlab beraman."
 
     if lang == "en":
-        return "Understood. Please send the exact model or one more clear photo, and I will confirm the price and availability."
+        return "Understood. Please send the exact model name or code, and I will confirm the price and availability."
     if lang == "ru":
-        return "Понял. Отправьте точную модель или еще одно четкое фото, и я подтвержу цену и наличие."
+        return "Понял. Отправьте точное название или код модели, и я подтвержу цену и наличие."
     if lang == "kk":
-        return "Түсіндім. Дәл моделін немесе тағы бір анық фото жіберіңіз, мен бағасы мен қолжетімділігін нақтылаймын."
-    return "Tushundim. Aniq modelini yoki yana bitta aniqroq rasm yuboring, narxi va mavjudligini tekshirib aytaman."
+        return "Түсіндім. Дәл модель атауын не кодын жіберіңіз, мен бағасы мен қолжетімділігін нақтылаймын."
+    return "Tushundim. Aniq model nomi yoki kodini yuboring, narxi va mavjudligini tekshirib aytaman."
 
 
 def business_products_summary(business: dict = None, limit: int = 4) -> str:
@@ -4541,19 +4602,19 @@ def replacement_for_forbidden_product_photo_question(user_text: str = "", busine
     lang = detect_customer_language(user_text)
     if lang == "en":
         if is_price_question(user_text):
-            return "Thanks for the photo. Our manager will confirm the exact price."
-        return "Thanks for the photo. Our manager will confirm the details."
+            return "Our manager will confirm the exact price."
+        return "Our manager will confirm the details."
     if lang == "ru":
         if is_price_question(user_text):
-            return "Спасибо за фото. Точную цену подтвердит менеджер."
-        return "Спасибо за фото. Менеджер подтвердит детали."
+            return "Точную цену подтвердит менеджер."
+        return "Менеджер подтвердит детали."
     if lang == "kk":
         if is_price_question(user_text):
-            return "Фото үшін рахмет. Нақты бағаны менеджер растайды."
-        return "Фото үшін рахмет. Менеджер егжей-тегжейін растайды."
+            return "Нақты бағаны менеджер растайды."
+        return "Менеджер егжей-тегжейін растайды."
     if is_price_question(user_text):
-        return "Rasm uchun rahmat. Aniq narxni menejerimiz tasdiqlaydi."
-    return "Rasm uchun rahmat. Menejerimiz tafsilotlarni tasdiqlaydi."
+        return "Aniq narxni menejerimiz tasdiqlaydi."
+    return "Menejerimiz tafsilotlarni tasdiqlaydi."
 
 
 def get_sales_phone(business: dict) -> str:
@@ -5335,6 +5396,9 @@ def clean_sales_reply(reply_text: str, user_text: str = "", business: dict = Non
 
     if contains_forbidden_product_photo_question(text):
         text = replacement_for_forbidden_product_photo_question(user_text, business)
+
+    if mentions_media_analysis_or_attachment_ack(text):
+        text = neutral_media_redirect_reply(user_text, business)
 
     # Strong language guard: if customer wrote in English but reply is not English, return safe English fallback.
     if lang == "en":
