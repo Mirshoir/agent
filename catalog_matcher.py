@@ -1,16 +1,22 @@
+from __future__ import annotations
+
 import base64
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import time
+from dataclasses import asdict, dataclass
+from typing import Any
 
 import requests
+from PIL import Image, ImageOps
 from supabase import create_client
 
 
-def normalize_text(value):
+def normalize_text(value: Any) -> str:
     return str(value or "").strip()
 
 
@@ -37,24 +43,58 @@ CATALOG_SUPABASE_SERVICE_KEY = (
     or os.getenv("MILANA_CATALOG_SUPABASE_SERVICE_KEY")
     or SUPABASE_SERVICE_KEY
 )
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_VISION_MODEL = normalize_text(os.getenv("PRODUCT_MATCHER_GEMINI_VISION_MODEL", "gemini-2.5-pro")) or "gemini-2.5-pro"
 
 PRODUCT_MATCHER_LOCAL_ENABLED = env_bool("PRODUCT_MATCHER_LOCAL_ENABLED", True)
 PRODUCT_MATCHER_LOCAL_CATALOG_TABLE = normalize_text(os.getenv("PRODUCT_MATCHER_LOCAL_CATALOG_TABLE", "milana_products")) or "milana_products"
+PRODUCT_MATCHER_LOCAL_OVERRIDES_TABLE = normalize_text(os.getenv("PRODUCT_MATCHER_LOCAL_OVERRIDES_TABLE", "milana_product_overrides")) or "milana_product_overrides"
 PRODUCT_MATCHER_LOCAL_CATALOG_CACHE_TTL_SECONDS = max(30, min(60 * 60, int(os.getenv("PRODUCT_MATCHER_LOCAL_CATALOG_CACHE_TTL_SECONDS", "300"))))
 PRODUCT_MATCHER_LOCAL_FETCH_LIMIT = max(50, min(3000, int(os.getenv("PRODUCT_MATCHER_LOCAL_FETCH_LIMIT", "1200"))))
-PRODUCT_MATCHER_LOCAL_MAX_KEYWORDS = max(3, min(40, int(os.getenv("PRODUCT_MATCHER_LOCAL_MAX_KEYWORDS", "24"))))
 PRODUCT_MATCHER_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_MIN_SCORE", "0.20"))))
 PRODUCT_MATCHER_WEAK_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_WEAK_MIN_SCORE", "0.10"))))
-PRODUCT_MATCHER_OPENAI_VISION_MODEL = normalize_text(os.getenv("PRODUCT_MATCHER_OPENAI_VISION_MODEL", os.getenv("OPENAI_MODEL", "gpt-4.1-mini"))) or "gpt-4.1-mini"
-PRODUCT_MATCHER_OPENAI_VISION_TIMEOUT_SECONDS = max(8, min(120, int(os.getenv("PRODUCT_MATCHER_OPENAI_VISION_TIMEOUT_SECONDS", "20"))))
-PRODUCT_MATCHER_OPENAI_VISION_DETAIL = normalize_text(os.getenv("PRODUCT_MATCHER_OPENAI_VISION_DETAIL", "low")).lower() or "low"
+PRODUCT_MATCHER_TOP_K = max(1, min(12, int(os.getenv("PRODUCT_MATCHER_TOP_K", "5"))))
+PRODUCT_MATCHER_MAX_MEDIA_MB = max(2, min(40, int(os.getenv("PRODUCT_MATCHER_MAX_MEDIA_MB", "20"))))
+PRODUCT_MATCHER_TIMEOUT_SECONDS = max(10, min(180, int(os.getenv("PRODUCT_MATCHER_TIMEOUT_SECONDS", "90"))))
+PRODUCT_MATCHER_CATALOG_SCOPE = normalize_text(os.getenv("PRODUCT_MATCHER_CATALOG_SCOPE", "all")).lower() or "all"
 
 _supabase = None
-_catalog_cache = {"loaded_at": 0.0, "rows": []}
+_catalog_cache = {"loaded_at": 0.0, "rows": [], "stats": {}}
 
 
-def log(title, data=None):
+@dataclass
+class ProductRecord:
+    product_code: str
+    model_code: str
+    price: str
+    currency: str
+    combined_text: str
+    image_url: str
+    image_sha256: str
+    image_fingerprint: str
+    embedding_preview: list[float]
+    source_pdf: str
+    page: Any
+    card_index: Any
+    source: str
+    catalog_group: str
+
+
+@dataclass
+class CustomerImageAnalysis:
+    garment_type: str
+    primary_color: str
+    secondary_colors: list[str]
+    pattern: str
+    neckline: str
+    sleeve_length: str
+    closure: str
+    visible_text: str
+    visible_codes: list[str]
+    notes: str
+
+
+def log(title: str, data: Any = None) -> None:
     print("\n" + "=" * 80)
     print(title)
     if data is not None:
@@ -71,54 +111,23 @@ def _client():
     return _supabase
 
 
-def _extract_output_text(body: dict) -> str:
-    text = normalize_text(body.get("output_text"))
-    if text:
-        return text
-    output = body.get("output") if isinstance(body.get("output"), list) else []
-    for item in output:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content") if isinstance(item.get("content"), list) else []
-        for chunk in content:
-            if isinstance(chunk, dict):
-                value = normalize_text(chunk.get("text"))
-                if value:
-                    return value
-    return ""
-
-
-def _extract_json_object(text: str) -> dict:
-    raw = normalize_text(text)
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        pass
-    match = re.search(r"\{[\s\S]*\}", raw)
-    if not match:
-        return {}
-    try:
-        parsed = json.loads(match.group(0))
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        return {}
-
-
 def normalize_product_code(value: str) -> str:
     value = re.sub(r"[^A-Za-z0-9-]", "", normalize_text(value).upper())
     value = re.sub(r"-{2,}", "-", value).strip("-")
     return value
 
 
+def normalize_code(value: str | None) -> str:
+    if not value:
+        return ""
+    return re.sub(r"[^A-Z0-9]", "", str(value).upper())
+
+
 def extract_codes_from_text(text: str) -> list[str]:
     text = normalize_text(text)
     if not text:
         return []
-    found = []
+    found: list[str] = []
     for raw in re.findall(r"\b[A-Za-z]{1,4}-?\d{2,6}\b", text):
         code = normalize_product_code(raw)
         if code and code not in found:
@@ -126,105 +135,158 @@ def extract_codes_from_text(text: str) -> list[str]:
     return found
 
 
-def _parse_float_list(value, limit: int = 12) -> list[float]:
+def derive_catalog_group(source_pdf: str | None) -> str:
+    source = normalize_text(source_pdf).lower()
+    if "kindergarten" in source:
+        return "kids"
+    if "man_premium" in source or "man premium" in source:
+        return "men"
+    if "products_in_stock" in source:
+        return "women"
+    if "staple_model_catalog" in source:
+        return "mixed"
+    return "unknown"
+
+
+def _parse_float_list(value: Any, limit: int = 12) -> list[float]:
     if value is None:
         return []
     if isinstance(value, list):
         items = value
-    elif isinstance(value, tuple):
-        items = list(value)
     else:
         text = normalize_text(value)
         if not text:
             return []
         try:
             parsed = json.loads(text)
-            if isinstance(parsed, list):
-                items = parsed
-            else:
-                items = re.findall(r"-?\d+(?:\.\d+)?", text)
+            items = parsed if isinstance(parsed, list) else re.findall(r"-?\d+(?:\.\d+)?", text)
         except Exception:
             items = re.findall(r"-?\d+(?:\.\d+)?", text)
-    result = []
+    out = []
     for item in items[:limit]:
         try:
-            result.append(float(item))
+            out.append(float(item))
         except Exception:
             continue
-    return result
+    return out
 
 
-def _sha256(media_bytes: bytes) -> str:
-    return hashlib.sha256(media_bytes).hexdigest() if media_bytes else ""
+def _get_local_catalog_rows(force_refresh: bool = False) -> list[ProductRecord]:
+    now = time.time()
+    if (
+        not force_refresh
+        and _catalog_cache["rows"]
+        and (now - float(_catalog_cache.get("loaded_at") or 0.0)) < PRODUCT_MATCHER_LOCAL_CATALOG_CACHE_TTL_SECONDS
+    ):
+        return _catalog_cache["rows"]
+
+    product_fields = "product_code,model_code,price,currency,combined_text,image_url,image_sha256,image_fingerprint,embedding_preview,source_pdf,page,card_index"
+    override_fields = "product_code,model_code,price,currency,image_url,image_storage_path,source_pdf,page,card_index"
+    products = (
+        _client()
+        .table(PRODUCT_MATCHER_LOCAL_CATALOG_TABLE)
+        .select(product_fields)
+        .limit(PRODUCT_MATCHER_LOCAL_FETCH_LIMIT)
+        .execute()
+    ).data or []
+    overrides = (
+        _client()
+        .table(PRODUCT_MATCHER_LOCAL_OVERRIDES_TABLE)
+        .select(override_fields)
+        .limit(PRODUCT_MATCHER_LOCAL_FETCH_LIMIT)
+        .execute()
+    ).data or []
+
+    override_map = {(normalize_text(r.get("product_code")), normalize_text(r.get("model_code"))): r for r in overrides if isinstance(r, dict)}
+    rows: list[ProductRecord] = []
+    seen_keys: set[tuple[str, str]] = set()
+    override_only = 0
+
+    for row in products:
+        if not isinstance(row, dict):
+            continue
+        key = (normalize_text(row.get("product_code")), normalize_text(row.get("model_code")))
+        merged = dict(row)
+        override = override_map.get(key)
+        if override:
+            for field in ("price", "currency", "image_url", "source_pdf"):
+                if override.get(field) is not None:
+                    merged[field] = override[field]
+        seen_keys.add(key)
+        rows.append(
+            ProductRecord(
+                product_code=normalize_product_code(merged.get("product_code")),
+                model_code=normalize_product_code(merged.get("model_code")),
+                price=normalize_text(merged.get("price")),
+                currency=normalize_text(merged.get("currency")),
+                combined_text=normalize_text(merged.get("combined_text")),
+                image_url=normalize_text(merged.get("image_url")),
+                image_sha256=normalize_text(merged.get("image_sha256")).lower(),
+                image_fingerprint=normalize_text(merged.get("image_fingerprint")),
+                embedding_preview=_parse_float_list(merged.get("embedding_preview"), limit=12),
+                source_pdf=normalize_text(merged.get("source_pdf")),
+                page=merged.get("page"),
+                card_index=merged.get("card_index"),
+                source="milana_products",
+                catalog_group=derive_catalog_group(merged.get("source_pdf")),
+            )
+        )
+
+    for row in overrides:
+        if not isinstance(row, dict):
+            continue
+        key = (normalize_text(row.get("product_code")), normalize_text(row.get("model_code")))
+        if key in seen_keys:
+            continue
+        rows.append(
+            ProductRecord(
+                product_code=normalize_product_code(row.get("product_code")),
+                model_code=normalize_product_code(row.get("model_code")),
+                price=normalize_text(row.get("price")),
+                currency=normalize_text(row.get("currency")),
+                combined_text="",
+                image_url=normalize_text(row.get("image_url")),
+                image_sha256="",
+                image_fingerprint=normalize_text(row.get("image_storage_path")),
+                embedding_preview=[],
+                source_pdf=normalize_text(row.get("source_pdf")),
+                page=row.get("page"),
+                card_index=row.get("card_index"),
+                source="milana_product_overrides",
+                catalog_group=derive_catalog_group(row.get("source_pdf")),
+            )
+        )
+        override_only += 1
+
+    _catalog_cache["rows"] = rows
+    _catalog_cache["loaded_at"] = now
+    _catalog_cache["stats"] = {
+        "base_table_rows": len(products),
+        "override_table_rows": len(overrides),
+        "override_only_products": override_only,
+        "unique_searchable_products": len(rows),
+    }
+    return rows
 
 
-def _signatures_from_bytes(media_bytes: bytes) -> list[list[float]]:
-    if not media_bytes:
-        return []
-    try:
-        from PIL import Image
-        import numpy as np
-    except Exception:
-        return []
-
-    try:
-        image = Image.open(io.BytesIO(media_bytes)).convert("RGB").resize((128, 128))
-        arr = np.asarray(image, dtype=np.float32)
-    except Exception:
-        return []
-
-    signatures = []
-    try:
-        rgb_hist = []
-        total_pixels = float(arr.shape[0] * arr.shape[1] * 3) or 1.0
-        for channel in range(3):
-            hist, _ = np.histogram(arr[:, :, channel], bins=4, range=(0, 255))
-            rgb_hist.extend((hist.astype(np.float32) / total_pixels).tolist())
-        signatures.append([float(x) for x in rgb_hist])
-    except Exception:
-        pass
-    try:
-        lum = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
-        lum_hist, _ = np.histogram(lum, bins=12, range=(0, 255))
-        total = float(lum_hist.sum()) or 1.0
-        signatures.append((lum_hist.astype(np.float32) / total).tolist())
-    except Exception:
-        pass
-    return [sig for sig in signatures if len(sig) >= 6]
-
-
-def _vector_similarity(left: list[float], right: list[float]) -> float:
-    if not left or not right:
-        return 0.0
-    size = min(len(left), len(right))
-    if size < 4:
-        return 0.0
-    l = [float(x) for x in left[:size]]
-    r = [float(x) for x in right[:size]]
-    dot = sum(a * b for a, b in zip(l, r))
-    left_norm = sum(a * a for a in l) ** 0.5
-    right_norm = sum(b * b for b in r) ** 0.5
-    if not left_norm or not right_norm:
-        return 0.0
-    return max(0.0, min(1.0, dot / (left_norm * right_norm)))
+def get_catalog_stats() -> dict[str, int]:
+    _get_local_catalog_rows()
+    return dict(_catalog_cache.get("stats") or {})
 
 
 def download_media_for_matcher(media_url: str, access_token: str = "") -> tuple[bytes, str, str]:
     media_url = normalize_text(media_url)
     if not media_url:
         raise ValueError("Empty media URL")
-
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "*/*",
-    }
-    clean_token = normalize_text(access_token)
-    if clean_token:
-        headers["Authorization"] = f"Bearer {clean_token}"
-
-    response = requests.get(media_url, timeout=30, stream=True, headers=headers)
+    limit_bytes = PRODUCT_MATCHER_MAX_MEDIA_MB * 1024 * 1024
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*"}
+    if normalize_text(access_token):
+        headers["Authorization"] = f"Bearer {normalize_text(access_token)}"
+    response = requests.get(media_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 30), stream=True, headers=headers)
+    if response.status_code == 403 and normalize_text(access_token):
+        sep = "&" if "?" in media_url else "?"
+        response = requests.get(f"{media_url}{sep}access_token={normalize_text(access_token)}", timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 30), stream=True)
     response.raise_for_status()
-
     content_type = normalize_text(response.headers.get("content-type")).split(";")[0].strip() or "application/octet-stream"
     chunks = []
     total = 0
@@ -232,248 +294,307 @@ def download_media_for_matcher(media_url: str, access_token: str = "") -> tuple[
         if not chunk:
             continue
         total += len(chunk)
-        if total > 20 * 1024 * 1024:
-            raise ValueError("Media is too large")
+        if total > limit_bytes:
+            raise ValueError(f"Media is too large (> {PRODUCT_MATCHER_MAX_MEDIA_MB} MB)")
         chunks.append(chunk)
     data = b"".join(chunks)
-    if not data:
-        raise ValueError("Downloaded media is empty")
     filename = f"media{os.path.splitext(content_type)[-1] or '.bin'}"
     return data, filename, content_type
 
 
-def _get_local_catalog_rows(force_refresh: bool = False) -> list[dict]:
-    now = time.time()
-    cached_rows = _catalog_cache.get("rows") if isinstance(_catalog_cache, dict) else []
-    loaded_at = _catalog_cache.get("loaded_at", 0.0) if isinstance(_catalog_cache, dict) else 0.0
-    if not force_refresh and cached_rows and (now - float(loaded_at or 0.0)) < PRODUCT_MATCHER_LOCAL_CATALOG_CACHE_TTL_SECONDS:
-        return cached_rows
+def detect_mime_type(image_bytes: bytes) -> str:
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        image_format = (image.format or "").upper()
+    if image_format == "PNG":
+        return "image/png"
+    if image_format == "WEBP":
+        return "image/webp"
+    return "image/jpeg"
 
-    fields = "product_code,model_code,price,currency,combined_text,image_url,image_sha256,image_fingerprint,embedding_model,embedding_preview,source_pdf,page,card_index"
-    try:
-        res = (
-            _client()
-            .table(PRODUCT_MATCHER_LOCAL_CATALOG_TABLE)
-            .select(fields)
-            .limit(PRODUCT_MATCHER_LOCAL_FETCH_LIMIT)
-            .execute()
-        )
-        rows = res.data if isinstance(res.data, list) else []
-    except Exception as exc:
-        same_database = normalize_text(CATALOG_SUPABASE_URL).rstrip("/") == normalize_text(SUPABASE_URL).rstrip("/")
-        log("Local catalog fetch failed", {
-            "table": PRODUCT_MATCHER_LOCAL_CATALOG_TABLE,
-            "catalog_supabase_url": normalize_text(CATALOG_SUPABASE_URL).split("//")[-1].split(".")[0] if CATALOG_SUPABASE_URL else "",
-            "same_as_business_database": same_database,
-            "fix": "Set CATALOG_SUPABASE_URL and CATALOG_SUPABASE_SERVICE_KEY in Render." if same_database else "",
-            "error": str(exc),
-        })
-        return cached_rows or []
 
-    normalized_rows = []
-    for row in rows:
-        if not isinstance(row, dict):
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode("utf-8")
+
+
+def crop_focus_region(image_bytes: bytes, mode: str) -> bytes:
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        image = ImageOps.exif_transpose(image).convert("RGB")
+        width, height = image.size
+        if mode == "customer":
+            box = (int(width * 0.12), int(height * 0.18), int(width * 0.88), height)
+        else:
+            box = (int(width * 0.1), int(height * 0.12), int(width * 0.9), height)
+        cropped = image.crop(box)
+        buf = io.BytesIO()
+        cropped.save(buf, format="JPEG", quality=92)
+        return buf.getvalue()
+
+
+def compute_color_histogram(image_bytes: bytes) -> list[float]:
+    with Image.open(io.BytesIO(image_bytes)) as image:
+        rgb = ImageOps.exif_transpose(image).convert("RGB").resize((256, 256))
+        channels = rgb.split()
+    hist: list[float] = []
+    for channel in channels:
+        bins = channel.histogram()
+        for start in range(0, 256, 64):
+            hist.append(sum(bins[start : start + 64]))
+    norm = math.sqrt(sum(v * v for v in hist))
+    return hist if not norm else [v / norm for v in hist]
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return -1.0
+    return sum(a * b for a, b in zip(left, right))
+
+
+def filter_products_by_scope(products: list[ProductRecord], scope: str) -> list[ProductRecord]:
+    scope = normalize_text(scope).lower() or "all"
+    if scope == "all":
+        return products
+    return [product for product in products if product.catalog_group == scope]
+
+
+def build_database_counts(all_products: list[ProductRecord], scoped_products: list[ProductRecord], visual_products: list[ProductRecord]) -> dict[str, int]:
+    stats = get_catalog_stats()
+    return {
+        "base_table_rows": stats.get("base_table_rows", 0),
+        "override_table_rows": stats.get("override_table_rows", 0),
+        "override_only_products": stats.get("override_only_products", 0),
+        "unique_searchable_products": stats.get("unique_searchable_products", len(all_products)),
+        "all_products": len(all_products),
+        "scope_products": len(scoped_products),
+        "scope_products_with_images": len(visual_products),
+        "scope_products_without_images": len(scoped_products) - len(visual_products),
+    }
+
+
+def normalize_blob(value: str | None) -> str:
+    value = normalize_text(value).upper().replace(">", " ").replace("/", " ").replace("_", " ")
+    value = re.sub(r"[^A-Z0-9\\s-]", " ", value)
+    return " ".join(value.split())
+
+
+def extract_codes_from_blob(value: str | None) -> set[str]:
+    return {normalize_code(x) for x in re.findall(r"\b[A-Z]{1,4}-?\d{2,6}\b", normalize_blob(value)) if normalize_code(x)}
+
+
+def find_exact_code_matches(analysis: CustomerImageAnalysis, products: list[ProductRecord]) -> list[ProductRecord]:
+    codes = {normalize_code(code) for code in analysis.visible_codes if normalize_code(code)}
+    if not codes:
+        return []
+    matches: list[ProductRecord] = []
+    seen: set[tuple[str, str]] = set()
+    for product in products:
+        key = (product.product_code, product.model_code)
+        if key in seen:
             continue
-        product_code = normalize_product_code(row.get("product_code"))
-        model_code = normalize_product_code(row.get("model_code"))
-        combined_text = normalize_text(row.get("combined_text"))
-        if not (product_code or model_code or combined_text):
+        if (
+            normalize_code(product.product_code) in codes
+            or normalize_code(product.model_code) in codes
+            or codes.intersection(extract_codes_from_blob(product.combined_text))
+        ):
+            matches.append(product)
+            seen.add(key)
+    return matches
+
+
+def rank_by_embedding(query_embedding: list[float], products: list[ProductRecord], limit: int) -> list[ProductRecord]:
+    scored = [(cosine_similarity(query_embedding, product.embedding_preview), product) for product in products]
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [product for _, product in scored[:limit]]
+
+
+def rank_by_text_signals(analysis: CustomerImageAnalysis, products: list[ProductRecord], limit: int) -> list[ProductRecord]:
+    codes = {normalize_code(code) for code in analysis.visible_codes if normalize_code(code)}
+    tokens = normalize_blob(" ".join([
+        analysis.garment_type,
+        analysis.primary_color,
+        " ".join(analysis.secondary_colors),
+        analysis.pattern,
+        analysis.neckline,
+        analysis.sleeve_length,
+        analysis.closure,
+        analysis.visible_text,
+        " ".join(analysis.visible_codes),
+        analysis.notes,
+    ])).split()
+    scored = []
+    for product in products:
+        blob = normalize_blob(" ".join([product.product_code, product.model_code, product.combined_text]))
+        score = 0.0
+        for code in codes:
+            if code and code in normalize_code(blob):
+                score += 60.0
+        for token in tokens:
+            if len(token) > 2 and token in blob:
+                score += 1.3
+        scored.append((score, product))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [product for _, product in scored[:limit]]
+
+
+def build_candidate_shortlist(query_embedding: list[float], analysis: CustomerImageAnalysis, products: list[ProductRecord], limit: int) -> list[ProductRecord]:
+    embedding_ranked = rank_by_embedding(query_embedding, products, max(limit, 24))
+    text_ranked = rank_by_text_signals(analysis, products, max(limit, 24))
+    scores: dict[tuple[str, str], float] = {}
+    by_key: dict[tuple[str, str], ProductRecord] = {}
+    for idx, product in enumerate(embedding_ranked):
+        key = (product.product_code, product.model_code)
+        by_key[key] = product
+        scores[key] = scores.get(key, 0.0) + (len(embedding_ranked) - idx) * 0.35
+    for idx, product in enumerate(text_ranked):
+        key = (product.product_code, product.model_code)
+        by_key[key] = product
+        scores[key] = scores.get(key, 0.0) + (len(text_ranked) - idx) * 1.0
+    keys = sorted(scores, key=lambda key: scores[key], reverse=True)
+    return [by_key[key] for key in keys[:limit]]
+
+
+def merge_exact_matches_into_shortlist(exact_matches: list[ProductRecord], shortlist: list[ProductRecord], limit: int) -> list[ProductRecord]:
+    merged: list[ProductRecord] = []
+    seen: set[tuple[str, str]] = set()
+    for product in exact_matches + shortlist:
+        key = (product.product_code, product.model_code)
+        if key in seen:
             continue
-        normalized_rows.append({
-            "product_code": product_code,
-            "model_code": model_code,
-            "price": normalize_text(row.get("price")),
-            "currency": normalize_text(row.get("currency")),
-            "combined_text": combined_text,
-            "image_url": normalize_text(row.get("image_url")),
-            "image_sha256": normalize_text(row.get("image_sha256")).lower(),
-            "image_fingerprint": normalize_text(row.get("image_fingerprint")),
-            "embedding_model": normalize_text(row.get("embedding_model")).lower(),
-            "embedding_preview": normalize_text(row.get("embedding_preview")),
-            "source_pdf": normalize_text(row.get("source_pdf")),
-            "page": row.get("page"),
-            "card_index": row.get("card_index"),
-        })
-
-    _catalog_cache["rows"] = normalized_rows
-    _catalog_cache["loaded_at"] = now
-    return normalized_rows
+        merged.append(product)
+        seen.add(key)
+        if len(merged) >= limit:
+            break
+    return merged
 
 
-def _extract_media_vision_hints_local(media_bytes: bytes, mime_type: str, user_text: str) -> dict:
-    if not OPENAI_API_KEY:
+def _extract_gemini_text(payload: dict[str, Any]) -> str:
+    for candidate in payload.get("candidates") or []:
+        for part in (candidate.get("content") or {}).get("parts") or []:
+            text = normalize_text(part.get("text"))
+            if text:
+                return text
+    return ""
+
+
+def _gemini_post(payload: dict[str, Any], attempts: int = 3) -> dict[str, Any]:
+    if not GEMINI_API_KEY:
         return {}
-    clean_mime = normalize_text(mime_type).split(";")[0].lower()
-    if not clean_mime.startswith("image/"):
-        return {}
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_VISION_MODEL}:generateContent"
+    last_body: dict[str, Any] = {}
+    for attempt in range(attempts):
+        try:
+            res = requests.post(url, params={"key": GEMINI_API_KEY}, headers={"Content-Type": "application/json"}, json=payload, timeout=60)
+            body = res.json() if res.content else {}
+            last_body = body if isinstance(body, dict) else {}
+            if res.ok:
+                return last_body
+            if res.status_code not in {429, 500, 503, 504}:
+                return last_body
+            time.sleep(1.2 * (attempt + 1))
+        except Exception as exc:
+            last_body = {"error": str(exc)}
+            time.sleep(1.2 * (attempt + 1))
+    return last_body
 
-    b64 = base64.b64encode(media_bytes).decode("ascii")
-    prompt = {
-        "task": "Identify product codes/models, garment details, colors, patterns, and useful keywords from this product image.",
-        "customer_message": normalize_text(user_text),
-        "output_format": {
-            "product_codes": ["code strings"],
-            "model_codes": ["model strings"],
-            "keywords": ["short style/product keywords"],
-            "colors": ["dominant colors"],
-            "garment_type": "short product type label",
-            "detected_text": "short OCR-like text seen on image",
-            "confidence": "0..1",
+
+def analyze_customer_image(image_bytes: bytes) -> CustomerImageAnalysis:
+    crop = crop_focus_region(image_bytes, mode="customer")
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": "Extract garment attributes and any visible product text/codes. Focus on the garment only, not the person's face or room. Return JSON."},
+                {"inlineData": {"mimeType": detect_mime_type(image_bytes), "data": _b64(image_bytes)}},
+                {"inlineData": {"mimeType": detect_mime_type(crop), "data": _b64(crop)}},
+            ]
+        }],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseJsonSchema": {
+                "type": "object",
+                "properties": {
+                    "garment_type": {"type": "string"},
+                    "primary_color": {"type": "string"},
+                    "secondary_colors": {"type": "array", "items": {"type": "string"}},
+                    "pattern": {"type": "string"},
+                    "neckline": {"type": "string"},
+                    "sleeve_length": {"type": "string"},
+                    "closure": {"type": "string"},
+                    "visible_text": {"type": "string"},
+                    "visible_codes": {"type": "array", "items": {"type": "string"}},
+                    "notes": {"type": "string"},
+                },
+                "required": ["garment_type", "primary_color", "secondary_colors", "pattern", "neckline", "sleeve_length", "closure", "visible_text", "visible_codes", "notes"],
+            },
         },
     }
-
-    payload = {
-        "model": PRODUCT_MATCHER_OPENAI_VISION_MODEL,
-        "input": [
-            {
-                "role": "system",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": "Return ONLY JSON. Do not add markdown. Focus on codes, model identifiers, and concise retrieval keywords.",
-                    }
-                ],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": json.dumps(prompt, ensure_ascii=False)},
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:{clean_mime};base64,{b64}",
-                        "detail": PRODUCT_MATCHER_OPENAI_VISION_DETAIL,
-                    },
-                ],
-            },
-        ],
-        "temperature": 0.0,
-    }
-
+    body = _gemini_post(payload)
+    text = _extract_gemini_text(body)
     try:
-        res = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
+        parsed = json.loads(text) if text else {}
+    except Exception:
+        parsed = {}
+    return CustomerImageAnalysis(
+        garment_type=normalize_text(parsed.get("garment_type")),
+        primary_color=normalize_text(parsed.get("primary_color")),
+        secondary_colors=parsed.get("secondary_colors") if isinstance(parsed.get("secondary_colors"), list) else [],
+        pattern=normalize_text(parsed.get("pattern")),
+        neckline=normalize_text(parsed.get("neckline")),
+        sleeve_length=normalize_text(parsed.get("sleeve_length")),
+        closure=normalize_text(parsed.get("closure")),
+        visible_text=normalize_text(parsed.get("visible_text")),
+        visible_codes=[normalize_text(x) for x in (parsed.get("visible_codes") if isinstance(parsed.get("visible_codes"), list) else [])],
+        notes=normalize_text(parsed.get("notes")),
+    )
+
+
+def rerank_with_gemini(query_image_bytes: bytes, shortlist: list[ProductRecord], analysis: CustomerImageAnalysis) -> tuple[ProductRecord | None, str | None]:
+    if not shortlist:
+        return None, None
+    query_crop = crop_focus_region(query_image_bytes, mode="customer")
+    parts: list[dict[str, Any]] = [
+        {"text": (
+            "Match the customer garment to exactly one catalog candidate. "
+            "Ignore the person's gender presentation, face, body shape, pose, and room. "
+            "Match only the garment. Return JSON with selected_index, confidence, and reason.\n"
+            f"Customer analysis: {json.dumps(asdict(analysis), ensure_ascii=True)}"
+        )},
+        {"inlineData": {"mimeType": detect_mime_type(query_image_bytes), "data": _b64(query_image_bytes)}},
+        {"inlineData": {"mimeType": detect_mime_type(query_crop), "data": _b64(query_crop)}},
+    ]
+    for idx, product in enumerate(shortlist):
+        parts.append({"text": f"Candidate {idx}. product_code={product.product_code}. model_code={product.model_code}. catalog_group={product.catalog_group}. catalog_text={product.combined_text[:400]}"})
+        if product.image_url:
+            try:
+                image_bytes, _, _ = download_media_for_matcher(product.image_url)
+                parts.append({"inlineData": {"mimeType": detect_mime_type(image_bytes), "data": _b64(image_bytes)}})
+            except Exception:
+                continue
+    payload = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseJsonSchema": {
+                "type": "object",
+                "properties": {
+                    "selected_index": {"type": "integer"},
+                    "confidence": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["selected_index", "confidence", "reason"],
             },
-            json=payload,
-            timeout=PRODUCT_MATCHER_OPENAI_VISION_TIMEOUT_SECONDS,
-        )
-        if not res.ok:
-            return {}
-        body = res.json()
-    except Exception as exc:
-        log("Local vision request error", str(exc))
-        return {}
-
-    raw_text = _extract_output_text(body)
-    parsed = _extract_json_object(raw_text)
-    parsed_codes = []
-    for key in ("product_codes", "model_codes"):
-        values = parsed.get(key)
-        if isinstance(values, list):
-            parsed_codes.extend(values)
-    if isinstance(parsed.get("detected_text"), str):
-        parsed_codes.extend(extract_codes_from_text(parsed.get("detected_text")))
-
-    codes = []
-    for code in parsed_codes:
-        normalized = normalize_product_code(code)
-        if normalized and normalized not in codes:
-            codes.append(normalized)
-
-    keywords = []
-    raw_keywords = parsed.get("keywords")
-    if isinstance(raw_keywords, list):
-        for item in raw_keywords:
-            token = normalize_text(item).lower()
-            if token and token not in keywords:
-                keywords.append(token)
-
-    detected_text = normalize_text(parsed.get("detected_text"))
-    if detected_text:
-        for token in re.findall(r"[A-Za-z0-9'-]{3,}", detected_text.lower()):
-            if token not in keywords:
-                keywords.append(token)
-
-    return {
-        "codes": codes[:24],
-        "keywords": keywords[:PRODUCT_MATCHER_LOCAL_MAX_KEYWORDS],
-        "colors": [normalize_text(x).lower() for x in (parsed.get("colors") if isinstance(parsed.get("colors"), list) else [])][:8],
-        "garment_type": normalize_text(parsed.get("garment_type")).lower(),
-        "detected_text": detected_text,
-        "confidence": float(parsed.get("confidence") or 0.0) if str(parsed.get("confidence") or "").strip() else 0.0,
+        },
     }
-
-
-def _row_image_similarity_score(row: dict, media_sha256: str, media_signatures: list[list[float]]) -> float:
-    row_sha256 = normalize_text(row.get("image_sha256")).lower()
-    if row_sha256 and media_sha256 and row_sha256 == media_sha256:
-        return 1.0
-
-    row_signature = _parse_float_list(row.get("embedding_preview"), limit=12)
-    if not row_signature:
-        return 0.0
-
-    best = 0.0
-    for media_signature in media_signatures or []:
-        best = max(best, _vector_similarity(row_signature, media_signature))
-    return best
-
-
-def _score_local_catalog_row(row: dict, code_set: set, keyword_set: set, media_sha256: str = "", media_signatures: list[list[float]] = None, vision: dict = None) -> tuple[float, dict]:
-    code = normalize_product_code(row.get("product_code"))
-    model = normalize_product_code(row.get("model_code"))
-    text_blob = " ".join([
-        normalize_text(row.get("combined_text")).upper(),
-        code,
-        model,
-        normalize_text(row.get("image_fingerprint")).upper(),
-    ])
-
-    code_score = 0.0
-    if code and code in code_set:
-        code_score = 1.0
-    elif model and model in code_set:
-        code_score = 0.92
-
-    keyword_hits = 0
-    if keyword_set:
-        lower_blob = text_blob.lower()
-        for kw in keyword_set:
-            if kw and kw in lower_blob:
-                keyword_hits += 1
-    keyword_score = 0.0
-    if keyword_set:
-        keyword_score = min(1.0, keyword_hits / max(1, min(6, len(keyword_set))))
-
-    text_score = 0.0
-    if code and code in text_blob:
-        text_score = 1.0
-    elif model and model in text_blob:
-        text_score = 0.9
-
-    image_score = _row_image_similarity_score(row, media_sha256, media_signatures or [])
-    if vision and isinstance(vision, dict):
-        row_text = normalize_text(row.get("combined_text")).lower()
-        row_type_blob = f"{code} {model} {row_text}".lower()
-        for color in vision.get("colors", []) or []:
-            token = normalize_text(color).lower()
-            if token and token in row_type_blob:
-                image_score = max(image_score, 0.55)
-        garment_type = normalize_text(vision.get("garment_type")).lower()
-        if garment_type and garment_type in row_type_blob:
-            image_score = max(image_score, 0.60)
-
-    final_score = (0.54 * code_score) + (0.18 * keyword_score) + (0.08 * text_score) + (0.20 * image_score)
-    parts = {
-        "final": round(final_score, 6),
-        "code": round(code_score, 6),
-        "keyword": round(keyword_score, 6),
-        "text": round(text_score, 6),
-        "image": round(image_score, 6),
-    }
-    return final_score, parts
+    body = _gemini_post(payload)
+    if body.get("error"):
+        return None, normalize_text(body.get("error"))
+    text = _extract_gemini_text(body)
+    try:
+        parsed = json.loads(text) if text else {}
+    except Exception:
+        parsed = {}
+    idx = parsed.get("selected_index")
+    if not isinstance(idx, int) or idx < 0 or idx >= len(shortlist):
+        return None, None
+    return shortlist[idx], None
 
 
 def build_product_match_reply(code: str, model: str, price: str, currency: str, top_score: float) -> str:
@@ -500,84 +621,44 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
         return {}
 
     try:
-        media_bytes, _, mime_type = download_media_for_matcher(media_url, access_token=access_token)
+        media_bytes, _, _ = download_media_for_matcher(media_url, access_token=access_token)
     except Exception as exc:
-        log("Local matcher download failed", {"error": str(exc)})
+        log("catalog_matcher download failed", {"error": str(exc)})
         return {}
 
-    vision = _extract_media_vision_hints_local(media_bytes, mime_type, user_text)
-    media_sha256 = _sha256(media_bytes)
-    media_signatures = _signatures_from_bytes(media_bytes)
-
-    extracted_codes = extract_codes_from_text(user_text)
-    for code in vision.get("codes", []):
-        if code not in extracted_codes:
-            extracted_codes.append(code)
-    code_set = {normalize_product_code(code) for code in extracted_codes if code}
-
-    keyword_set = {normalize_text(x).lower() for x in re.findall(r"[A-Za-z0-9'-]{3,}", normalize_text(user_text))}
-    for token in vision.get("keywords", []):
-        clean = normalize_text(token).lower()
-        if clean:
-            keyword_set.add(clean)
-
-    rows = _get_local_catalog_rows()
-    if not rows:
-        return {}
-    exact_image_match = any(
-        normalize_text(row.get("image_sha256")).lower()
-        and normalize_text(row.get("image_sha256")).lower() == media_sha256
-        for row in rows
-    )
-
-    scored = []
-    for row in rows:
-        score, parts = _score_local_catalog_row(
-            row,
-            code_set,
-            keyword_set,
-            media_sha256=media_sha256,
-            media_signatures=media_signatures,
-            vision=vision,
-        )
-        if score <= 0:
-            continue
-        scored.append({
-            **row,
-            "score": score,
-            "components": parts,
-        })
-
-    scored.sort(key=lambda item: item.get("score", 0.0), reverse=True)
-    matches = scored[:3]
-    if not matches:
+    all_products = _get_local_catalog_rows()
+    scoped_products = filter_products_by_scope(all_products, PRODUCT_MATCHER_CATALOG_SCOPE)
+    visual_products = [product for product in scoped_products if product.image_url]
+    if not scoped_products:
         return {}
 
-    top = matches[0]
-    top_score = float(top.get("score") or 0.0)
-    code = normalize_text(top.get("product_code"))
-    model = normalize_text(top.get("model_code"))
-    price = normalize_text(top.get("price"))
-    currency = normalize_text(top.get("currency"))
-    image_score = float((top.get("components") or {}).get("image") or 0.0)
+    analysis = analyze_customer_image(media_bytes)
+    exact_matches = find_exact_code_matches(analysis, scoped_products)
+    if len(exact_matches) == 1:
+        top = exact_matches[0]
+        top_score = 1.0
+        strategy = "exact_code_match"
+        matches = [top]
+        warning = ""
+    else:
+        if not visual_products:
+            return {}
+        query_embedding = compute_color_histogram(media_bytes)
+        shortlist = build_candidate_shortlist(query_embedding, analysis, visual_products, max(PRODUCT_MATCHER_TOP_K, 6))
+        if exact_matches:
+            shortlist = merge_exact_matches_into_shortlist(exact_matches, shortlist, max(PRODUCT_MATCHER_TOP_K, 6))
+        top, warning = rerank_with_gemini(media_bytes, shortlist, analysis)
+        if top is None:
+            top = shortlist[0]
+            warning = warning or "Gemini rerank unavailable; used shortlist fallback."
+        top_score = 0.6 if warning else 0.9
+        strategy = "vision_rerank"
+        matches = shortlist[:PRODUCT_MATCHER_TOP_K]
 
-    visual_evidence = exact_image_match or bool(code_set) or bool(vision.get("codes")) or bool(vision.get("keywords")) or bool(vision.get("garment_type"))
-    accepted_by_score = top_score >= PRODUCT_MATCHER_MIN_SCORE and visual_evidence
-    accepted_by_code = bool(code_set)
-    accepted_by_image = image_score >= max(PRODUCT_MATCHER_WEAK_MIN_SCORE, 0.45) and visual_evidence
-    accepted_weak_match = bool(code or model or price) and top_score >= PRODUCT_MATCHER_WEAK_MIN_SCORE and visual_evidence
-
-    if not (accepted_by_score or accepted_by_code or accepted_by_image or accepted_weak_match):
-        return {}
-
-    alternatives = []
-    for item in matches[1:3]:
-        alt_code = normalize_text(item.get("product_code"))
-        alt_model = normalize_text(item.get("model_code"))
-        alt_score = float(item.get("score") or 0.0)
-        if alt_code or alt_model:
-            alternatives.append(f"{alt_code or alt_model} ({alt_score:.2f})")
-
+    code = normalize_text(top.product_code)
+    model = normalize_text(top.model_code)
+    price = normalize_text(top.price)
+    currency = normalize_text(top.currency)
     parts = []
     if code:
         parts.append(f"code={code}")
@@ -585,19 +666,34 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
         parts.append(f"model={model}")
     if price:
         parts.append(f"price={price} {currency}".strip())
-
     context_lines = [
         "Product media analysis (high-priority context for this customer message):",
+        f"- Match strategy: {strategy}",
+        f"- Catalog scope: {PRODUCT_MATCHER_CATALOG_SCOPE}",
         f"- Top match confidence: {top_score:.2f}",
     ]
     if parts:
         context_lines.append(f"- Top match details: {', '.join(parts)}")
-    if code_set:
-        context_lines.append(f"- Extracted codes from media/text: {', '.join(sorted(code_set)[:8])}")
-    if alternatives:
-        alternative_text = ", ".join(alternatives)
-        context_lines.append(f"- Alternatives: {alternative_text}")
+    if analysis.visible_codes:
+        context_lines.append(f"- Extracted codes from media: {', '.join(analysis.visible_codes[:8])}")
+    if warning:
+        context_lines.append(f"- Warning: {warning}")
+    db_counts = build_database_counts(all_products, scoped_products, visual_products)
+    context_lines.append(f"- Catalog coverage: {json.dumps(db_counts, ensure_ascii=False)}")
     context_lines.append("- Use this to answer product/price questions for the attached media.")
+
+    match_rows = []
+    for product in matches[:PRODUCT_MATCHER_TOP_K]:
+        match_rows.append({
+            "product_code": product.product_code,
+            "model_code": product.model_code,
+            "price": product.price,
+            "currency": product.currency,
+            "image_url": product.image_url,
+            "catalog_group": product.catalog_group,
+            "source_pdf": product.source_pdf,
+            "score": top_score if product == top else 0.0,
+        })
 
     return {
         "context": "\n".join(context_lines),
@@ -605,5 +701,18 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
         "top_score": top_score,
         "top_match_code": code,
         "top_match_model": model,
-        "matches": matches,
+        "matches": match_rows,
+        "analysis": asdict(analysis),
+        "database_counts": db_counts,
+        "match_strategy": strategy,
+        "model_warning": warning or None,
     }
+
+
+def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: str = "", access_token: str = "") -> dict:
+    return analyze_media_for_sales_reply_local(
+        media_url=media_url,
+        user_text=user_text,
+        media_type=media_type,
+        access_token=access_token,
+    )
