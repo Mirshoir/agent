@@ -3477,6 +3477,9 @@ def contains_forbidden_product_photo_question(text: str) -> bool:
 def generic_price_fallback_reply(user_text: str, business: dict = None) -> str:
     lang = detect_customer_language(user_text)
     prices = normalize_id((business or {}).get("prices"))
+    if prices and looks_like_internal_prompt_leak(prices):
+        log("Configured prices blocked as prompt leak", {"prices_preview": prices[:300]})
+        prices = ""
     if prices:
         if lang == "en":
             return f"Our current price information: {prices}. Which product/model do you need?"
@@ -4420,6 +4423,17 @@ def safe_prompt_leak_fallback(user_text: str, business: dict = None, lead_state:
     if lang == "kk":
         return "Әрине. Сізді қай тауар қызықтырады?"
     return "Albatta. Sizga qaysi mahsulot kerak?"
+
+
+def safe_outbound_leak_fallback(business: dict = None) -> str:
+    lang = normalize_id((business or {}).get("language")).lower()
+    if lang.startswith("en"):
+        return "Our manager will confirm the exact details. Which product or model do you need?"
+    if lang.startswith("ru"):
+        return "Точные детали подтвердит менеджер. Какая модель или товар вам нужен?"
+    if lang.startswith("kk"):
+        return "Нақты мәліметті менеджер растайды. Қай тауар немесе модель керек?"
+    return "Aniq ma'lumotni menejerimiz tasdiqlaydi. Sizga qaysi mahsulot yoki model kerak?"
 
 
 def _safe_score(value) -> float:
@@ -5632,6 +5646,9 @@ def send_dm(access_token: str, recipient_id: str, text: str, business: dict = No
 
     business = business or {}
     text = complete_sentence_reply(remove_urls(text), limit=1000)
+    if looks_like_internal_prompt_leak(text):
+        log("Prompt leak blocked at send_dm", {"reply_preview": text[:300], "recipient_id": recipient_id})
+        text = safe_outbound_leak_fallback(business)
     if not text:
         return None
 
