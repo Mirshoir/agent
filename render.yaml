@@ -15,6 +15,20 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PRODUCT_MATCHER_EMBEDDING_ENABLED
+        value: "true"
+      - key: PRODUCT_MATCHER_EMBEDDING_MODEL
+        value: "text-embedding-3-large"
+      - key: PRODUCT_MATCHER_EMBEDDING_TIMEOUT_SECONDS
+        value: "90"
+      - key: PRODUCT_MATCHER_EMBEDDING_BATCH_SIZE
+        value: "24"
+      - key: PRODUCT_MATCHER_EMBEDDING_CACHE_PATH
+        value: "/tmp/instaagent_catalog_embeddings.json"
+      - key: PRODUCT_MATCHER_EMBEDDING_SYNC_INTERVAL_SECONDS
+        value: "86400"
       
     # Timeout settings
     maxShutdownDelay: 30
