@@ -6175,6 +6175,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         recent_media_context_found = False
         force_direct_media_reply = False
         resolved_media_match = {}
+        verified_exact_media_match = False
 
         if matcher_source_url and media_type in {"photo", "video", "file"}:
             log("Instagram DM media matcher request", {
@@ -6191,6 +6192,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             )
             if media_match:
                 resolved_media_match = media_match
+                verified_exact_media_match = normalize_id(media_match.get("match_strategy")) == "exact_code_match"
                 media_match_context = media_match.get("context", "")
                 media_reply_hint = media_match.get("reply_hint", "")
                 remember_instagram_media_match(
@@ -6225,6 +6227,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             if cached_match:
                 recent_media_context_found = True
                 resolved_media_match = cached_match
+                verified_exact_media_match = normalize_id(cached_match.get("match_strategy")) == "exact_code_match"
                 cached_context = normalize_id(cached_match.get("context"))
                 if cached_context:
                     media_match_context = (
@@ -6264,6 +6267,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                     )
                     if media_match:
                         resolved_media_match = media_match
+                        verified_exact_media_match = normalize_id(media_match.get("match_strategy")) == "exact_code_match"
                         media_match_context = (
                             f"{media_match.get('context', '')}\n"
                             "- This customer follow-up is replying directly to the matched product image."
@@ -6322,6 +6326,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                     )
                     if media_match:
                         resolved_media_match = media_match
+                        verified_exact_media_match = normalize_id(media_match.get("match_strategy")) == "exact_code_match"
                         media_match_context = (
                             f"{media_match.get('context', '')}\n"
                             "- This customer follow-up likely refers to their most recent product image."
@@ -6369,6 +6374,13 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             and not media_match_context
             and not media_reply_hint
         )
+
+        if verified_exact_media_match and is_price_question(message_text):
+            verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match)
+            if verified_meshok_reply:
+                media_reply_hint = verified_meshok_reply
+                force_direct_media_reply = True
+
         if needs_photo_fallback:
             if recent_media_context_found and is_price_question(message_text):
                 verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match)
@@ -6404,12 +6416,6 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 mark_processed(processed_message_ids, message_id)
                 return
 
-        if is_price_question(message_text) and normalize_id((resolved_media_match or {}).get("match_strategy")) == "exact_code_match":
-            verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match)
-            if verified_meshok_reply:
-                media_reply_hint = verified_meshok_reply
-                force_direct_media_reply = True
-
         if force_direct_media_reply:
             log("Instagram DM media fallback reply", {
                 "customer_id": sender_id,
@@ -6417,7 +6423,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 "reason": "media_match_missing",
             })
 
-        use_direct_matcher_reply = force_direct_media_reply or (bool(media_reply_hint) and (
+        use_direct_matcher_reply = force_direct_media_reply or verified_exact_media_match or (bool(media_reply_hint) and (
             is_auto_media_placeholder_message(message_text)
             or not normalize_id(message_text)
             or (media_type in {"photo", "video"} and not message.get("text"))
