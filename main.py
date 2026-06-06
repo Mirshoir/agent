@@ -5282,6 +5282,9 @@ def remember_instagram_media_match(
     reply_hint: str = "",
     top_match_code: str = "",
     top_match_model: str = "",
+    top_match_price: str = "",
+    top_match_currency: str = "",
+    match_strategy: str = "",
     top_score: float = 0.0,
 ):
     key = _instagram_media_memory_key(business_id, customer_id)
@@ -5293,6 +5296,9 @@ def remember_instagram_media_match(
         "reply_hint": normalize_id(reply_hint),
         "top_match_code": normalize_id(top_match_code),
         "top_match_model": normalize_id(top_match_model),
+        "top_match_price": normalize_id(top_match_price),
+        "top_match_currency": normalize_id(top_match_currency),
+        "match_strategy": normalize_id(match_strategy),
         "top_score": _safe_score(top_score),
     }
 
@@ -5309,6 +5315,67 @@ def load_recent_instagram_media_match(business_id: str, customer_id: str) -> dic
         INSTAGRAM_MEDIA_MATCH_MEMORY.pop(key, None)
         return {}
     return payload
+
+
+DEFAULT_ITEMS_PER_MESHOK = 60
+
+
+def _parse_numeric_price(value: str) -> float | None:
+    nums = re.findall(r"\d+(?:[.,]\d+)?", normalize_id(value))
+    if not nums:
+        return None
+    try:
+        return float(nums[0].replace(",", "."))
+    except Exception:
+        return None
+
+
+def _extract_meshok_count(text: str) -> int | None:
+    low = normalize_id(text).lower()
+    match = re.search(r"(\d+)\s*(?:qop|meshok|мешок|sack|bag)\b", low)
+    if match:
+        try:
+            return max(1, int(match.group(1)))
+        except Exception:
+            return 1
+    if any(token in low for token in ["qop", "meshok", "мешок", "sack", "bag"]):
+        return 1
+    return None
+
+
+def build_verified_meshok_price_reply(user_text: str, media_match: dict) -> str:
+    unit_price = _parse_numeric_price(media_match.get("top_match_price", ""))
+    if unit_price is None:
+        return ""
+    meshok_count = _extract_meshok_count(user_text)
+    if meshok_count is None:
+        return ""
+    currency = normalize_id(media_match.get("top_match_currency")) or "USD"
+    total_items = DEFAULT_ITEMS_PER_MESHOK * meshok_count
+    total_price = unit_price * total_items
+    lang = detect_customer_language(user_text)
+    code = normalize_id(media_match.get("top_match_code"))
+    model = normalize_id(media_match.get("top_match_model"))
+    label = code or model or "shu model"
+    if code and model and model != code:
+        label = f"{code}, model {model}"
+    total_str = f"{total_price:.1f}".rstrip("0").rstrip(".")
+    unit_str = f"{unit_price:.1f}".rstrip("0").rstrip(".")
+    if lang == "en":
+        if meshok_count == 1:
+            return f"{label} uchun dona narxi {unit_str} {currency}. 1 sackda {DEFAULT_ITEMS_PER_MESHOK} ta bo'ladi, jami {total_str} {currency}."
+        return f"{label} uchun dona narxi {unit_str} {currency}. {meshok_count} sackda jami {total_items} ta bo'ladi, umumiy narx {total_str} {currency}."
+    if lang == "ru":
+        if meshok_count == 1:
+            return f"Для {label} цена за 1 штуку {unit_str} {currency}. В 1 мешке {DEFAULT_ITEMS_PER_MESHOK} штук, итого {total_str} {currency}."
+        return f"Для {label} цена за 1 штуку {unit_str} {currency}. В {meshok_count} мешках всего {total_items} штук, общая сумма {total_str} {currency}."
+    if lang == "kk":
+        if meshok_count == 1:
+            return f"{label} үшін 1 данасының бағасы {unit_str} {currency}. 1 қапта {DEFAULT_ITEMS_PER_MESHOK} дана болады, жалпы {total_str} {currency}."
+        return f"{label} үшін 1 данасының бағасы {unit_str} {currency}. {meshok_count} қапта барлығы {total_items} дана болады, жалпы баға {total_str} {currency}."
+    if meshok_count == 1:
+        return f"{label} uchun 1 dona narxi {unit_str} {currency}. 1 qopda {DEFAULT_ITEMS_PER_MESHOK} ta bo'ladi, jami {total_str} {currency}."
+    return f"{label} uchun 1 dona narxi {unit_str} {currency}. {meshok_count} qopda jami {total_items} ta bo'ladi, umumiy narx {total_str} {currency}."
 
 
 def _collect_instagram_payload_urls(value, url_candidates: list[str]):
@@ -6102,6 +6169,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         business_id = normalize_id(business.get("id"))
         recent_media_context_found = False
         force_direct_media_reply = False
+        resolved_media_match = {}
 
         if matcher_source_url and media_type in {"photo", "video", "file"}:
             log("Instagram DM media matcher request", {
@@ -6117,6 +6185,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 access_token=access_token,
             )
             if media_match:
+                resolved_media_match = media_match
                 media_match_context = media_match.get("context", "")
                 media_reply_hint = media_match.get("reply_hint", "")
                 remember_instagram_media_match(
@@ -6126,6 +6195,9 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                     reply_hint=media_reply_hint,
                     top_match_code=media_match.get("top_match_code", ""),
                     top_match_model=media_match.get("top_match_model", ""),
+                    top_match_price=media_match.get("top_match_price", ""),
+                    top_match_currency=media_match.get("top_match_currency", ""),
+                    match_strategy=media_match.get("match_strategy", ""),
                     top_score=media_match.get("top_score", 0.0),
                 )
                 log("Instagram DM media matcher hit", {
@@ -6147,13 +6219,14 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             cached_match = load_recent_instagram_media_match(business_id=business_id, customer_id=sender_id)
             if cached_match:
                 recent_media_context_found = True
+                resolved_media_match = cached_match
                 cached_context = normalize_id(cached_match.get("context"))
                 if cached_context:
                     media_match_context = (
                         f"{cached_context}\n"
                         "- This customer follow-up likely refers to the same previously matched product unless they ask to change model."
                     )
-                    media_reply_hint = normalize_id(cached_match.get("reply_hint")) or media_reply_hint
+                    media_reply_hint = ""
                     log("Instagram DM media matcher cache hit", {
                         "customer_id": sender_id,
                         "message_id": message_id,
@@ -6185,18 +6258,22 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                         access_token=access_token,
                     )
                     if media_match:
+                        resolved_media_match = media_match
                         media_match_context = (
                             f"{media_match.get('context', '')}\n"
                             "- This customer follow-up is replying directly to the matched product image."
                         )
-                        media_reply_hint = media_match.get("reply_hint", "")
+                        media_reply_hint = ""
                         remember_instagram_media_match(
                             business_id=business_id,
                             customer_id=sender_id,
                             context=media_match_context,
-                            reply_hint=media_reply_hint,
+                            reply_hint=media_match.get("reply_hint", ""),
                             top_match_code=media_match.get("top_match_code", ""),
                             top_match_model=media_match.get("top_match_model", ""),
+                            top_match_price=media_match.get("top_match_price", ""),
+                            top_match_currency=media_match.get("top_match_currency", ""),
+                            match_strategy=media_match.get("match_strategy", ""),
                             top_score=media_match.get("top_score", 0.0),
                         )
                         log("Instagram DM reply-to media matcher hit", {
@@ -6239,18 +6316,22 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                         access_token=access_token,
                     )
                     if media_match:
+                        resolved_media_match = media_match
                         media_match_context = (
                             f"{media_match.get('context', '')}\n"
                             "- This customer follow-up likely refers to their most recent product image."
                         )
-                        media_reply_hint = media_match.get("reply_hint", "")
+                        media_reply_hint = ""
                         remember_instagram_media_match(
                             business_id=business_id,
                             customer_id=sender_id,
                             context=media_match_context,
-                            reply_hint=media_reply_hint,
+                            reply_hint=media_match.get("reply_hint", ""),
                             top_match_code=media_match.get("top_match_code", ""),
                             top_match_model=media_match.get("top_match_model", ""),
+                            top_match_price=media_match.get("top_match_price", ""),
+                            top_match_currency=media_match.get("top_match_currency", ""),
+                            match_strategy=media_match.get("match_strategy", ""),
                             top_score=media_match.get("top_score", 0.0),
                         )
                         log("Instagram DM recent-media matcher hit", {
@@ -6267,6 +6348,17 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                             "media_type": recent_media_type,
                         })
 
+        if media_type in {"photo", "video", "file"} and not normalize_id(message_text):
+            log("Instagram DM cached media without immediate reply", {
+                "customer_id": sender_id,
+                "message_id": message_id,
+                "media_type": media_type,
+                "has_verified_match": bool(normalize_id((resolved_media_match or {}).get("top_match_code"))),
+            })
+            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="cached_media_waiting_for_text")
+            mark_processed(processed_message_ids, message_id)
+            return
+
         needs_photo_fallback = (
             (media_type in {"photo", "video", "file"} or recent_media_context_found)
             and not media_match_context
@@ -6274,12 +6366,20 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         )
         if needs_photo_fallback:
             if recent_media_context_found and is_price_question(message_text):
-                media_reply_hint = product_media_price_fallback_reply(message_text, business)
-                media_match_context = (
-                    "The customer is asking the price for their recent product photo, "
-                    "but the product matcher did not return a verified catalog match. "
-                    "Answer with a short price-confirmation fallback and do not ask for name or phone."
-                )
+                verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match)
+                if verified_meshok_reply:
+                    media_reply_hint = verified_meshok_reply
+                    media_match_context = (
+                        "The customer is asking about bag/meshok pricing for a verified matched product. "
+                        "Use the verified unit price and the standard 60 pieces per meshok to answer directly."
+                    )
+                else:
+                    media_reply_hint = product_media_price_fallback_reply(message_text, business)
+                    media_match_context = (
+                        "The customer is asking the price for their recent product photo, "
+                        "but the product matcher did not return a verified catalog match. "
+                        "Answer with a short price-confirmation fallback and do not ask for name or phone."
+                    )
                 force_direct_media_reply = True
             elif media_type in {"photo", "video", "file"}:
                 media_reply_hint = replacement_for_forbidden_product_photo_question(message_text or "photo", business)
@@ -6298,6 +6398,12 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_no_verified_match")
                 mark_processed(processed_message_ids, message_id)
                 return
+
+        if is_price_question(message_text) and normalize_id((resolved_media_match or {}).get("match_strategy")) == "exact_code_match":
+            verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match)
+            if verified_meshok_reply:
+                media_reply_hint = verified_meshok_reply
+                force_direct_media_reply = True
 
         if force_direct_media_reply:
             log("Instagram DM media fallback reply", {
