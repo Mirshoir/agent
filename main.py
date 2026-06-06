@@ -229,6 +229,10 @@ PRODUCT_MATCHER_RECENT_MEDIA_LOOKBACK_SECONDS = max(
     60,
     min(24 * 60 * 60, int(os.getenv("PRODUCT_MATCHER_RECENT_MEDIA_LOOKBACK_SECONDS", "1800"))),
 )
+OUTBOUND_DUPLICATE_WINDOW_SECONDS = max(
+    5,
+    min(300, int(os.getenv("OUTBOUND_DUPLICATE_WINDOW_SECONDS", "25"))),
+)
 PRODUCT_MATCHER_LOCAL_ENABLED = str(os.getenv("PRODUCT_MATCHER_LOCAL_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
 PRODUCT_MATCHER_LOCAL_ONLY = str(os.getenv("PRODUCT_MATCHER_LOCAL_ONLY", "1")).strip().lower() in {"1", "true", "yes", "on"}
 PRODUCT_MATCHER_LOCAL_CATALOG_TABLE = str(os.getenv("PRODUCT_MATCHER_LOCAL_CATALOG_TABLE", "milana_products") or "").strip() or "milana_products"
@@ -2574,6 +2578,62 @@ def has_outbound_reply_after(
         return False
 
 
+def has_recent_outbound_text(
+    business_id: str,
+    platform: str,
+    customer_id: str,
+    message_text: str,
+    channel: str = "",
+    window_seconds: int = OUTBOUND_DUPLICATE_WINDOW_SECONDS,
+) -> bool:
+    business_id = normalize_id(business_id)
+    platform = normalize_id(platform)
+    customer_id = normalize_id(customer_id)
+    channel = normalize_id(channel)
+    message_text = normalize_id(message_text)
+    if not business_id or not platform or not customer_id or not message_text:
+        return False
+
+    try:
+        rows = (
+            supabase.table("inbox_messages")
+            .select("content,created_at")
+            .eq("business_id", business_id)
+            .eq("platform", platform)
+            .eq("customer_id", customer_id)
+            .eq("direction", "outbound")
+            .eq("channel", standard_channel(platform, channel))
+            .order("created_at", desc=True)
+            .limit(5)
+            .execute()
+            .data
+            or []
+        )
+        now = datetime.utcnow()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if normalize_id(row.get("content")) != message_text:
+                continue
+            created_at = normalize_id(row.get("created_at"))
+            if not created_at:
+                continue
+            try:
+                dt = datetime.fromisoformat(created_at.replace("Z", "+00:00")).replace(tzinfo=None)
+            except Exception:
+                continue
+            if (now - dt).total_seconds() <= window_seconds:
+                return True
+    except Exception as exc:
+        log("Could not check recent outbound text dedupe", {
+            "business_id": business_id,
+            "platform": platform,
+            "customer_id": customer_id,
+            "error": str(exc),
+        })
+    return False
+
+
 def get_message_count(platform=None, business_ids=None):
     try:
         q = supabase.table("inbox_messages").select("id", count="exact")
@@ -3600,10 +3660,10 @@ def wants_deal_handoff(text: str) -> bool:
     if not s:
         return False
     markers = [
-        "deal", "make a deal", "close deal", "contract", "partnership", "wholesale", "bulk order",
-        "заказ", "оформить", "договор", "оптом", "сделка", "куплю",
-        "zakaz", "buyurtma", "ulgurji", "kelishuv", "sotib olaman", "olaman",
-        "мәміле", "тапсырыс", "көтерме", "келісім",
+        "payment", "pay", "prepayment", "invoice", "contract", "agreement", "manager",
+        "оплата", "оплатить", "счет", "инвойс", "договор", "менеджер",
+        "to'lov", "tolov", "oplata", "shartnoma", "hisob-faktura", "invoice", "menejer",
+        "төлем", "шарт", "келісімшарт", "менеджер",
     ]
     return any(m in s for m in markers)
 
@@ -5353,21 +5413,34 @@ def build_verified_meshok_price_reply(user_text: str, media_match: dict) -> str:
     total_items = DEFAULT_ITEMS_PER_MESHOK * meshok_count
     total_price = unit_price * total_items
     total_str = f"{total_price:.1f}".rstrip("0").rstrip(".")
+    size_match = re.search(r"\b(\d{2})\s*(?:razmer|size|размер)?\b", normalize_id(user_text).lower())
+    size_value = size_match.group(1) if size_match else ""
     if lang == "en":
         if meshok_count == 1:
-            return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. 1 qopda {DEFAULT_ITEMS_PER_MESHOK} ta bo'ladi, jami {total_str} {currency}. Qaysi razmer kerak?"
-        return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {meshok_count} qopda jami {total_items} ta bo'ladi, umumiy narx {total_str} {currency}. Qaysi razmer kerak?"
+            follow_up = "Qaysi razmer kerak?" if not size_value else f"{size_value} razmer bo'ladi. Qaysi shahar yoki manzilga kerak?"
+            return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. 1 qopda {DEFAULT_ITEMS_PER_MESHOK} ta bo'ladi, jami {total_str} {currency}. {follow_up}"
+        follow_up = "Qaysi razmer kerak?" if not size_value else f"{size_value} razmer bo'ladi. Qaysi shahar yoki manzilga kerak?"
+        return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {meshok_count} qopda jami {total_items} ta bo'ladi, umumiy narx {total_str} {currency}. {follow_up}"
     if lang == "ru":
         if meshok_count == 1:
             return f"Для модели {label} цена за 1 штуку {unit_str} {currency}. В 1 мешке {DEFAULT_ITEMS_PER_MESHOK} штук, итого {total_str} {currency}. Какой размер нужен?"
         return f"Для модели {label} цена за 1 штуку {unit_str} {currency}. В {meshok_count} мешках всего {total_items} штук, общая сумма {total_str} {currency}. Какой размер нужен?"
     if lang == "kk":
         if meshok_count == 1:
-            return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. 1 қапта {DEFAULT_ITEMS_PER_MESHOK} дана болады, жалпы {total_str} {currency}. Қай өлшем керек?"
-        return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. {meshok_count} қапта барлығы {total_items} дана болады, жалпы баға {total_str} {currency}. Қай өлшем керек?"
+            follow_up = "Қай өлшем керек?" if not size_value else f"{size_value} өлшем болады. Қай қалаға не мекенжайға керек?"
+            return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. 1 қапта {DEFAULT_ITEMS_PER_MESHOK} дана болады, жалпы {total_str} {currency}. {follow_up}"
+        follow_up = "Қай өлшем керек?" if not size_value else f"{size_value} өлшем болады. Қай қалаға не мекенжайға керек?"
+        return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. {meshok_count} қапта барлығы {total_items} дана болады, жалпы баға {total_str} {currency}. {follow_up}"
     if meshok_count == 1:
-        return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. 1 qopda {DEFAULT_ITEMS_PER_MESHOK} ta bo'ladi, jami {total_str} {currency}. Qaysi razmer kerak?"
-    return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {meshok_count} qopda jami {total_items} ta bo'ladi, umumiy narx {total_str} {currency}. Qaysi razmer kerak?"
+        follow_up = "Qaysi razmer kerak?" if not size_value else f"{size_value} razmer bo'ladi. Qaysi shahar yoki manzilga kerak?"
+        return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. 1 qopda {DEFAULT_ITEMS_PER_MESHOK} ta bo'ladi, jami {total_str} {currency}. {follow_up}"
+    follow_up = "Qaysi razmer kerak?" if not size_value else f"{size_value} razmer bo'ladi. Qaysi shahar yoki manzilga kerak?"
+    return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {meshok_count} qopda jami {total_items} ta bo'ladi, umumiy narx {total_str} {currency}. {follow_up}"
+
+
+def is_verified_media_match(media_match: dict = None) -> bool:
+    strategy = normalize_id((media_match or {}).get("match_strategy"))
+    return strategy in {"exact_code_match", "exact_model_match"}
 
 
 def _collect_instagram_payload_urls(value, url_candidates: list[str]):
@@ -6179,7 +6252,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             )
             if media_match:
                 resolved_media_match = media_match
-                verified_exact_media_match = normalize_id(media_match.get("match_strategy")) == "exact_code_match"
+                verified_exact_media_match = is_verified_media_match(media_match)
                 media_match_context = media_match.get("context", "")
                 media_reply_hint = media_match.get("reply_hint", "")
                 remember_instagram_media_match(
@@ -6214,7 +6287,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             if cached_match:
                 recent_media_context_found = True
                 resolved_media_match = cached_match
-                verified_exact_media_match = normalize_id(cached_match.get("match_strategy")) == "exact_code_match"
+                verified_exact_media_match = is_verified_media_match(cached_match)
                 cached_context = normalize_id(cached_match.get("context"))
                 if cached_context:
                     media_match_context = (
@@ -6254,7 +6327,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                     )
                     if media_match:
                         resolved_media_match = media_match
-                        verified_exact_media_match = normalize_id(media_match.get("match_strategy")) == "exact_code_match"
+                        verified_exact_media_match = is_verified_media_match(media_match)
                         media_match_context = (
                             f"{media_match.get('context', '')}\n"
                             "- This customer follow-up is replying directly to the matched product image."
@@ -6313,7 +6386,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                     )
                     if media_match:
                         resolved_media_match = media_match
-                        verified_exact_media_match = normalize_id(media_match.get("match_strategy")) == "exact_code_match"
+                        verified_exact_media_match = is_verified_media_match(media_match)
                         media_match_context = (
                             f"{media_match.get('context', '')}\n"
                             "- This customer follow-up likely refers to their most recent product image."
@@ -6363,6 +6436,13 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         )
 
         quantity_followup = _extract_meshok_count(message_text) is not None
+
+        media_match_strategy = normalize_id((resolved_media_match or {}).get("match_strategy"))
+
+        if media_match_strategy == "exact_model_ambiguous_price" and (is_price_question(message_text) or quantity_followup):
+            media_reply_hint = normalize_id((resolved_media_match or {}).get("reply_hint"))
+            if media_reply_hint:
+                force_direct_media_reply = True
 
         if verified_exact_media_match and (is_price_question(message_text) or quantity_followup):
             verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match)
@@ -6433,6 +6513,23 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 lead_state=lead_state,
             )
 
+        reply_text = complete_sentence_reply(remove_urls(reply_text), limit=1000)
+        if has_recent_outbound_text(
+            business.get("id"),
+            "instagram",
+            sender_id,
+            reply_text,
+            "dm",
+        ):
+            log("Instagram DM duplicate outbound suppressed", {
+                "customer_id": sender_id,
+                "message_id": message_id,
+                "reply_preview": reply_text[:180],
+            })
+            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="duplicate_outbound_suppressed")
+            mark_processed(processed_message_ids, message_id)
+            return
+
         should_send_catalog = (
             bool(get_catalog_link(business))
             and wants_catalog(message_text)
@@ -6447,7 +6544,6 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             send_result = send_catalog_button(access_token, sender_id, business, reply_text)
             saved_reply_text = clean_ai_reply_for_catalog(reply_text, business) + "\n[Catalog button sent]"
         else:
-            reply_text = complete_sentence_reply(remove_urls(reply_text), limit=1000)
             send_result = send_dm(access_token, sender_id, reply_text, business)
             saved_reply_text = reply_text
 
