@@ -3476,37 +3476,24 @@ def contains_forbidden_product_photo_question(text: str) -> bool:
 
 def generic_price_fallback_reply(user_text: str, business: dict = None) -> str:
     lang = detect_customer_language(user_text)
-    prices = normalize_id((business or {}).get("prices"))
-    if prices and looks_like_internal_prompt_leak(prices):
-        log("Configured prices blocked as prompt leak", {"prices_preview": prices[:300]})
-        prices = ""
-    if prices:
-        if lang == "en":
-            return f"Our current price information: {prices}. Which product/model do you need?"
-        if lang == "ru":
-            return f"Актуальная информация по ценам: {prices}. Какая модель или товар вам нужен?"
-        if lang == "kk":
-            return f"Қазіргі баға мәліметі: {prices}. Қай тауар немесе модель керек?"
-        return f"Narx bo'yicha ma'lumot: {prices}. Sizga qaysi mahsulot yoki model kerak?"
-
     if lang == "en":
-        return "Our manager will confirm the exact price. Which product/model do you need?"
+        return "Which model do you need? I will tell you the price."
     if lang == "ru":
-        return "Точную цену подтвердит менеджер. Какая модель или товар вам нужен?"
+        return "Какая модель вам нужна? Я скажу цену."
     if lang == "kk":
-        return "Нақты бағаны менеджер растайды. Қай тауар немесе модель керек?"
-    return "Aniq narxni menejerimiz tasdiqlaydi. Sizga qaysi mahsulot yoki model kerak?"
+        return "Қай модель керек? Бағасын айтып беремін."
+    return "Qaysi model kerak? Narxini aytaman."
 
 
 def product_media_price_fallback_reply(user_text: str, business: dict = None) -> str:
     lang = detect_customer_language(user_text)
     if lang == "en":
-        return "Thanks for the photo. I need to confirm the exact price for this model. Which size or quantity are you interested in?"
+        return "Thanks. Send a clearer photo or the model code, and I will tell you the price."
     if lang == "ru":
-        return "Спасибо за фото. Точную цену этой модели нужно подтвердить. Какой размер или количество вас интересует?"
+        return "Спасибо. Отправьте фото чётче или код модели, и я скажу цену."
     if lang == "kk":
-        return "Фото үшін рахмет. Бұл модельдің нақты бағасын нақтылау керек. Қай өлшем немесе қанша дана қызықтырады?"
-    return "Rasm uchun rahmat. Bu modelning aniq narxini tekshirib aytamiz. Qaysi razmer yoki nechta kerak?"
+        return "Рахмет. Анығырақ фото не модель кодын жіберіңіз, бағасын айтамын."
+    return "Rahmat. Aniqroq rasm yoki model kodini yuboring, narxini aytaman."
 
 
 def business_products_summary(business: dict = None, limit: int = 4) -> str:
@@ -3529,19 +3516,19 @@ def replacement_for_forbidden_product_photo_question(user_text: str = "", busine
     lang = detect_customer_language(user_text)
     if lang == "en":
         if is_price_question(user_text):
-            return "Thanks for the photo. Our manager will confirm the exact price."
-        return "Thanks for the photo. Our manager will confirm the details."
+            return "Thanks. Send a clearer photo or the model code, and I will tell you the price."
+        return "Thanks. Which model are you interested in?"
     if lang == "ru":
         if is_price_question(user_text):
-            return "Спасибо за фото. Точную цену подтвердит менеджер."
-        return "Спасибо за фото. Менеджер подтвердит детали."
+            return "Спасибо. Отправьте фото чётче или код модели, и я скажу цену."
+        return "Спасибо. Какая модель вас интересует?"
     if lang == "kk":
         if is_price_question(user_text):
-            return "Фото үшін рахмет. Нақты бағаны менеджер растайды."
-        return "Фото үшін рахмет. Менеджер егжей-тегжейін растайды."
+            return "Рахмет. Анығырақ фото не модель кодын жіберіңіз, бағасын айтамын."
+        return "Рахмет. Қай модель қызықтырады?"
     if is_price_question(user_text):
-        return "Rasm uchun rahmat. Aniq narxni menejerimiz tasdiqlaydi."
-    return "Rasm uchun rahmat. Menejerimiz tafsilotlarni tasdiqlaydi."
+        return "Rahmat. Aniqroq rasm yoki model kodini yuboring, narxini aytaman."
+    return "Rahmat. Qaysi model kerak?"
 
 
 def get_sales_phone(business: dict) -> str:
@@ -4428,12 +4415,12 @@ def safe_prompt_leak_fallback(user_text: str, business: dict = None, lead_state:
 def safe_outbound_leak_fallback(business: dict = None) -> str:
     lang = normalize_id((business or {}).get("language")).lower()
     if lang.startswith("en"):
-        return "Our manager will confirm the exact details. Which product or model do you need?"
+        return "Which model do you need?"
     if lang.startswith("ru"):
-        return "Точные детали подтвердит менеджер. Какая модель или товар вам нужен?"
+        return "Какая модель вам нужна?"
     if lang.startswith("kk"):
-        return "Нақты мәліметті менеджер растайды. Қай тауар немесе модель керек?"
-    return "Aniq ma'lumotni menejerimiz tasdiqlaydi. Sizga qaysi mahsulot yoki model kerak?"
+        return "Қай модель керек?"
+    return "Qaysi model kerak?"
 
 
 def _safe_score(value) -> float:
