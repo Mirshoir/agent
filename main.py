@@ -6362,14 +6362,16 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             and not media_reply_hint
         )
 
-        if verified_exact_media_match and is_price_question(message_text):
+        quantity_followup = _extract_meshok_count(message_text) is not None
+
+        if verified_exact_media_match and (is_price_question(message_text) or quantity_followup):
             verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match)
             if verified_meshok_reply:
                 media_reply_hint = verified_meshok_reply
                 force_direct_media_reply = True
 
         if needs_photo_fallback:
-            if recent_media_context_found and is_price_question(message_text):
+            if recent_media_context_found and (is_price_question(message_text) or quantity_followup):
                 verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match)
                 if verified_meshok_reply:
                     media_reply_hint = verified_meshok_reply
