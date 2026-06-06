@@ -6295,7 +6295,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             or (media_type in {"photo", "video"} and not message.get("text"))
         ))
         if force_direct_media_reply:
-            reply_text = complete_sentence_reply(media_reply_hint)
+            reply_text = clean_sales_reply(media_reply_hint, message_text or "photo", business, lead_state)
         elif use_direct_matcher_reply:
             reply_text = clean_sales_reply(media_reply_hint, message_text or "photo", business, lead_state)
         else:
