@@ -980,13 +980,10 @@ def build_product_match_reply(code: str, model: str, price: str, currency: str, 
     model = normalize_text(model)
     price = normalize_text(price)
     currency = normalize_text(currency)
-    label = code or model
-    if code and model and model != code:
-        label = f"{code}, model {model}"
-    confidence_note = " O'xshash model deb ko'rinyapti." if top_score < PRODUCT_MATCHER_MIN_SCORE else ""
+    label = model or code or "shu model"
     if price:
-        return f"Topdim:{confidence_note} {label or 'shu model'} narxi {price} {currency or '$'}. Qaysi razmer va nechta qop kerak?"
-    return f"Topdim:{confidence_note} {label or 'shu model'} bo'yicha aniq narxni menejerimiz tekshirib beradi. Qaysi razmer va nechta qop kerak?"
+        return f"Model {label} narxi {price} {currency or '$'}. Qaysi razmer va nechta qop kerak?"
+    return f"Model {label} bo'yicha aniqroq rasm yoki kod yuboring. Qaysi razmer va nechta qop kerak?"
 
 
 def build_manual_review_reply(user_text: str, analysis: CustomerImageAnalysis) -> str:
