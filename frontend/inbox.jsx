@@ -133,6 +133,22 @@ function clearAuthSession() {
   window.sessionStorage.removeItem('instaagent_dashboard_secret');
 }
 
+function localDevDashboardSession() {
+  if (dashboardSecret() !== 'localdev') return null;
+  const ownerEmail = ownerEmailFromUrl() || ownerEmailFromStorage() || 'milanapremium2025@gmail.com';
+  return {
+    ownerEmail: normalizeOwnerEmail(ownerEmail),
+    token: 'localdev-demo-token',
+    isAdmin: true,
+    role: 'super_admin',
+    at: new Date().toISOString(),
+  };
+}
+
+function isLocalDevDashboardMode() {
+  return dashboardSecret() === 'localdev';
+}
+
 function resolveRoleScope(currentUser = {}, businesses = []) {
   const rawRole = String(currentUser?.role || '').trim().toLowerCase();
   const adminRoles = new Set(['owner', 'admin', 'super_admin']);
@@ -699,6 +715,60 @@ function fileToDataUrl(file) {
     reader.onerror = () => reject(reader.error || new Error('Could not read file'));
     reader.readAsDataURL(file);
   });
+}
+
+function waitForVideoEvent(video, eventName) {
+  return new Promise((resolve, reject) => {
+    const onEvent = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error('Could not read video metadata'));
+    };
+    const cleanup = () => {
+      video.removeEventListener(eventName, onEvent);
+      video.removeEventListener('error', onError);
+    };
+    video.addEventListener(eventName, onEvent, { once: true });
+    video.addEventListener('error', onError, { once: true });
+  });
+}
+
+async function captureVideoFramesFromFile(file, frameCount = 4) {
+  if (!file || !file.type?.startsWith('video/')) return { frames: [], duration: 0 };
+  const url = URL.createObjectURL(file);
+  const video = document.createElement('video');
+  video.src = url;
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = 'metadata';
+
+  try {
+    await waitForVideoEvent(video, 'loadedmetadata');
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    const canvas = document.createElement('canvas');
+    const width = Math.min(720, video.videoWidth || 720);
+    const height = Math.round(width * ((video.videoHeight || 1280) / (video.videoWidth || 720)));
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    const frames = [];
+    const usableDuration = Math.max(0.1, duration || 1);
+    const count = Math.max(1, Math.min(frameCount, 4));
+
+    for (let index = 0; index < count; index += 1) {
+      const time = Math.min(usableDuration - 0.05, usableDuration * ((index + 1) / (count + 1)));
+      video.currentTime = Math.max(0, time);
+      await waitForVideoEvent(video, 'seeked');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      frames.push(canvas.toDataURL('image/jpeg', 0.74));
+    }
+    return { frames, duration: Math.round(duration || 0) };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
 function recordingMimeType() {
@@ -1480,6 +1550,20 @@ const WORKSPACE_TEXT = {
     postExtraInfo: 'Post extra info for bot replies',
     savePostInfo: 'Save post info',
     postSaved: 'Post info saved',
+    videoAnalyzerTitle: 'Video Analyzer',
+    videoAnalyzerSubtitle: 'Analyze Reels, TikToks, and Shorts with Gemini.',
+    videoAnalyzerUpload: 'Upload Reel, TikTok, or Shorts',
+    videoAnalyzerNiche: 'Niche',
+    videoAnalyzerDescription: 'Current caption',
+    videoAnalyzerDetails: 'Video details',
+    videoAnalyzerRun: 'Analyze',
+    videoAnalyzerLoading: 'Analyzing...',
+    videoAnalyzerPreview: 'Video preview',
+    videoAnalyzerReport: 'AI report',
+    videoAnalyzerMeta: 'Gemini analysis',
+    videoAnalyzerEmpty: 'Upload a video or add text details, then run analysis.',
+    copy: 'Copy',
+    copied: 'Copied',
   },
   uz: {
     workspace: 'Ish maydoni', leadsTitle: 'Lidlar pipeline', promptsTitle: 'AI Prompt sozlamalari', profile: 'Profil', refresh: 'Yangilash', liveWorkspace: 'Live backend ish maydoni',
@@ -1545,6 +1629,20 @@ const WORKSPACE_TEXT = {
     postExtraInfo: 'Bot javobi uchun postga xos qo‘shimcha maʼlumot',
     savePostInfo: 'Post maʼlumotini saqlash',
     postSaved: 'Post maʼlumoti saqlandi',
+    videoAnalyzerTitle: 'Video Analyzer',
+    videoAnalyzerSubtitle: 'Reels, TikTok va Shorts videolarini Gemini bilan tahlil qiling.',
+    videoAnalyzerUpload: 'Reel, TikTok yoki Shorts yuklash',
+    videoAnalyzerNiche: 'Nisha',
+    videoAnalyzerDescription: 'Hozirgi caption',
+    videoAnalyzerDetails: 'Video detallari',
+    videoAnalyzerRun: 'Tahlil qilish',
+    videoAnalyzerLoading: 'Tahlil qilinmoqda...',
+    videoAnalyzerPreview: 'Video preview',
+    videoAnalyzerReport: 'AI hisobot',
+    videoAnalyzerMeta: 'Gemini tahlili',
+    videoAnalyzerEmpty: 'Video yuklang yoki matnli detallar qo‘shing, keyin tahlilni boshlang.',
+    copy: 'Copy',
+    copied: 'Copied',
   },
   ru: {
     workspace: 'Рабочая область', leadsTitle: 'Воронка лидов', promptsTitle: 'Настройки AI Prompt', profile: 'Профиль', refresh: 'Обновить', liveWorkspace: 'Рабочая область backend',
@@ -1610,6 +1708,20 @@ const WORKSPACE_TEXT = {
     postExtraInfo: 'Доп. информация по посту для ответов бота',
     savePostInfo: 'Сохранить информацию',
     postSaved: 'Информация по посту сохранена',
+    videoAnalyzerTitle: 'Video Analyzer',
+    videoAnalyzerSubtitle: 'Анализ Reels, TikTok и Shorts через Gemini.',
+    videoAnalyzerUpload: 'Загрузить Reel, TikTok или Shorts',
+    videoAnalyzerNiche: 'Ниша',
+    videoAnalyzerDescription: 'Текущее описание',
+    videoAnalyzerDetails: 'Детали видео',
+    videoAnalyzerRun: 'Анализировать',
+    videoAnalyzerLoading: 'Анализируем...',
+    videoAnalyzerPreview: 'Превью видео',
+    videoAnalyzerReport: 'AI отчет',
+    videoAnalyzerMeta: 'Gemini анализ',
+    videoAnalyzerEmpty: 'Загрузите видео или добавьте текстовые детали, затем запустите анализ.',
+    copy: 'Копировать',
+    copied: 'Скопировано',
   },
 };
 
@@ -1948,6 +2060,8 @@ function PostsWorkspace({
   onImportPosts,
   onRefreshPosts,
   onSaveExtraInfo,
+  selectedBusiness,
+  onToast,
   w = WORKSPACE_TEXT.en,
 }) {
   const selected = posts.find(item => item.post_id === selectedPostId) || posts[0] || null;
@@ -1973,6 +2087,13 @@ function PostsWorkspace({
       {loading && <div className="ig-growth-state">{w.postsLoading}</div>}
       {!loading && error && <div className="ig-growth-state error"><span>{error}</span></div>}
       {!loading && !error && !posts.length && <div className="ig-growth-state">{w.postsEmpty}</div>}
+
+      <VideoAnalyzerWorkspace
+        selectedBusiness={selectedBusiness}
+        selectedPost={selected}
+        onToast={onToast}
+        w={w}
+      />
 
       {!loading && !error && posts.length > 0 && (
         <div className="posts-grid">
@@ -2016,6 +2137,310 @@ function PostsWorkspace({
           </div>
         </div>
       )}
+    </section>
+  );
+}
+
+function cleanAnalyzerText(value = '') {
+  return String(value || '')
+    .replace(/\*\*/g, '')
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/^\s*[*-]\s+/gm, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim();
+}
+
+function splitAnalyzerSections(report = '') {
+  const clean = cleanAnalyzerText(report);
+  if (!clean) return [];
+  const lines = clean.split('\n');
+  const sections = [];
+  let intro = [];
+  let current = null;
+  const headingPattern = /^([\p{Extended_Pictographic}\u2600-\u27BF]\s*)?(.{2,90})$/u;
+  const reportHeadingPattern = /^(анализ видео|анализ описания|соответствие видео|ошибки|что хорошо|улучшенное описание|вирусные варианты|лучшие хэштеги|что повысит просмотры|дополнительные идеи|итоговая оценка|оценка контента)$/i;
+
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line) {
+      if (current) current.lines.push('');
+      else if (intro.length) intro.push('');
+      return;
+    }
+
+    const hasEmojiPrefix = /^[\p{Extended_Pictographic}\u2600-\u27BF]/u.test(line);
+    const plainHeading = line
+      .replace(/^[\p{Extended_Pictographic}\u2600-\u27BF]\s*/u, '')
+      .trim();
+    const isHeading = headingPattern.test(line) && reportHeadingPattern.test(plainHeading);
+
+    if (isHeading) {
+      if (!current && intro.join('\n').trim()) {
+        sections.push({ title: 'Summary', body: intro.join('\n').trim() });
+        intro = [];
+      }
+      if (current) sections.push({ title: current.title, body: current.lines.join('\n').trim() });
+      current = { title: line, lines: [] };
+      return;
+    }
+
+    if (current) current.lines.push(line);
+    else intro.push(line);
+  });
+
+  if (current) sections.push({ title: current.title, body: current.lines.join('\n').trim() });
+  else if (intro.join('\n').trim()) sections.push({ title: 'AI report', body: intro.join('\n').trim() });
+  return sections.filter(section => section.title || section.body);
+}
+
+function AnalyzerSectionBody({ body }) {
+  const blocks = String(body || '').split(/\n{2,}/).filter(Boolean);
+  return (
+    <div className="analyzer-section-body">
+      {blocks.map((block, blockIndex) => {
+        const lines = block.split('\n').map(line => line.trim()).filter(Boolean);
+        const listLike = lines.length > 1 || lines.every(line => /^([^:]{2,48}):\s+/.test(line));
+        if (listLike) {
+          return (
+            <ul key={`block-${blockIndex}`}>
+              {lines.map((line, lineIndex) => {
+                const match = line.match(/^([^:]{2,48}):\s+(.+)$/);
+                return (
+                  <li key={`line-${lineIndex}`}>
+                    {match ? <><strong>{match[1]}</strong><span>{match[2]}</span></> : <span>{line}</span>}
+                  </li>
+                );
+              })}
+            </ul>
+          );
+        }
+        return <p key={`block-${blockIndex}`}>{lines.join(' ')}</p>;
+      })}
+    </div>
+  );
+}
+
+function AnalyzerReport({ report, meta, errorText = '', emptyText, onCopy, w = WORKSPACE_TEXT.en }) {
+  const sections = splitAnalyzerSections(report);
+  const hasReport = sections.length > 0;
+  const [activeSection, setActiveSection] = useState(0);
+  const [copiedKey, setCopiedKey] = useState('');
+
+  useEffect(() => {
+    if (!sections.length) {
+      setActiveSection(0);
+      return;
+    }
+    setActiveSection(0);
+  }, [report]);
+
+  const copySection = async (key, text, label) => {
+    const ok = await onCopy?.(text, label);
+    if (ok === false) return;
+    setCopiedKey(key);
+    window.clearTimeout(copySection.timer);
+    copySection.timer = window.setTimeout(() => setCopiedKey(''), 1600);
+  };
+
+  const currentSection = sections[activeSection] || sections[0] || null;
+
+  return (
+    <div className="video-result">
+      <div className="video-result-head">
+        <div>
+          <strong>{w.videoAnalyzerReport || 'AI report'}</strong>
+          <span>{meta || (w.videoAnalyzerMeta || 'Gemini analysis')}</span>
+        </div>
+        <button className="copy-btn" disabled={!hasReport} onClick={() => copySection('all', cleanAnalyzerText(report), w.videoAnalyzerReport || 'AI report')}>
+          {copiedKey === 'all' ? (w.copied || 'Copied') : (w.copy || 'Copy')}
+        </button>
+      </div>
+      {!hasReport ? (
+        <div className={`video-result-empty ${errorText ? 'error' : ''}`}>{errorText || emptyText}</div>
+      ) : (
+        <div className="analyzer-report-layout">
+          <nav className="analyzer-section-nav" aria-label={w.videoAnalyzerReport || 'AI report'}>
+            {sections.map((section, index) => (
+              <button
+                key={`${section.title}-${index}`}
+                className={`analyzer-section-tab ${activeSection === index ? 'active' : ''}`}
+                onClick={() => setActiveSection(index)}
+              >
+                <span className="analyzer-section-tab-index">{String(index + 1).padStart(2, '0')}</span>
+                <span className="analyzer-section-tab-title">{section.title}</span>
+              </button>
+            ))}
+          </nav>
+          {currentSection && (
+            <article className="analyzer-section-detail">
+              <header className="analyzer-section-detail-head">
+                <div className="analyzer-section-detail-title">
+                  <strong>{currentSection.title}</strong>
+                  <span>{w.videoAnalyzerSectionLabel || 'Selected section'}</span>
+                </div>
+                <button className="copy-btn subtle" onClick={() => copySection(`section-${activeSection}`, `${currentSection.title}\n${currentSection.body}`.trim(), currentSection.title)}>
+                  {copiedKey === `section-${activeSection}` ? (w.copied || 'Copied') : (w.copy || 'Copy')}
+                </button>
+              </header>
+              <div className="analyzer-section-detail-body">
+                <AnalyzerSectionBody body={currentSection.body} />
+              </div>
+            </article>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VideoAnalyzerWorkspace({ selectedBusiness, selectedPost, onToast, w = WORKSPACE_TEXT.en }) {
+  const [videoFile, setVideoFile] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [brand, setBrand] = useState(selectedBusiness?.business_name || '');
+  const [niche, setNiche] = useState(selectedBusiness?.business_type || 'Fashion / product sales');
+  const [description, setDescription] = useState('');
+  const [details, setDetails] = useState('');
+  const [model, setModel] = useState('gemini-3-flash-preview');
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState('');
+  const [meta, setMeta] = useState('');
+  const [errorText, setErrorText] = useState('');
+  const descriptionRef = useRef(null);
+
+  useEffect(() => {
+    if (!brand && selectedBusiness?.business_name) setBrand(selectedBusiness.business_name);
+    if (!niche && selectedBusiness?.business_type) setNiche(selectedBusiness.business_type);
+  }, [selectedBusiness?.business_name, selectedBusiness?.business_type]);
+
+  useEffect(() => {
+    if (!description && selectedPost?.caption) setDescription(selectedPost.caption);
+    if (!details && selectedPost?.extra_info) setDetails(selectedPost.extra_info);
+  }, [selectedPost?.post_id]);
+
+  useEffect(() => () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+  }, [previewUrl]);
+
+  const selectVideo = (event) => {
+    const file = event.target.files?.[0] || null;
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setVideoFile(file);
+    setPreviewUrl(file ? URL.createObjectURL(file) : '');
+    setMeta(file ? `${file.name} · ${Math.round((file.size / 1024 / 1024) * 10) / 10} MB` : '');
+  };
+
+  const analyze = async () => {
+    setLoading(true);
+    setResult('');
+    setErrorText('');
+    try {
+      const captured = videoFile ? await captureVideoFramesFromFile(videoFile, 4) : { frames: [], duration: 0 };
+      const response = await API.postJson('/api/v2/video-analyzer/analyze', {
+        description,
+        brand,
+        niche,
+        details,
+        model,
+        duration: captured.duration,
+        frames: captured.frames,
+      }, { timeoutMs: 320000 });
+      const data = response?.data || {};
+      setResult(data.report || '');
+      setMeta(`Gemini · ${data.model || model} · ${captured.frames.length} frames`);
+      setErrorText('');
+      onToast?.('Video analysis ready');
+    } catch (e) {
+      setResult('');
+      setMeta('Analyzer failed');
+      setErrorText(e.message || 'Video analysis failed');
+      onToast?.(e.message || 'Video analysis failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const copyText = async (text, label = '') => {
+    const clean = cleanAnalyzerText(text);
+    if (!clean) return false;
+    try {
+      await navigator.clipboard?.writeText(clean);
+      onToast?.(`${label || 'Text'} copied`);
+      window.setTimeout(() => {
+        descriptionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        descriptionRef.current?.focus();
+      }, 80);
+      return true;
+    } catch (e) {
+      onToast?.('Copy failed');
+      return false;
+    }
+  };
+
+  return (
+    <section className="video-analyzer-workspace">
+      <div className="section-card-head video-analyzer-head">
+        <div>
+          <h3>{w.videoAnalyzerTitle || 'Video Analyzer'}</h3>
+          <p>{w.videoAnalyzerSubtitle || 'Analyze Reels, TikToks, and Shorts with Gemini.'}</p>
+        </div>
+      </div>
+      <div className="video-analyzer-form">
+        <label className="video-upload">
+          <input type="file" accept="video/*" onChange={selectVideo} />
+          <I.Photo />
+          <span>{videoFile ? videoFile.name : (w.videoAnalyzerUpload || 'Upload Reel, TikTok, or Shorts')}</span>
+        </label>
+        <div className="model-grid">
+          <label className="field-row">
+            <span>{w.brand || 'Brand'}</span>
+            <input value={brand} onChange={(e) => setBrand(e.target.value)} placeholder="Milana Premium" />
+          </label>
+          <label className="field-row">
+            <span>{w.videoAnalyzerNiche || 'Niche'}</span>
+            <input value={niche} onChange={(e) => setNiche(e.target.value)} placeholder="Fashion, beauty, food..." />
+          </label>
+        </div>
+        <label className="field-row">
+          <span>{w.videoAnalyzerDescription || 'Current caption'}</span>
+          <textarea ref={descriptionRef} value={description} onChange={(e) => setDescription(e.target.value)} rows={5} placeholder="Paste the current Instagram/TikTok/Shorts caption." />
+        </label>
+        <label className="field-row">
+          <span>{w.videoAnalyzerDetails || 'Video details'}</span>
+          <textarea value={details} onChange={(e) => setDetails(e.target.value)} rows={4} placeholder="What is shown, product name, audience, offer, or context." />
+        </label>
+        <div className="model-grid">
+          <label className="field-row">
+            <span>{w.model || 'Model'}</span>
+            <select value={model} onChange={(e) => setModel(e.target.value)}>
+              <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
+              <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+              <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
+            </select>
+          </label>
+          <button className="panel-btn video-analyzer-run" disabled={loading || (!videoFile && !description.trim() && !details.trim())} onClick={analyze}>
+            {loading ? (w.videoAnalyzerLoading || 'Analyzing...') : (w.videoAnalyzerRun || 'Analyze')}
+          </button>
+        </div>
+      </div>
+
+      <div className="video-analyzer-output">
+        {previewUrl ? (
+          <video src={previewUrl} controls playsInline preload="metadata" />
+        ) : (
+          <div className="video-preview-empty">{w.videoAnalyzerPreview || 'Video preview'}</div>
+        )}
+      </div>
+
+      <div className="video-analyzer-report-pane">
+        <AnalyzerReport
+          report={result}
+          meta={meta}
+          errorText={errorText}
+          emptyText={w.videoAnalyzerEmpty || 'Upload a video or add text details, then run analysis.'}
+          onCopy={copyText}
+          w={w}
+        />
+      </div>
     </section>
   );
 }
@@ -2916,6 +3341,8 @@ function WorkspacePanel({
           onImportPosts={onImportPosts}
           onRefreshPosts={onRefreshPosts}
           onSaveExtraInfo={onSavePostInfo}
+          selectedBusiness={selectedBusiness}
+          onToast={onToast}
           w={w}
         />
       )}
@@ -4802,7 +5229,13 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
           ? { ...item, aiOn: aiOverridesRef.current[item.id] === true }
           : item)
         .map(item => item.id === selectedCurrent ? clearConversationUnread(item) : item);
-      if (!next.length) throw new Error('No conversations returned from backend yet.');
+      if (!next.length) {
+        setConversations([]);
+        setSelectedId('');
+        setLiveMode(true);
+        setApiError('');
+        return true;
+      }
       setConversations(next);
       setSelectedId(current => next.some(c => c.id === current) ? current : next[0].id);
       setLiveMode(true);
@@ -4818,6 +5251,13 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       const isAbort = /aborted|aborterror|signal is aborted/i.test(String(e?.message || ''));
       if (silent) {
         if (!isAbort) setApiError(`Live sync delayed: ${e.message}`);
+        return false;
+      }
+      if (isLocalDevDashboardMode()) {
+        setLiveMode(true);
+        setApiError('');
+        setConversations([]);
+        setSelectedId('');
         return false;
       }
       setLiveMode(false);
@@ -5711,6 +6151,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
 
 function Root() {
   const [lang, setLang] = useState(() => window.localStorage.getItem(UI_LANG_STORAGE_KEY) || 'en');
+  const localDevSession = localDevDashboardSession();
   const forceDashboard = Boolean(urlParams.get('api') || urlParams.get('secret') || readAuthSession()?.token);
   const [showDashboard, setShowDashboard] = useState(() => {
     const hasDashboardHash = window.location.hash === DASHBOARD_HASH;
@@ -5719,15 +6160,22 @@ function Root() {
     const hasAuthToken = Boolean(readAuthSession()?.token);
     return hasDashboardHash || forceDashboard || hasApiContext || hasAuthToken;
   });
-  const [currentUser, setCurrentUser] = useState(() => readAuthSession() || null);
+  const [currentUser, setCurrentUser] = useState(() => readAuthSession() || localDevSession || null);
   const [signedIn, setSignedIn] = useState(() => {
     const auth = readAuthSession();
-    return !!auth?.token;
+    return !!(auth?.token || localDevSession?.token);
   });
 
   useEffect(() => {
     window.localStorage.setItem(UI_LANG_STORAGE_KEY, lang);
   }, [lang]);
+
+  useEffect(() => {
+    if (!localDevSession?.token) return;
+    saveAuthSession(localDevSession.ownerEmail, localDevSession);
+    setCurrentUser((current) => current?.token ? current : localDevSession);
+    setSignedIn(true);
+  }, [localDevSession?.ownerEmail, localDevSession?.role, localDevSession?.token]);
 
   useEffect(() => {
     const onHashChange = () => setShowDashboard(window.location.hash === DASHBOARD_HASH);
@@ -5768,7 +6216,7 @@ function Root() {
   };
 
   if (!showDashboard && !forceDashboard) return <LandingPage onOpenDashboard={openDashboard} lang={lang} setLang={setLang} />;
-  if (!signedIn) return <SignInPage lang={lang} onSignedIn={(session) => { setCurrentUser(session || readAuthSession()); setSignedIn(true); }} onBack={backToLanding} />;
+  if (!signedIn) return <SignInPage lang={lang} onSignedIn={(session) => { setCurrentUser(session || readAuthSession() || localDevSession); setSignedIn(true); }} onBack={backToLanding} />;
   return <App lang={lang} setLang={setLang} onSignOut={signOut} onAuthExpired={authExpired} currentUser={currentUser || readAuthSession()} />;
 }
 
