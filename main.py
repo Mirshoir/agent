@@ -5348,34 +5348,39 @@ def build_verified_meshok_price_reply(user_text: str, media_match: dict) -> str:
     if unit_price is None:
         return ""
     meshok_count = _extract_meshok_count(user_text)
-    if meshok_count is None:
-        return ""
     currency = normalize_id(media_match.get("top_match_currency")) or "USD"
-    total_items = DEFAULT_ITEMS_PER_MESHOK * meshok_count
-    total_price = unit_price * total_items
     lang = detect_customer_language(user_text)
     code = normalize_id(media_match.get("top_match_code"))
     model = normalize_id(media_match.get("top_match_model"))
-    label = code or model or "shu model"
-    if code and model and model != code:
-        label = f"{code}, model {model}"
-    total_str = f"{total_price:.1f}".rstrip("0").rstrip(".")
+    label = model or code or "shu model"
     unit_str = f"{unit_price:.1f}".rstrip("0").rstrip(".")
+    if meshok_count is None:
+        if lang == "en":
+            return f"Model {label} narxi {unit_str} {currency}. Qaysi razmer va nechta qop kerak?"
+        if lang == "ru":
+            return f"Модель {label} narxi {unit_str} {currency}. Какой размер и сколько мешков нужно?"
+        if lang == "kk":
+            return f"Модель {label} narxi {unit_str} {currency}. Қай өлшем және қанша қап керек?"
+        return f"Model {label} narxi {unit_str} {currency}. Qaysi razmer va nechta qop kerak?"
+
+    total_items = DEFAULT_ITEMS_PER_MESHOK * meshok_count
+    total_price = unit_price * total_items
+    total_str = f"{total_price:.1f}".rstrip("0").rstrip(".")
     if lang == "en":
         if meshok_count == 1:
-            return f"{label} uchun dona narxi {unit_str} {currency}. 1 sackda {DEFAULT_ITEMS_PER_MESHOK} ta bo'ladi, jami {total_str} {currency}."
-        return f"{label} uchun dona narxi {unit_str} {currency}. {meshok_count} sackda jami {total_items} ta bo'ladi, umumiy narx {total_str} {currency}."
+            return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. 1 qopda {DEFAULT_ITEMS_PER_MESHOK} ta bo'ladi, jami {total_str} {currency}. Qaysi razmer kerak?"
+        return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {meshok_count} qopda jami {total_items} ta bo'ladi, umumiy narx {total_str} {currency}. Qaysi razmer kerak?"
     if lang == "ru":
         if meshok_count == 1:
-            return f"Для {label} цена за 1 штуку {unit_str} {currency}. В 1 мешке {DEFAULT_ITEMS_PER_MESHOK} штук, итого {total_str} {currency}."
-        return f"Для {label} цена за 1 штуку {unit_str} {currency}. В {meshok_count} мешках всего {total_items} штук, общая сумма {total_str} {currency}."
+            return f"Для модели {label} цена за 1 штуку {unit_str} {currency}. В 1 мешке {DEFAULT_ITEMS_PER_MESHOK} штук, итого {total_str} {currency}. Какой размер нужен?"
+        return f"Для модели {label} цена за 1 штуку {unit_str} {currency}. В {meshok_count} мешках всего {total_items} штук, общая сумма {total_str} {currency}. Какой размер нужен?"
     if lang == "kk":
         if meshok_count == 1:
-            return f"{label} үшін 1 данасының бағасы {unit_str} {currency}. 1 қапта {DEFAULT_ITEMS_PER_MESHOK} дана болады, жалпы {total_str} {currency}."
-        return f"{label} үшін 1 данасының бағасы {unit_str} {currency}. {meshok_count} қапта барлығы {total_items} дана болады, жалпы баға {total_str} {currency}."
+            return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. 1 қапта {DEFAULT_ITEMS_PER_MESHOK} дана болады, жалпы {total_str} {currency}. Қай өлшем керек?"
+        return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. {meshok_count} қапта барлығы {total_items} дана болады, жалпы баға {total_str} {currency}. Қай өлшем керек?"
     if meshok_count == 1:
-        return f"{label} uchun 1 dona narxi {unit_str} {currency}. 1 qopda {DEFAULT_ITEMS_PER_MESHOK} ta bo'ladi, jami {total_str} {currency}."
-    return f"{label} uchun 1 dona narxi {unit_str} {currency}. {meshok_count} qopda jami {total_items} ta bo'ladi, umumiy narx {total_str} {currency}."
+        return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. 1 qopda {DEFAULT_ITEMS_PER_MESHOK} ta bo'ladi, jami {total_str} {currency}. Qaysi razmer kerak?"
+    return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {meshok_count} qopda jami {total_items} ta bo'ladi, umumiy narx {total_str} {currency}. Qaysi razmer kerak?"
 
 
 def _collect_instagram_payload_urls(value, url_candidates: list[str]):
