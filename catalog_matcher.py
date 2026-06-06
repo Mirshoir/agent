@@ -43,7 +43,7 @@ PRODUCT_MATCHER_LOCAL_CATALOG_CACHE_TTL_SECONDS = max(30, min(60 * 60, int(os.ge
 PRODUCT_MATCHER_LOCAL_FETCH_LIMIT = max(50, min(3000, int(os.getenv("PRODUCT_MATCHER_LOCAL_FETCH_LIMIT", "1200"))))
 PRODUCT_MATCHER_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_MIN_SCORE", "0.20"))))
 PRODUCT_MATCHER_WEAK_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_WEAK_MIN_SCORE", "0.10"))))
-PRODUCT_MATCHER_TOP_K = max(1, min(12, int(os.getenv("PRODUCT_MATCHER_TOP_K", "5"))))
+PRODUCT_MATCHER_TOP_K = max(1, min(12, int(os.getenv("PRODUCT_MATCHER_TOP_K", "8"))))
 PRODUCT_MATCHER_MAX_MEDIA_MB = max(2, min(40, int(os.getenv("PRODUCT_MATCHER_MAX_MEDIA_MB", "20"))))
 PRODUCT_MATCHER_TIMEOUT_SECONDS = max(10, min(180, int(os.getenv("PRODUCT_MATCHER_TIMEOUT_SECONDS", "90"))))
 PRODUCT_MATCHER_CATALOG_SCOPE = normalize_text(os.getenv("PRODUCT_MATCHER_CATALOG_SCOPE", "all")).lower() or "all"
@@ -415,6 +415,22 @@ def build_code_not_found_reply(analysis: CustomerImageAnalysis) -> str:
     return "Rasmdagi model kodi katalog bazamizda topilmadi. Aniq narx va mavjudlikni menejerimiz tekshirib beradi."
 
 
+def requested_garment_hint(user_text: str) -> str:
+    text = normalize_text(user_text).lower()
+    garment_map = {
+        "tshirt": ["futbolka", "fudbolka", "footballka", "майка", "футболка", "t-shirt", "tee", "shirt"],
+        "pants": ["shim", "брюки", "штаны", "pants", "trousers"],
+        "shorts": ["shortik", "shorti", "shorts", "шорты"],
+        "hoodie": ["hudie", "hoodie", "tolstovka", "худи"],
+        "dress": ["ko'ylak", "kuylak", "платье", "dress"],
+        "pajama": ["pijama", "pyjama", "pajama", "пижама"],
+    }
+    for label, keywords in garment_map.items():
+        if any(keyword in text for keyword in keywords):
+            return label
+    return ""
+
+
 def rank_by_embedding(query_embedding: list[float], products: list[ProductRecord], limit: int) -> list[ProductRecord]:
     scored = [(cosine_similarity(query_embedding, product.embedding_preview), product) for product in products]
     scored.sort(key=lambda item: item[0], reverse=True)
@@ -511,7 +527,7 @@ def _gemini_post(payload: dict[str, Any], attempts: int = 3) -> dict[str, Any]:
     return last_body
 
 
-def analyze_customer_image(image_bytes: bytes) -> CustomerImageAnalysis:
+def analyze_customer_image(image_bytes: bytes, user_text: str = "") -> CustomerImageAnalysis:
     crop = crop_focus_region(image_bytes, mode="customer")
     code_crop = crop_code_region(image_bytes)
     payload = {
@@ -519,6 +535,9 @@ def analyze_customer_image(image_bytes: bytes) -> CustomerImageAnalysis:
             "parts": [
                 {"text": (
                     "Extract garment attributes and any visible product text/codes. "
+                    f"The customer message is: {normalize_text(user_text) or '(none)'}. "
+                    "If the customer mentions a specific item like t-shirt, pants, shorts, dress, or hoodie, focus on that item only. "
+                    "Ignore nearby products on the same catalog page unless the customer is clearly asking about them. "
                     "Prioritize OCR from catalog labels, especially MODEL and CODE values printed on the image. "
                     "Use all image crops. Focus on the garment only, not the person's face or room. Return JSON."
                 )},
@@ -567,13 +586,16 @@ def analyze_customer_image(image_bytes: bytes) -> CustomerImageAnalysis:
     )
 
 
-def rerank_with_gemini(query_image_bytes: bytes, shortlist: list[ProductRecord], analysis: CustomerImageAnalysis) -> tuple[ProductRecord | None, str | None]:
+def rerank_with_gemini(query_image_bytes: bytes, shortlist: list[ProductRecord], analysis: CustomerImageAnalysis, user_text: str = "") -> tuple[ProductRecord | None, str | None]:
     if not shortlist:
         return None, None
     query_crop = crop_focus_region(query_image_bytes, mode="customer")
     parts: list[dict[str, Any]] = [
         {"text": (
             "Match the customer garment to exactly one catalog candidate. "
+            f"The customer asked: {normalize_text(user_text) or '(no text)'}\n"
+            "If the message refers to a specific garment like t-shirt, pants, shorts, dress, or hoodie, match that garment only. "
+            "Do not select a nearby different product from the same catalog page. "
             "Ignore the person's gender presentation, face, body shape, pose, and room. "
             "Match only the garment. Return JSON with selected_index, confidence, and reason.\n"
             f"Customer analysis: {json.dumps(asdict(analysis), ensure_ascii=True)}"
@@ -618,6 +640,52 @@ def rerank_with_gemini(query_image_bytes: bytes, shortlist: list[ProductRecord],
     return shortlist[idx], None
 
 
+def verify_candidate_with_gemini(query_image_bytes: bytes, candidate: ProductRecord, analysis: CustomerImageAnalysis, user_text: str = "") -> tuple[bool, str]:
+    if not candidate.image_url:
+        return True, ""
+    try:
+        candidate_bytes, _, _ = download_media_for_matcher(candidate.image_url)
+    except Exception as exc:
+        return True, f"candidate image unavailable: {exc}"
+
+    query_crop = crop_focus_region(query_image_bytes, mode="customer")
+    payload = {
+        "contents": [{
+            "parts": [
+                {"text": (
+                    "Decide whether the catalog candidate is the same garment the customer is asking about. "
+                    f"Customer message: {normalize_text(user_text) or '(no text)'}\n"
+                    "If the customer is asking about a specific garment like a t-shirt, do not approve a different nearby item such as pants or shorts. "
+                    "Return JSON with matches_target_item (true/false) and reason.\n"
+                    f"Customer analysis: {json.dumps(asdict(analysis), ensure_ascii=True)}\n"
+                    f"Candidate product_code={candidate.product_code}, model_code={candidate.model_code}, catalog_group={candidate.catalog_group}, catalog_text={candidate.combined_text[:400]}"
+                )},
+                {"inlineData": {"mimeType": detect_mime_type(query_image_bytes), "data": _b64(query_image_bytes)}},
+                {"inlineData": {"mimeType": detect_mime_type(query_crop), "data": _b64(query_crop)}},
+                {"inlineData": {"mimeType": detect_mime_type(candidate_bytes), "data": _b64(candidate_bytes)}},
+            ]
+        }],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseJsonSchema": {
+                "type": "object",
+                "properties": {
+                    "matches_target_item": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["matches_target_item", "reason"],
+            },
+        },
+    }
+    body = _gemini_post(payload)
+    text = _extract_gemini_text(body)
+    try:
+        parsed = json.loads(text) if text else {}
+    except Exception:
+        parsed = {}
+    return bool(parsed.get("matches_target_item")), normalize_text(parsed.get("reason"))
+
+
 def build_product_match_reply(code: str, model: str, price: str, currency: str, top_score: float) -> str:
     code = normalize_text(code)
     model = normalize_text(model)
@@ -653,14 +721,25 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
     if not scoped_products:
         return {}
 
-    analysis = analyze_customer_image(media_bytes)
+    analysis = analyze_customer_image(media_bytes, user_text=user_text)
+    garment_hint = requested_garment_hint(user_text)
     exact_matches = find_exact_code_matches(analysis, scoped_products)
     if len(exact_matches) == 1:
-        top = exact_matches[0]
-        top_score = 1.0
-        strategy = "exact_code_match"
-        matches = [top]
-        warning = ""
+        exact_match = exact_matches[0]
+        exact_ok, exact_reason = verify_candidate_with_gemini(media_bytes, exact_match, analysis, user_text=user_text) if garment_hint else (True, "")
+        if exact_ok:
+            top = exact_match
+            top_score = 1.0
+            strategy = "exact_code_match"
+            matches = [top]
+            warning = ""
+        else:
+            exact_matches = []
+            warning = f"Exact code candidate rejected for the requested item: {exact_reason or 'target garment mismatch'}"
+            top = None
+            top_score = 0.0
+            strategy = ""
+            matches = []
     elif has_strong_visible_codes(analysis) and not exact_matches:
         db_counts = build_database_counts(all_products, scoped_products, visual_products)
         warning = "Visible product codes were extracted from the image, but those codes do not exist in the current catalog database."
@@ -684,17 +763,21 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
             "match_strategy": "code_not_found",
             "model_warning": warning,
         }
-    else:
+    if not matches:
         if not visual_products:
             return {}
         query_embedding = compute_color_histogram(media_bytes)
         shortlist = build_candidate_shortlist(query_embedding, analysis, visual_products, max(PRODUCT_MATCHER_TOP_K, 6))
         if exact_matches:
             shortlist = merge_exact_matches_into_shortlist(exact_matches, shortlist, max(PRODUCT_MATCHER_TOP_K, 6))
-        top, warning = rerank_with_gemini(media_bytes, shortlist, analysis)
+        top, rerank_warning = rerank_with_gemini(media_bytes, shortlist, analysis, user_text=user_text)
         if top is None:
             top = shortlist[0]
-            warning = warning or "Gemini rerank unavailable; used shortlist fallback."
+            rerank_warning = rerank_warning or "Gemini rerank unavailable; used shortlist fallback."
+        if warning and rerank_warning:
+            warning = f"{warning}; {rerank_warning}"
+        else:
+            warning = warning or rerank_warning or ""
         top_score = 0.6 if warning else 0.9
         strategy = "vision_rerank"
         matches = shortlist[:PRODUCT_MATCHER_TOP_K]
