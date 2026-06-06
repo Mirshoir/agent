@@ -7432,6 +7432,32 @@ async def api_health():
     }
 
 
+@app.get("/api/catalog/embeddings/status")
+async def api_catalog_embeddings_status():
+    if catalog_matcher_module is None:
+        return {
+            "status": "unavailable",
+            "error": str(globals().get("CATALOG_MATCHER_IMPORT_ERROR", "catalog_matcher not loaded")),
+        }
+    try:
+        return {"status": "ok", "embedding_status": catalog_matcher_module.get_embedding_status()}
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+@app.post("/api/catalog/embeddings/sync")
+async def api_catalog_embeddings_sync(force: bool = True):
+    if catalog_matcher_module is None:
+        return {
+            "status": "unavailable",
+            "error": str(globals().get("CATALOG_MATCHER_IMPORT_ERROR", "catalog_matcher not loaded")),
+        }
+    try:
+        return {"status": "ok", "result": catalog_matcher_module.sync_catalog_embeddings(force=bool(force))}
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
 @app.get("/api/health/deep")
 async def api_health_deep(
         token: str = "",
