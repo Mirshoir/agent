@@ -5535,17 +5535,7 @@ def build_verified_meshok_price_reply(user_text: str, media_match: dict) -> str:
     model = normalize_id(media_match.get("top_match_model"))
     label = model or code or "shu model"
     unit_str = f"{unit_price:.1f}".rstrip("0").rstrip(".")
-    lower = normalize_id(user_text).lower()
-    wants_piece_price = bool(re.search(r"\b(dona|ta|piece|sht|штук|штука)\b", lower))
     if meshok_count is None:
-        if wants_piece_price:
-            if lang == "en":
-                return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. Qaysi razmer va nechta qop kerak?"
-            if lang == "ru":
-                return f"Для модели {label} цена за 1 штуку {unit_str} {currency}. Какой размер и сколько мешков нужно?"
-            if lang == "kk":
-                return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. Қай өлшем және қанша қап керек?"
-            return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. Qaysi razmer va nechta qop kerak?"
         if lang == "en":
             return f"Model {label} narxi {unit_str} {currency}. Qaysi razmer va nechta qop kerak?"
         if lang == "ru":
@@ -5756,8 +5746,6 @@ def load_recent_instagram_media_reference(
 
 
 def should_reuse_recent_media_match(user_text: str, media_type: str = "", business: dict = None) -> bool:
-    if media_type == "audio":
-        return True
     if media_type in {"photo", "video", "file"}:
         return False
     text = normalize_id(user_text)
