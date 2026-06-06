@@ -257,6 +257,7 @@ PRODUCT_MATCHER_OPENAI_VISION_TIMEOUT_SECONDS = max(
 )
 PRODUCT_MATCHER_OPENAI_VISION_DETAIL = str(os.getenv("PRODUCT_MATCHER_OPENAI_VISION_DETAIL", "low") or "").strip().lower() or "low"
 INSTAGRAM_MEDIA_MATCH_MEMORY: dict[str, dict] = {}
+INSTAGRAM_RECENT_OUTBOUND_MEMORY: dict[str, dict] = {}
 PRODUCT_MATCHER_LOCAL_CATALOG_CACHE = {"loaded_at": 0.0, "rows": []}
 WHATSAPP_EMBEDDED_REDIRECT_URI = os.getenv(
     "WHATSAPP_EMBEDDED_REDIRECT_URI",
@@ -4581,13 +4582,10 @@ def build_product_match_reply(code: str, model: str, price: str, currency: str, 
     model = normalize_id(model)
     price = normalize_id(price)
     currency = normalize_id(currency)
-    label = code or model
-    if code and model and model != code:
-        label = f"{code}, model {model}"
-    confidence_note = " O'xshash model deb ko'rinyapti." if top_score < PRODUCT_MATCHER_MIN_SCORE else ""
+    label = model or code or "shu model"
     if price:
-        return f"Topdim:{confidence_note} {label or 'shu model'} narxi {price} {currency or '$'}. Qaysi razmer va nechta qop kerak?"
-    return f"Topdim:{confidence_note} {label or 'shu model'} bo'yicha aniq narxni menejerimiz tekshirib beradi. Qaysi razmer va nechta qop kerak?"
+        return f"Model {label} narxi {price} {currency or '$'}. Qaysi razmer va nechta qop kerak?"
+    return f"Model {label} bo'yicha aniqroq rasm yoki kod yuboring. Qaysi razmer va nechta qop kerak?"
 
 
 def normalize_product_code(value: str) -> str:
@@ -5390,6 +5388,41 @@ def _extract_meshok_count(text: str) -> int | None:
     return None
 
 
+def is_local_currency_question(text: str) -> bool:
+    low = normalize_id(text).lower()
+    if not low:
+        return False
+    markers = [
+        "so'm", "som", "sum", "uzs", "o'zbek so'm", "uzbek sum", "узбек", "сум",
+    ]
+    return any(marker in low for marker in markers)
+
+
+def build_usd_only_reply(user_text: str, media_match: dict) -> str:
+    currency = normalize_id(media_match.get("top_match_currency")) or "USD"
+    code = normalize_id(media_match.get("top_match_code"))
+    model = normalize_id(media_match.get("top_match_model"))
+    label = model or code or "shu model"
+    price = _parse_numeric_price(media_match.get("top_match_price", ""))
+    lang = detect_customer_language(user_text)
+    unit_str = f"{price:.1f}".rstrip("0").rstrip(".") if price is not None else ""
+    if lang == "en":
+        if unit_str:
+            return f"We sell in {currency} only. Model {label} narxi {unit_str} {currency}. Qaysi razmer va nechta qop kerak?"
+        return f"We sell in {currency} only. Qaysi razmer va nechta qop kerak?"
+    if lang == "ru":
+        if unit_str:
+            return f"Мы продаём только в {currency}. Модель {label} narxi {unit_str} {currency}. Какой размер и сколько мешков нужно?"
+        return f"Мы продаём только в {currency}. Какой размер и сколько мешков нужно?"
+    if lang == "kk":
+        if unit_str:
+            return f"Біз тек {currency}-мен сатамыз. Model {label} narxi {unit_str} {currency}. Қай өлшем және қанша қап керек?"
+        return f"Біз тек {currency}-мен сатамыз. Қай өлшем және қанша қап керек?"
+    if unit_str:
+        return f"Biz faqat {currency}da sotamiz. Model {label} narxi {unit_str} {currency}. Qaysi razmer va nechta qop kerak?"
+    return f"Biz faqat {currency}da sotamiz. Qaysi razmer va nechta qop kerak?"
+
+
 def build_verified_meshok_price_reply(user_text: str, media_match: dict) -> str:
     unit_price = _parse_numeric_price(media_match.get("top_match_price", ""))
     if unit_price is None:
@@ -5441,6 +5474,37 @@ def build_verified_meshok_price_reply(user_text: str, media_match: dict) -> str:
 def is_verified_media_match(media_match: dict = None) -> bool:
     strategy = normalize_id((media_match or {}).get("match_strategy"))
     return strategy in {"exact_code_match", "exact_model_match"}
+
+
+def recent_outbound_memory_key(business_id: str, customer_id: str, channel: str = "dm") -> str:
+    business_id = normalize_id(business_id)
+    customer_id = normalize_id(customer_id)
+    channel = normalize_id(channel) or "dm"
+    if not business_id or not customer_id:
+        return ""
+    return f"{business_id}:{customer_id}:{channel}"
+
+
+def remember_recent_outbound_text(business_id: str, customer_id: str, text: str, channel: str = "dm") -> None:
+    key = recent_outbound_memory_key(business_id, customer_id, channel)
+    text = normalize_id(text)
+    if not key or not text:
+        return
+    INSTAGRAM_RECENT_OUTBOUND_MEMORY[key] = {"text": text, "saved_at": time.time()}
+
+
+def has_recent_outbound_memory_text(business_id: str, customer_id: str, text: str, channel: str = "dm") -> bool:
+    key = recent_outbound_memory_key(business_id, customer_id, channel)
+    text = normalize_id(text)
+    if not key or not text:
+        return False
+    payload = INSTAGRAM_RECENT_OUTBOUND_MEMORY.get(key)
+    if not isinstance(payload, dict):
+        return False
+    if (time.time() - float(payload.get("saved_at") or 0.0)) > OUTBOUND_DUPLICATE_WINDOW_SECONDS:
+        INSTAGRAM_RECENT_OUTBOUND_MEMORY.pop(key, None)
+        return False
+    return normalize_id(payload.get("text")) == text
 
 
 def _collect_instagram_payload_urls(value, url_candidates: list[str]):
@@ -6439,6 +6503,12 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
 
         media_match_strategy = normalize_id((resolved_media_match or {}).get("match_strategy"))
 
+        if verified_exact_media_match and is_local_currency_question(message_text):
+            usd_only_reply = build_usd_only_reply(message_text, resolved_media_match)
+            if usd_only_reply:
+                media_reply_hint = usd_only_reply
+                force_direct_media_reply = True
+
         if media_match_strategy == "exact_model_ambiguous_price" and (is_price_question(message_text) or quantity_followup):
             media_reply_hint = normalize_id((resolved_media_match or {}).get("reply_hint"))
             if media_reply_hint:
@@ -6514,6 +6584,15 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             )
 
         reply_text = complete_sentence_reply(remove_urls(reply_text), limit=1000)
+        if has_recent_outbound_memory_text(business.get("id"), sender_id, reply_text, "dm"):
+            log("Instagram DM duplicate outbound suppressed from memory", {
+                "customer_id": sender_id,
+                "message_id": message_id,
+                "reply_preview": reply_text[:180],
+            })
+            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="duplicate_outbound_memory_suppressed")
+            mark_processed(processed_message_ids, message_id)
+            return
         if has_recent_outbound_text(
             business.get("id"),
             "instagram",
@@ -6550,6 +6629,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         raw_result = safe_json(send_result) if send_result is not None else {}
 
         if send_result is not None and send_result.ok:
+            remember_recent_outbound_text(business.get("id"), sender_id, reply_text, "dm")
             save_inbox_message(
                 business=business,
                 platform="instagram",
