@@ -256,6 +256,11 @@ PRODUCT_MATCHER_OPENAI_VISION_TIMEOUT_SECONDS = max(
     min(120, int(os.getenv("PRODUCT_MATCHER_OPENAI_VISION_TIMEOUT_SECONDS", "20"))),
 )
 PRODUCT_MATCHER_OPENAI_VISION_DETAIL = str(os.getenv("PRODUCT_MATCHER_OPENAI_VISION_DETAIL", "low") or "").strip().lower() or "low"
+OPENAI_TRANSCRIBE_MODEL = str(os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe") or "").strip() or "gpt-4o-transcribe"
+OPENAI_TRANSCRIBE_TIMEOUT_SECONDS = max(
+    10,
+    min(180, int(os.getenv("OPENAI_TRANSCRIBE_TIMEOUT_SECONDS", "90"))),
+)
 INSTAGRAM_MEDIA_MATCH_MEMORY: dict[str, dict] = {}
 INSTAGRAM_RECENT_OUTBOUND_MEMORY: dict[str, dict] = {}
 PRODUCT_MATCHER_LOCAL_CATALOG_CACHE = {"loaded_at": 0.0, "rows": []}
@@ -1663,6 +1668,43 @@ def transcode_to_telegram_voice(file_bytes: bytes, filename: str = "", mime_type
                     os.unlink(path)
                 except Exception:
                     pass
+
+
+def transcribe_audio_bytes(file_bytes: bytes, filename: str = "", mime_type: str = "") -> str:
+    if not OPENAI_API_KEY or not file_bytes:
+        return ""
+
+    safe_name = normalize_id(filename) or "audio.ogg"
+    guessed_mime = normalize_id(mime_type) or mimetypes.guess_type(safe_name)[0] or "audio/ogg"
+
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            data={"model": OPENAI_TRANSCRIBE_MODEL},
+            files={"file": (safe_name, file_bytes, guessed_mime)},
+            timeout=OPENAI_TRANSCRIBE_TIMEOUT_SECONDS,
+        )
+        log("OpenAI audio transcription", {"status": response.status_code, "body": response.text[:500]})
+        if not response.ok:
+            return ""
+        payload = response.json() if response.content else {}
+        return normalize_id(payload.get("text"))
+    except Exception as exc:
+        log("OpenAI audio transcription failed", str(exc))
+        return ""
+
+
+def transcribe_media_url_for_voice(media_url: str, access_token: str = "") -> str:
+    media_url = normalize_id(media_url)
+    if not media_url:
+        return ""
+    try:
+        media_bytes, filename, mime_type = download_media_for_matcher(media_url, access_token=access_token)
+        return transcribe_audio_bytes(media_bytes, filename=filename, mime_type=mime_type)
+    except Exception as exc:
+        log("Voice media transcription failed", {"media_url": media_url[:200], "error": str(exc)})
+        return ""
 
 
 def cleanup_dedup_cache():
@@ -3544,6 +3586,65 @@ def generic_price_fallback_reply(user_text: str, business: dict = None) -> str:
     if lang == "kk":
         return "Қай модель керек? Бағасын айтып беремін."
     return "Qaysi model kerak? Narxini aytaman."
+
+
+def is_wholesale_inquiry(text: str) -> bool:
+    s = normalize_id(text).lower()
+    if not s:
+        return False
+    markers = [
+        "optom", "оптом", "опт", "wholesale", "ulgurji", "ulguji",
+        "цены оптом", "оптов", "оптовый", "оптовая",
+        "ulgurji narx", "optom narx", "wholesale price",
+    ]
+    return any(marker in s for marker in markers)
+
+
+def is_generic_media_wholesale_inquiry(
+    user_text: str,
+    media_type: str = "",
+    post_permalink: str = "",
+    post_media_type: str = "",
+) -> bool:
+    if not is_wholesale_inquiry(user_text):
+        return False
+    media_type = normalize_id(media_type).lower()
+    post_media_type = normalize_id(post_media_type).lower()
+    permalink = normalize_id(post_permalink).lower()
+    return (
+        media_type in {"video", "file"}
+        or "video" in post_media_type
+        or "reel" in post_media_type
+        or "/reel/" in permalink
+    )
+
+
+def build_generic_wholesale_intro_reply(user_text: str, business: dict = None) -> str:
+    has_catalog = bool(get_catalog_link(business or {}))
+    lang = detect_customer_language(user_text)
+    if lang == "en":
+        base = (
+            "Hello! We sell wholesale in USD. Minimum order is from 1 qop/meshok per model. "
+            "Send a photo, screenshot, or model code, and I will tell you the exact price."
+        )
+        return base + (" If you want, I can also send the catalog." if has_catalog else "")
+    if lang == "ru":
+        base = (
+            "Здравствуйте! Мы продаём оптом в USD. Минимальный заказ — от 1 qop/мешка на модель. "
+            "Отправьте фото, стоп-кадр или код модели, и я сразу скажу точную цену."
+        )
+        return base + (" Если хотите, могу сразу отправить каталог." if has_catalog else "")
+    if lang == "kk":
+        base = (
+            "Сәлеметсіз бе! Біз USD бойынша көтерме сатамыз. Ең аз тапсырыс — бір модельден 1 qop/мешок. "
+            "Фото, стоп-кадр немесе модель кодын жіберіңіз, нақты бағасын бірден айтамын."
+        )
+        return base + (" Қаласаңыз, каталогты да жіберемін." if has_catalog else "")
+    base = (
+        "Assalomu alaykum! Biz USDda ulgurji sotamiz. Minimal buyurtma — 1 modeldan 1 qop/meshok. "
+        "Foto, stop-kadr yoki model kodini yuboring, aniq narxini darrov aytaman."
+    )
+    return base + (" Xohlasangiz, katalogni ham yuboraman." if has_catalog else "")
 
 
 def product_media_price_fallback_reply(user_text: str, business: dict = None) -> str:
@@ -6138,6 +6239,11 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             return
 
         access_token = get_business_access_token(business)
+        if media_type == "audio" and media_url:
+            transcript = transcribe_media_url_for_voice(media_url, access_token=access_token)
+            if transcript:
+                message_text = transcript
+                message["text"] = transcript
         sender_profile = fetch_instagram_customer_profile(access_token, sender_id) if access_token else {}
         customer_display_name = display_name_from_instagram_profile(sender_profile, "")
         if sender_profile:
@@ -6291,6 +6397,15 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             })
             mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_missing_access_token")
             return
+
+        generic_wholesale_reply = ""
+        if is_generic_media_wholesale_inquiry(
+            message_text,
+            media_type=media_type or "",
+            post_permalink=post_permalink,
+            post_media_type=post_media_type,
+        ):
+            generic_wholesale_reply = build_generic_wholesale_intro_reply(message_text, business)
 
         media_match_context = ""
         media_reply_hint = ""
@@ -6562,12 +6677,14 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 "reason": "media_match_missing",
             })
 
-        use_direct_matcher_reply = force_direct_media_reply or verified_exact_media_match or (bool(media_reply_hint) and (
+        use_direct_matcher_reply = bool(generic_wholesale_reply) or force_direct_media_reply or verified_exact_media_match or (bool(media_reply_hint) and (
             is_auto_media_placeholder_message(message_text)
             or not normalize_id(message_text)
             or (media_type in {"photo", "video"} and not message.get("text"))
         ))
-        if force_direct_media_reply:
+        if generic_wholesale_reply:
+            reply_text = clean_sales_reply(generic_wholesale_reply, message_text or "photo", business, lead_state)
+        elif force_direct_media_reply:
             reply_text = clean_sales_reply(media_reply_hint, message_text or "photo", business, lead_state)
         elif use_direct_matcher_reply:
             reply_text = clean_sales_reply(media_reply_hint, message_text or "photo", business, lead_state)
