@@ -1016,6 +1016,13 @@ def build_model_verified_reply(model: str, code: str, price: str, currency: str)
     return f"Model {model or code} bo'yicha aniq narxni aytaman. Qaysi razmer va nechta qop kerak?"
 
 
+def build_model_price_ambiguous_reply(model: str) -> str:
+    model = normalize_text(model)
+    if model:
+        return f"Model {model} topildi, lekin bu model bir nechta kod va narx bilan bor. Iltimos, kod ko'rinadigan aniqroq rasm yuboring."
+    return "Model topildi, lekin kod aniq ko'rinmadi. Iltimos, kod ko'rinadigan aniqroq rasm yuboring."
+
+
 def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_type: str = "", access_token: str = "") -> dict:
     if not PRODUCT_MATCHER_LOCAL_ENABLED:
         return {}
@@ -1083,6 +1090,50 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
             top = shortlisted_model_matches[0]
             rerank_warning = rerank_warning or "Gemini rerank unavailable for exact-model candidates."
         warning = warning or rerank_warning or ""
+        exact_model_prices = {normalize_text(product.price) for product in shortlisted_model_matches if normalize_text(product.price)}
+        if len(exact_model_prices) > 1:
+            top_score = 0.0
+            strategy = "exact_model_ambiguous_price"
+            matches = shortlisted_model_matches
+            db_counts = build_database_counts(all_products, scoped_products, visual_products)
+            ambiguity_warning = (
+                warning + "; " if warning else ""
+            ) + "Matched model code exists in multiple catalog rows with different prices, so exact pricing is unsafe without the product code."
+            return {
+                "context": "\n".join([
+                    "Product media analysis (high-priority context for this customer message):",
+                    f"- Match strategy: {strategy}",
+                    f"- Catalog scope: {PRODUCT_MATCHER_CATALOG_SCOPE}",
+                    f"- Top model match: {normalize_text(top.model_code)}",
+                    f"- Warning: {ambiguity_warning}",
+                    f"- Catalog coverage: {json.dumps(db_counts, ensure_ascii=False)}",
+                    f"- Embedding sync: {json.dumps(embedding_sync, ensure_ascii=False)}",
+                    "- Do not invent an exact product code or exact price. Ask for a clearer image where the code is visible.",
+                ]),
+                "reply_hint": build_model_price_ambiguous_reply(normalize_text(top.model_code)),
+                "top_score": 0.0,
+                "top_match_code": "",
+                "top_match_model": normalize_text(top.model_code),
+                "top_match_price": "",
+                "top_match_currency": "",
+                "matches": [
+                    {
+                        "product_code": product.product_code,
+                        "model_code": product.model_code,
+                        "price": product.price,
+                        "currency": product.currency,
+                        "image_url": product.image_url,
+                        "catalog_group": product.catalog_group,
+                        "source_pdf": product.source_pdf,
+                        "score": 0.0,
+                    }
+                    for product in shortlisted_model_matches[:PRODUCT_MATCHER_TOP_K]
+                ],
+                "analysis": asdict(analysis),
+                "database_counts": db_counts,
+                "match_strategy": strategy,
+                "model_warning": ambiguity_warning,
+            }
         top_score = 0.92 if top else 0.0
         strategy = "exact_model_match"
         matches = shortlisted_model_matches
