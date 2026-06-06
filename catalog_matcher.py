@@ -700,6 +700,23 @@ def build_product_match_reply(code: str, model: str, price: str, currency: str, 
     return f"Topdim:{confidence_note} {label or 'shu model'} bo'yicha aniq narxni menejerimiz tekshirib beradi. Qaysi razmer va nechta qop kerak?"
 
 
+def build_manual_review_reply(user_text: str, analysis: CustomerImageAnalysis) -> str:
+    garment = requested_garment_hint(user_text) or normalize_text(analysis.garment_type).lower()
+    if garment == "tshirt":
+        label = "futbolka"
+    elif garment == "pants":
+        label = "shim"
+    elif garment == "shorts":
+        label = "shortik"
+    elif garment == "dress":
+        label = "ko'ylak"
+    elif garment == "hoodie":
+        label = "hudie"
+    else:
+        label = "model"
+    return f"Rasm uchun rahmat. Shu {label} bo'yicha aniq narx va modelni menejerimiz tasdiqlaydi."
+
+
 def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_type: str = "", access_token: str = "") -> dict:
     if not PRODUCT_MATCHER_LOCAL_ENABLED:
         return {}
@@ -790,6 +807,35 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
     if top is None:
         return {}
 
+    if strategy != "exact_code_match":
+        db_counts = build_database_counts(all_products, scoped_products, visual_products)
+        manual_warning = warning or "No verified exact code match was found. Returning manual-review fallback to avoid hallucinated product data."
+        context_lines = [
+            "Product media analysis (high-priority context for this customer message):",
+            f"- Match strategy: {strategy}",
+            f"- Catalog scope: {PRODUCT_MATCHER_CATALOG_SCOPE}",
+            "- Exact product code/model was not verified from the customer image.",
+        ]
+        if analysis.visible_codes:
+            context_lines.append(f"- Extracted codes from media: {', '.join(analysis.visible_codes[:8])}")
+        context_lines.append(f"- Warning: {manual_warning}")
+        context_lines.append(f"- Catalog coverage: {json.dumps(db_counts, ensure_ascii=False)}")
+        context_lines.append("- Do not invent a product code, model, or exact price. Ask for a clearer image or say a manager will confirm.")
+        return {
+            "context": "\n".join(context_lines),
+            "reply_hint": build_manual_review_reply(user_text, analysis),
+            "top_score": 0.0,
+            "top_match_code": "",
+            "top_match_model": "",
+            "top_match_price": "",
+            "top_match_currency": "",
+            "matches": [],
+            "analysis": asdict(analysis),
+            "database_counts": db_counts,
+            "match_strategy": "manual_review_required",
+            "model_warning": manual_warning,
+        }
+
     code = normalize_text(top.product_code)
     model = normalize_text(top.model_code)
     price = normalize_text(top.price)
@@ -836,6 +882,8 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
         "top_score": top_score,
         "top_match_code": code,
         "top_match_model": model,
+        "top_match_price": price,
+        "top_match_currency": currency,
         "matches": match_rows,
         "analysis": asdict(analysis),
         "database_counts": db_counts,
