@@ -15,11 +15,13 @@ import mimetypes
 from urllib.parse import urlencode, urlparse, parse_qs, unquote
 from typing import Optional
 from datetime import datetime, timedelta
+from pathlib import Path
 try:
     import bcrypt
 except Exception:
     bcrypt = None
 
+from dotenv import load_dotenv
 from pydantic import BaseModel
 from fastapi import APIRouter, FastAPI, Request, Header, BackgroundTasks
 from fastapi.responses import PlainTextResponse, JSONResponse, RedirectResponse, Response, HTMLResponse
@@ -77,6 +79,30 @@ except Exception as exc:
     CATALOG_MATCHER_IMPORT_ERROR = exc
     print(f"catalog_matcher import disabled: {exc}")
 
+try:
+    from video_analyzer import VideoAnalyzerError, analyze_video_content
+except Exception as exc:
+    VideoAnalyzerError = None
+    VIDEO_ANALYZER_IMPORT_ERROR = exc
+    print(f"video_analyzer import disabled: {exc}")
+
+    def analyze_video_content(*args, **kwargs):
+        raise RuntimeError(f"Video analyzer unavailable: {VIDEO_ANALYZER_IMPORT_ERROR}")
+
+
+def load_local_env():
+    current = Path(__file__).resolve().parent
+    for parent in (current, *current.parents):
+        env_file = parent / ".env"
+        if env_file.exists():
+            load_dotenv(env_file, override=False)
+            return env_file
+    return None
+
+
+LOADED_ENV_FILE = load_local_env()
+
+
 def env_list(name: str, default: str = ""):
     return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
 
@@ -87,9 +113,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=env_list(
         "CORS_ORIGINS",
-        "https://agent-kqwah9x4f-mirshoir-s-projects.vercel.app,https://agent-rust-delta.vercel.app,https://agent-psi-liard.vercel.app,http://localhost:5173,http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:5173,https://instaagent.streamlit.app,https://agent-1-xi6h.onrender.com",
+        "https://agent-kqwah9x4f-mirshoir-s-projects.vercel.app,https://agent-rust-delta.vercel.app,https://agent-psi-liard.vercel.app,http://localhost:5173,http://localhost:5174,http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:5173,http://127.0.0.1:5174,https://instaagent.streamlit.app,https://agent-1-xi6h.onrender.com",
     ),
-    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX", r"https://.*\.vercel\.app"),
+    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX", r"https://.*\.vercel\.app|https?://(localhost|127\.0\.0\.1)(:\d+)?"),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -1215,6 +1241,42 @@ def decode_dashboard_auth_token(token: str) -> Optional[dict]:
     payload["is_admin"] = bool(payload.get("is_admin", False))
     payload["role"] = normalize_id(payload.get("role", "")).lower()
     return payload
+
+
+def is_local_dashboard_demo_mode() -> bool:
+    secret = str(DASHBOARD_SECRET or "").strip().lower()
+    supabase_url = str(SUPABASE_URL or "").strip().lower()
+    return secret == "localdev" or "example.supabase.co" in supabase_url
+
+
+def build_local_dashboard_demo_business(email: str = "") -> dict:
+    clean_email = normalize_email(email)
+    return {
+        "id": "localdev-demo-business",
+        "business_name": "Milana Premium",
+        "owner_email": clean_email or "localdev@example.com",
+        "business_type": "fashion",
+        "bot_enabled": True,
+        "auto_reply_dms": True,
+        "auto_reply_comments": True,
+        "language": "ru",
+        "tone": "friendly",
+        "ai_model": "gemini-3-flash-preview",
+    }
+
+
+def build_local_dashboard_demo_stats() -> dict:
+    return {
+        "total_accounts": 1,
+        "active_accounts": 1,
+        "instagram_messages": 0,
+        "telegram_messages": 0,
+        "whatsapp_messages": 0,
+        "conversations": 0,
+        "messages": 0,
+        "needs_reply": 0,
+        "unread": 0,
+    }
 
 
 def list_user_business_ids(email: str) -> list[str]:
@@ -7727,6 +7789,20 @@ async def api_health():
     }
 
 
+@app.post("/api/v2/video-analyzer/analyze")
+async def api_video_analyzer_analyze(request: Request):
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            return JSONResponse({"status": "error", "message": "Invalid JSON body"}, status_code=400)
+        report, model = analyze_video_content(body)
+        return {"status": "ok", "ok": True, "data": {"provider": "gemini", "model": model, "report": report}}
+    except Exception as exc:
+        if VideoAnalyzerError is not None and isinstance(exc, VideoAnalyzerError):
+            return JSONResponse({"status": "error", "message": exc.message}, status_code=exc.status_code)
+        return JSONResponse({"status": "error", "message": f"Video analyzer error: {exc}"}, status_code=500)
+
+
 @app.get("/api/catalog/embeddings/status")
 async def api_catalog_embeddings_status():
     if catalog_matcher_module is None:
@@ -7815,6 +7891,22 @@ async def dashboard_login(payload: DashboardLoginRequest):
     if not email or not password:
         return JSONResponse({"status": "error", "error": "Email and password are required."}, status_code=400)
 
+    if is_local_dashboard_demo_mode():
+        token = create_dashboard_auth_token(email=email, is_admin=True, role="super_admin")
+        return {
+            "status": "ok",
+            "data": {
+                "user": {
+                    "id": "localdev-user",
+                    "email": email,
+                    "is_admin": True,
+                    "role": "super_admin",
+                },
+                "token": token,
+                "businesses": [build_local_dashboard_demo_business(email)],
+            },
+        }
+
     try:
         user_result = (
             supabase.table("dashboard_users")
@@ -7897,6 +7989,23 @@ async def dashboard_signup(payload: DashboardSignupRequest):
         return JSONResponse({"status": "error", "error": "Role must be owner, admin or operator."}, status_code=400)
     if role == "operator" and not business_id:
         return JSONResponse({"status": "error", "error": "Operator sign-up requires business_id."}, status_code=400)
+
+    if is_local_dashboard_demo_mode():
+        effective_role = "admin" if role == "admin" else "operator"
+        token = create_dashboard_auth_token(email=email, is_admin=(effective_role == "admin"), role=effective_role)
+        return {
+            "status": "ok",
+            "data": {
+                "user": {
+                    "id": "localdev-signup-user",
+                    "email": email,
+                    "is_admin": effective_role == "admin",
+                    "role": effective_role,
+                },
+                "token": token,
+                "businesses": [build_local_dashboard_demo_business(email)],
+            },
+        }
 
     try:
         existing = (
@@ -8246,6 +8355,13 @@ async def get_conversations_v2(
     access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
     if not access:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    if is_local_dashboard_demo_mode():
+        return {
+            "status": "ok",
+            "count": 0,
+            "data": [],
+        }
 
     try:
         clean_business_id = normalize_id(business_id)
@@ -9074,6 +9190,12 @@ async def get_stats_v2(
     access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
     if not access:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    if is_local_dashboard_demo_mode():
+        return {
+            "status": "ok",
+            "data": build_local_dashboard_demo_stats(),
+        }
 
     try:
         if access.get("is_admin"):
@@ -10127,6 +10249,10 @@ async def api_get_businesses(
     if not access:
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
 
+    if is_local_dashboard_demo_mode():
+        demo = build_local_dashboard_demo_business(access.get("email", ""))
+        return {"status": "ok", "count": 1, "data": [demo]}
+
     query = supabase.table("businesses").select("*").order("created_at", desc=True)
     if not access.get("is_admin"):
         allowed = access.get("business_ids") or []
@@ -10149,6 +10275,9 @@ async def api_get_business_channels(
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
     if not can_access_business(access, business_id):
         return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+
+    if is_local_dashboard_demo_mode():
+        return {"status": "ok", "count": 0, "data": []}
 
     rows = (
         supabase.table("business_channels")
