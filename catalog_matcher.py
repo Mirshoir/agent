@@ -724,6 +724,11 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
     analysis = analyze_customer_image(media_bytes, user_text=user_text)
     garment_hint = requested_garment_hint(user_text)
     exact_matches = find_exact_code_matches(analysis, scoped_products)
+    matches: list[ProductRecord] = []
+    warning = ""
+    top: ProductRecord | None = None
+    top_score = 0.0
+    strategy = ""
     if len(exact_matches) == 1:
         exact_match = exact_matches[0]
         exact_ok, exact_reason = verify_candidate_with_gemini(media_bytes, exact_match, analysis, user_text=user_text) if garment_hint else (True, "")
@@ -781,6 +786,9 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
         top_score = 0.6 if warning else 0.9
         strategy = "vision_rerank"
         matches = shortlist[:PRODUCT_MATCHER_TOP_K]
+
+    if top is None:
+        return {}
 
     code = normalize_text(top.product_code)
     model = normalize_text(top.model_code)
