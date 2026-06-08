@@ -2986,7 +2986,7 @@ input, textarea { background: none; border: 0; outline: 0; }
   grid-column: 1 / 2;
 }
 .operator-rank-row {
-  grid-template-columns: auto 1fr 84px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
 }
 .rank-number {
   width: 26px;
@@ -3002,6 +3002,11 @@ input, textarea { background: none; border: 0; outline: 0; }
 .operator-rank-row strong {
   color: var(--ink);
   font-size: 13px;
+}
+.operator-rank-row > span:last-child {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
 }
 .operator-rank-row input {
   width: 84px;
