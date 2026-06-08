@@ -1523,7 +1523,7 @@ const WORKSPACE_TEXT = {
     adminNotes: 'Tasks history', noAdminNotes: 'No tasks yet.', messagesFromClients: 'Messages from clients',
     tasksFromAdmin: 'Tasks from admin', noTasksForYou: 'No tasks assigned to you.',
     assignOne: 'Assign one', assignGroup: 'Assign group', assignAll: 'All operators',
-    operatorRanking: 'Operators ranking', successfulDeals: 'Successful deals', operatorPanel: 'Operator panel', adminPanel: 'Admin panel',
+    operatorRanking: 'Operators ranking', successfulDeals: 'Successful deals', downloadOperatorReport: 'Download PDF', operatorPanel: 'Operator panel', adminPanel: 'Admin panel',
     operatorAccounts: 'Operator accounts', operatorAccountsHint: 'Create operator logins for this business.', operatorId: 'Operator ID', operatorPassword: 'Password',
     addOperator: 'Add operator', noOperators: 'No operators yet.',
     igGrowthTitle: 'Instagram Growth Analyzer',
@@ -1602,7 +1602,7 @@ const WORKSPACE_TEXT = {
     adminNotes: 'Vazifalar tarixi', noAdminNotes: 'Hali vazifa yo‘q.', messagesFromClients: 'Mijozlardan xabarlar',
     tasksFromAdmin: 'Admindan vazifalar', noTasksForYou: 'Sizga tayinlangan vazifa yo‘q.',
     assignOne: 'Bitta operator', assignGroup: 'Guruhga', assignAll: 'Barcha operatorlar',
-    operatorRanking: 'Operatorlar reytingi', successfulDeals: 'Muvaffaqiyatli bitimlar', operatorPanel: 'Operator panel', adminPanel: 'Admin panel',
+    operatorRanking: 'Operatorlar reytingi', successfulDeals: 'Muvaffaqiyatli bitimlar', downloadOperatorReport: 'PDF yuklab olish', operatorPanel: 'Operator panel', adminPanel: 'Admin panel',
     operatorAccounts: 'Operator akkauntlari', operatorAccountsHint: 'Bu biznes uchun operator loginlarini yarating.', operatorId: 'Operator ID', operatorPassword: 'Parol',
     addOperator: 'Operator qo‘shish', noOperators: 'Hali operator yo‘q.',
     igGrowthTitle: 'Instagram Growth Analyzer',
@@ -1681,7 +1681,7 @@ const WORKSPACE_TEXT = {
     adminNotes: 'История задач', noAdminNotes: 'Задач пока нет.', messagesFromClients: 'Сообщения клиентов',
     tasksFromAdmin: 'Задачи от админа', noTasksForYou: 'Вам пока не назначены задачи.',
     assignOne: 'Одному', assignGroup: 'Группе', assignAll: 'Всем операторам',
-    operatorRanking: 'Рейтинг операторов', successfulDeals: 'Успешные сделки', operatorPanel: 'Панель оператора', adminPanel: 'Панель админа',
+    operatorRanking: 'Рейтинг операторов', successfulDeals: 'Успешные сделки', downloadOperatorReport: 'Скачать PDF', operatorPanel: 'Панель оператора', adminPanel: 'Панель админа',
     operatorAccounts: 'Аккаунты операторов', operatorAccountsHint: 'Создайте логины операторов для этого бизнеса.', operatorId: 'ID оператора', operatorPassword: 'Пароль',
     addOperator: 'Добавить оператора', noOperators: 'Операторов пока нет.',
     igGrowthTitle: 'Instagram Growth Analyzer',
@@ -1789,8 +1789,8 @@ function localPromptSuggestion(field, currentPrompt = '', goal = '') {
       `- Reply shortly, warmly, and naturally in the customer's language.`,
       `- Use first-touch identity line for new chats.`,
       `- For price/catalog details, handoff to manager when exact terms are needed.`,
-      `- For Instagram price/catalog comments, use: "Direktdan yozdik, iloji bo'lsa raqamingizni qoldiring."`,
-      `- Collect name/city/phone naturally when qualification starts.`,
+      `- For Instagram price/catalog comments, send details in DM and never ask for name, phone, address, or other private information publicly.`,
+      `- Collect only the order details needed, and use private chat for personal/contact information.`,
       `- Only answer Milana Premium sales topics: products, catalog, price/order flow, wholesale, delivery, payment, address, warranty, and manager handoff.`,
       `- Never answer unrelated topics. Refuse briefly and redirect to catalog or manager help.`,
       `- For price questions, do not invent exact prices; one qop/meshok is usually around 400-500 USD and exact terms go to manager.`,
@@ -2706,28 +2706,55 @@ function userOwnerLabel(currentUser) {
   return raw.split('@')[0] || raw;
 }
 
-function OperatorsRanking({ leadStages, operatorDeals = {}, operatorAccounts = [], setOperatorDealCount, w }) {
-  const wonDeals = Object.values(leadStages || {}).filter(stage => stage === 'won').length;
+function buildOperatorRankingRows({ leadStages = {}, clientOwners = {}, operatorDeals = {}, operatorAccounts = [] }) {
+  const stats = new Map();
+  const ensureRow = (id) => {
+    const operatorId = String(id || '').trim();
+    if (!operatorId) return null;
+    const key = operatorId.toLowerCase();
+    if (!stats.has(key)) {
+      stats.set(key, {
+        id: operatorId,
+        name: operatorId.charAt(0).toUpperCase() + operatorId.slice(1),
+        picked: 0,
+        deals: 0,
+      });
+    }
+    return stats.get(key);
+  };
+
   const accountRows = Array.isArray(operatorAccounts)
     ? operatorAccounts
       .filter(item => String(item?.role || '').toLowerCase() === 'operator')
       .map(item => {
         const loginId = String(item?.login_id || '').trim();
         if (!loginId) return null;
-        const dealValue = Number(operatorDeals[loginId] ?? operatorDeals[loginId.toLowerCase()] ?? 0);
-        const displayName = loginId.charAt(0).toUpperCase() + loginId.slice(1);
-        return {
-          id: loginId,
-          name: displayName,
-          deals: Number.isFinite(dealValue) ? dealValue : 0,
-        };
+        return ensureRow(loginId);
       })
       .filter(Boolean)
     : [];
 
-  const rows = accountRows.length
-    ? accountRows.sort((a, b) => b.deals - a.deals)
-    : [{ id: 'unassigned', name: 'Unassigned', deals: Number(operatorDeals.unassigned ?? wonDeals ?? 0) }];
+  Object.entries(clientOwners || {}).forEach(([conversationId, owner]) => {
+    const row = ensureRow(owner);
+    if (!row) return;
+    row.picked += 1;
+    if (String(leadStages?.[conversationId] || '').toLowerCase() === 'won') row.deals += 1;
+  });
+
+  Object.entries(operatorDeals || {}).forEach(([operatorId, value]) => {
+    const row = ensureRow(operatorId);
+    if (!row || row.deals > 0) return;
+    const legacyDeals = Number(value || 0);
+    if (Number.isFinite(legacyDeals) && legacyDeals > 0) row.deals = legacyDeals;
+  });
+
+  const rows = Array.from(stats.values());
+  if (!rows.length && !accountRows.length) return [{ id: 'unassigned', name: 'Unassigned', picked: 0, deals: 0 }];
+  return rows.sort((a, b) => (b.deals - a.deals) || (b.picked - a.picked) || a.name.localeCompare(b.name));
+}
+
+function OperatorsRanking({ leadStages, clientOwners = {}, operatorDeals = {}, operatorAccounts = [], onDownloadReport, reportDisabled = false, w }) {
+  const rows = buildOperatorRankingRows({ leadStages, clientOwners, operatorDeals, operatorAccounts });
 
   return (
     <section className="operator-ranking">
@@ -2736,19 +2763,17 @@ function OperatorsRanking({ leadStages, operatorDeals = {}, operatorAccounts = [
           <h3>{w.operatorRanking}</h3>
           <p>{w.successfulDeals}</p>
         </div>
+        <button type="button" className="panel-btn" disabled={reportDisabled} onClick={onDownloadReport}>
+          {w.downloadOperatorReport || 'Download PDF'}
+        </button>
       </div>
       <div className="operator-rank-list">
         {rows.map((row, index) => (
-          <label className="operator-rank-row" key={row.id}>
+          <div className="operator-rank-row" key={row.id}>
             <span className="rank-number">{index + 1}</span>
             <strong>{row.name}</strong>
-            <input
-              type="number"
-              min="0"
-              value={row.deals}
-              onChange={(e) => setOperatorDealCount(row.id, e.target.value)}
-            />
-          </label>
+            <span>{row.deals} {w.successfulDeals || 'successful deals'} · {row.picked} picked</span>
+          </div>
         ))}
       </div>
     </section>
@@ -3178,7 +3203,7 @@ function OperatorMessagesCard({ conversations, onOpenConversation, w }) {
 }
 
 function AdminPanel(props) {
-  const { conversations, leadStages, leadPrices, operatorDeals, adminNotes, onAdminNote, setOperatorDealCount, setLeadStage, setLeadPrice, onOpenConversation, selectedBusinessId, operatorAccounts, onReloadOperatorAccounts, w } = props;
+  const { conversations, leadStages, leadPrices, clientOwners, operatorDeals, adminNotes, onAdminNote, setLeadStage, setLeadPrice, onOpenConversation, selectedBusinessId, operatorAccounts, onReloadOperatorAccounts, onDownloadOperatorReport, w } = props;
   return (
     <div className="operator-panel">
       <AdminTaskDispatchCard adminNotes={adminNotes} onAdminNote={onAdminNote} operatorAccounts={operatorAccounts} w={w} />
@@ -3186,9 +3211,11 @@ function AdminPanel(props) {
       <OperatorAccountsPanel selectedBusinessId="" onToast={() => {}} w={w} readOnly operatorsData={operatorAccounts} onReload={onReloadOperatorAccounts} />
       <OperatorsRanking
         leadStages={leadStages}
+        clientOwners={clientOwners}
         operatorDeals={operatorDeals}
         operatorAccounts={operatorAccounts}
-        setOperatorDealCount={setOperatorDealCount}
+        onDownloadReport={onDownloadOperatorReport}
+        reportDisabled={!selectedBusinessId}
         w={w}
       />
       <section className="operator-leads-card">
@@ -3276,6 +3303,7 @@ function WorkspacePanel({
   onRemoveManualClient,
   onOperatorDealChange,
   onAdminNote,
+  onDownloadOperatorReport,
   onOpenConversation,
   ownerEmail,
   onOwnerEmailSave,
@@ -3384,11 +3412,12 @@ function WorkspacePanel({
           leadPrices={leadPrices}
           selectedBusinessId={selectedBusinessId}
           operatorDeals={operatorDeals}
+          clientOwners={clientOwners}
           adminNotes={adminNotes}
           operatorAccounts={operatorAccounts}
           onReloadOperatorAccounts={onReloadOperatorAccounts}
           onAdminNote={onAdminNote}
-          setOperatorDealCount={onOperatorDealChange}
+          onDownloadOperatorReport={onDownloadOperatorReport}
           setLeadStage={onLeadStageChange}
           setLeadPrice={onLeadPriceChange}
           onOpenConversation={onOpenConversation}
@@ -5034,6 +5063,43 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     });
   };
 
+  const downloadOperatorReport = async () => {
+    const business = resolveBusinessId(selectedBusinessId);
+    if (!business) {
+      showToast('Select a business first');
+      return;
+    }
+    try {
+      const response = await API.fetchWithTimeout(
+        `${API_BASE}${scopedPath(`/api/v2/operator-deals/report.pdf?business_id=${encodeURIComponent(business)}`)}`,
+        { headers: apiHeaders() },
+        45000,
+      );
+      if (!response.ok) {
+        let message = `Request failed: ${response.status}`;
+        try {
+          const data = await response.json();
+          message = apiErrorMessage(data, response.status);
+        } catch (e) {
+          // PDF endpoint may not return JSON on infrastructure errors.
+        }
+        throw new Error(message);
+      }
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `operator-deals-${business}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      showToast('Operator report downloaded');
+    } catch (e) {
+      showToast(e.message || 'Could not download report');
+    }
+  };
+
   const loadBusinesses = async ({ silent = false, ownerEmailOverride = '' } = {}) => {
     try {
       const data = await API.get('/api/businesses');
@@ -6111,6 +6177,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
             onRemoveManualClient={removeManualClient}
             onOperatorDealChange={setOperatorDealCount}
             onAdminNote={addOperatorAdminNote}
+            onDownloadOperatorReport={downloadOperatorReport}
             onOpenConversation={selectConversation}
             ownerEmail={ownerEmail}
             onOwnerEmailSave={saveOwnerEmailScope}
