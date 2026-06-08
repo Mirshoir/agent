@@ -3687,6 +3687,7 @@ Sales-agent rules:
 - Exact price should not be invented. If asked price and it is missing, say it should be confirmed.
 - Do not claim prices changed or will change unless configured.
 - Use wholesale/retail/minimum-order rules only when configured.
+- For qop/size questions, use the configured qop/size rule from Business facts. Do not invent size composition.
 - Use configured address and delivery process only.
 - Payment: move the customer to private chat or a manager; do not request private details in public comments.
 - When customer asks for photo/video/catalog, answer warmly with one light smile/emoji-style touch; do not over-explain.
@@ -3968,6 +3969,12 @@ Telegram groups:
 - Single product: {business.get("telegram_single", "")}
 - Package: {business.get("telegram_package", "")}
 - Bag / meshok: {business.get("telegram_bag", "")}
+
+Configured qop/size rule:
+{configured_pack_size_rule(business) or default_pack_size_sentence("uz")}
+
+Configured items per qop/meshok:
+{configured_items_per_meshok(business)}
 
 Additional knowledge:
 {business.get("knowledge", "")}
@@ -5345,15 +5352,16 @@ def download_media_for_matcher(media_url: str, access_token: str = "") -> tuple[
     return data, filename, content_type
 
 
-def build_product_match_reply(code: str, model: str, price: str, currency: str, top_score: float) -> str:
+def build_product_match_reply(code: str, model: str, price: str, currency: str, top_score: float, business: dict = None) -> str:
     code = normalize_id(code)
     model = normalize_id(model)
     price = normalize_id(price)
     currency = normalize_id(currency)
     label = model or code or "shu model"
+    pack_info = default_pack_size_sentence("uz", business=business)
     if price:
-        return f"Model {label} narxi {price} {currency or '$'}. Qaysi razmer va nechta qop kerak?"
-    return f"Model {label} bo'yicha aniqroq rasm yoki kod yuboring. Qaysi razmer va nechta qop kerak?"
+        return f"Model {label} narxi {price} {currency or '$'}. {pack_info} Nechta qop kerak?"
+    return f"Model {label} bo'yicha aniqroq rasm yoki kod yuboring. {pack_info} Nechta qop kerak?"
 
 
 def normalize_product_code(value: str) -> str:
@@ -6130,7 +6138,136 @@ def load_recent_instagram_media_match(business_id: str, customer_id: str) -> dic
     return payload
 
 
-DEFAULT_ITEMS_PER_MESHOK = 60
+DEFAULT_SIZES_PER_MESHOK = 6
+DEFAULT_ITEMS_PER_SIZE_IN_MESHOK = 10
+DEFAULT_ITEMS_PER_MESHOK = DEFAULT_SIZES_PER_MESHOK * DEFAULT_ITEMS_PER_SIZE_IN_MESHOK
+
+
+def configured_pack_size_rule(business: dict = None) -> str:
+    business = business or {}
+    direct_keys = [
+        "default_pack_size_rule",
+        "default_qop_size_rule",
+        "qop_size_rule",
+        "pack_size_rule",
+        "meshok_size_rule",
+        "telegram_bag",
+    ]
+    for key in direct_keys:
+        value = normalize_id(business.get(key))
+        if value:
+            if key == "telegram_bag":
+                lower_value = value.lower()
+                has_pack_word = any(marker in lower_value for marker in ["qop", "meshok", "мешок", "bag"])
+                has_size_word = any(marker in lower_value for marker in ["razmer", "size", "размер", "o'lcham", "olcham", "өлшем"])
+                if not (has_pack_word and has_size_word):
+                    continue
+            return value
+
+    combined = "\n".join([
+        normalize_id(business.get("knowledge")),
+        normalize_id(business.get("ai_reply_rules")),
+        normalize_id(business.get("faq")),
+    ])
+    for line in combined.splitlines():
+        clean = re.sub(r"\s+", " ", line).strip(" -")
+        lower = clean.lower()
+        if any(marker in lower for marker in ["qop", "meshok", "мешок", "bag"]) and any(marker in lower for marker in ["razmer", "size", "размер", "o'lcham", "olcham", "өлшем"]):
+            return clean
+    return ""
+
+
+def configured_items_per_meshok(business: dict = None) -> int:
+    business = business or {}
+    for key in ["items_per_meshok", "pack_total_items", "default_pack_total_items", "qop_total_items", "meshok_total_items"]:
+        raw = normalize_id(business.get(key))
+        if not raw:
+            continue
+        match = re.search(r"\d+", raw)
+        if match:
+            return max(1, int(match.group(0)))
+
+    rule = configured_pack_size_rule(business)
+    if rule:
+        total_match = re.search(r"(?:jami|total|всего|барлығы|жалпы)\D{0,24}(\d+)", rule, re.IGNORECASE)
+        if total_match:
+            return max(1, int(total_match.group(1)))
+        nums = [int(item) for item in re.findall(r"\d+", rule)]
+        if len(nums) >= 3:
+            return max(1, nums[-1])
+        if len(nums) >= 2:
+            return max(1, nums[0] * nums[1])
+
+    return DEFAULT_ITEMS_PER_MESHOK
+
+
+def default_pack_size_sentence(lang: str = "", include_model_hint: bool = False, business: dict = None) -> str:
+    configured_rule = configured_pack_size_rule(business)
+    if configured_rule:
+        if include_model_hint:
+            hint = {
+                "en": "Send the model and I will confirm the exact size run.",
+                "ru": "Отправьте модель, и я уточню размерный ряд.",
+                "kk": "Модельді жіберсеңіз, нақты өлшемдерін анықтап беремін.",
+            }.get(normalize_id(lang).lower(), "Modelni yuborsangiz, aniq razmerlarini aniqlab beraman.")
+            return f"{configured_rule.rstrip('.!?')}. {hint}"
+        return configured_rule
+
+    lang = normalize_id(lang).lower()
+    if lang == "en":
+        text = "One bag contains 6 different sizes: 10 pieces per size, 60 garments total."
+        if include_model_hint:
+            text += " Send the model and I will confirm the exact size run."
+        return text
+    if lang == "ru":
+        text = "В одном мешке 6 разных размеров: по 10 штук каждого размера, всего 60 единиц одежды."
+        if include_model_hint:
+            text += " Отправьте модель, и я уточню размерный ряд."
+        return text
+    if lang == "kk":
+        text = "1 қаптың ішінде 6 түрлі өлшем бар: әр өлшемнен 10 данадан, барлығы 60 киім болады."
+        if include_model_hint:
+            text += " Модельді жіберсеңіз, нақты өлшемдерін анықтап беремін."
+        return text
+    text = "1 qop ichida 6 xil razmer bor: har bir razmerdan 10 tadan, jami 60 ta kiyim bo'ladi."
+    if include_model_hint:
+        text += " Modelni yuborsangiz, aniq razmerlarini aniqlab beraman."
+    return text
+
+
+def default_pack_count_question(lang: str = "") -> str:
+    lang = normalize_id(lang).lower()
+    if lang == "en":
+        return "How many bags do you need?"
+    if lang == "ru":
+        return "Сколько мешков нужно?"
+    if lang == "kk":
+        return "Қанша қап керек?"
+    return "Nechta qop kerak?"
+
+
+def wants_default_pack_size_info(text: str) -> bool:
+    low = normalize_id(text).lower()
+    if not low:
+        return False
+    size_markers = [
+        "razmer", "razmeri", "razmerlar", "size", "sizes", "размер", "размеры",
+        "o'lcham", "o‘lcham", "olcham", "өлшем",
+    ]
+    pack_markers = ["qop", "meshok", "мешок", "bag", "sack", "upakovka", "упаковка", "пакет"]
+    question_markers = [
+        "ichida", "nechta", "qancha", "qanaqa", "qanday", "qaysi", "bor", "bormi",
+        "сколько", "какие", "какой", "есть", "внутри", "қанша", "қандай", "бар",
+    ]
+    if any(marker in low for marker in size_markers):
+        return True
+    return any(marker in low for marker in pack_markers) and any(marker in low for marker in question_markers)
+
+
+def default_pack_size_reply(text: str, business: dict = None) -> str:
+    if not wants_default_pack_size_info(text):
+        return ""
+    return default_pack_size_sentence(detect_customer_language(text), include_model_hint=True, business=business)
 
 
 def _parse_numeric_price(value: str) -> float | None:
@@ -6166,7 +6303,7 @@ def is_local_currency_question(text: str) -> bool:
     return any(marker in low for marker in markers)
 
 
-def build_usd_only_reply(user_text: str, media_match: dict) -> str:
+def build_usd_only_reply(user_text: str, media_match: dict, business: dict = None) -> str:
     currency = normalize_id(media_match.get("top_match_currency")) or "USD"
     code = normalize_id(media_match.get("top_match_code"))
     model = normalize_id(media_match.get("top_match_model"))
@@ -6174,24 +6311,26 @@ def build_usd_only_reply(user_text: str, media_match: dict) -> str:
     price = _parse_numeric_price(media_match.get("top_match_price", ""))
     lang = detect_customer_language(user_text)
     unit_str = f"{price:.1f}".rstrip("0").rstrip(".") if price is not None else ""
+    pack_info = default_pack_size_sentence(lang, business=business)
+    pack_question = default_pack_count_question(lang)
     if lang == "en":
         if unit_str:
-            return f"We sell in {currency} only. Model {label} narxi {unit_str} {currency}. Qaysi razmer va nechta qop kerak?"
-        return f"We sell in {currency} only. Qaysi razmer va nechta qop kerak?"
+            return f"We sell in {currency} only. Model {label} price is {unit_str} {currency}. {pack_info} {pack_question}"
+        return f"We sell in {currency} only. {pack_info} {pack_question}"
     if lang == "ru":
         if unit_str:
-            return f"Мы продаём только в {currency}. Модель {label} narxi {unit_str} {currency}. Какой размер и сколько мешков нужно?"
-        return f"Мы продаём только в {currency}. Какой размер и сколько мешков нужно?"
+            return f"Мы продаём только в {currency}. Цена модели {label}: {unit_str} {currency}. {pack_info} {pack_question}"
+        return f"Мы продаём только в {currency}. {pack_info} {pack_question}"
     if lang == "kk":
         if unit_str:
-            return f"Біз тек {currency}-мен сатамыз. Model {label} narxi {unit_str} {currency}. Қай өлшем және қанша қап керек?"
-        return f"Біз тек {currency}-мен сатамыз. Қай өлшем және қанша қап керек?"
+            return f"Біз тек {currency}-мен сатамыз. Model {label} бағасы {unit_str} {currency}. {pack_info} {pack_question}"
+        return f"Біз тек {currency}-мен сатамыз. {pack_info} {pack_question}"
     if unit_str:
-        return f"Biz faqat {currency}da sotamiz. Model {label} narxi {unit_str} {currency}. Qaysi razmer va nechta qop kerak?"
-    return f"Biz faqat {currency}da sotamiz. Qaysi razmer va nechta qop kerak?"
+        return f"Biz faqat {currency}da sotamiz. Model {label} narxi {unit_str} {currency}. {pack_info} {pack_question}"
+    return f"Biz faqat {currency}da sotamiz. {pack_info} {pack_question}"
 
 
-def build_verified_meshok_price_reply(user_text: str, media_match: dict) -> str:
+def build_verified_meshok_price_reply(user_text: str, media_match: dict, business: dict = None) -> str:
     unit_price = _parse_numeric_price(media_match.get("top_match_price", ""))
     if unit_price is None:
         return ""
@@ -6202,41 +6341,36 @@ def build_verified_meshok_price_reply(user_text: str, media_match: dict) -> str:
     model = normalize_id(media_match.get("top_match_model"))
     label = model or code or "shu model"
     unit_str = f"{unit_price:.1f}".rstrip("0").rstrip(".")
+    pack_info = default_pack_size_sentence(lang, business=business)
+    pack_question = default_pack_count_question(lang)
     if meshok_count is None:
         if lang == "en":
-            return f"Model {label} narxi {unit_str} {currency}. Qaysi razmer va nechta qop kerak?"
+            return f"Model {label} price is {unit_str} {currency}. {pack_info} {pack_question}"
         if lang == "ru":
-            return f"Модель {label} narxi {unit_str} {currency}. Какой размер и сколько мешков нужно?"
+            return f"Цена модели {label}: {unit_str} {currency}. {pack_info} {pack_question}"
         if lang == "kk":
-            return f"Модель {label} narxi {unit_str} {currency}. Қай өлшем және қанша қап керек?"
-        return f"Model {label} narxi {unit_str} {currency}. Qaysi razmer va nechta qop kerak?"
+            return f"Модель {label} бағасы {unit_str} {currency}. {pack_info} {pack_question}"
+        return f"Model {label} narxi {unit_str} {currency}. {pack_info} {pack_question}"
 
-    total_items = DEFAULT_ITEMS_PER_MESHOK * meshok_count
+    items_per_meshok = configured_items_per_meshok(business)
+    total_items = items_per_meshok * meshok_count
     total_price = unit_price * total_items
     total_str = f"{total_price:.1f}".rstrip("0").rstrip(".")
-    size_match = re.search(r"\b(\d{2})\s*(?:razmer|size|размер)?\b", normalize_id(user_text).lower())
-    size_value = size_match.group(1) if size_match else ""
     if lang == "en":
         if meshok_count == 1:
-            follow_up = "Qaysi razmer kerak?" if not size_value else f"{size_value} razmer bo'ladi. Qaysi shahar yoki manzilga kerak?"
-            return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. 1 qopda {DEFAULT_ITEMS_PER_MESHOK} ta bo'ladi, jami {total_str} {currency}. {follow_up}"
-        follow_up = "Qaysi razmer kerak?" if not size_value else f"{size_value} razmer bo'ladi. Qaysi shahar yoki manzilga kerak?"
-        return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {meshok_count} qopda jami {total_items} ta bo'ladi, umumiy narx {total_str} {currency}. {follow_up}"
+            return f"Model {label} price per piece is {unit_str} {currency}. {pack_info} Total is {total_str} {currency}. {pack_question}"
+        return f"Model {label} price per piece is {unit_str} {currency}. {meshok_count} bags contain {total_items} garments total, total price {total_str} {currency}. {pack_question}"
     if lang == "ru":
         if meshok_count == 1:
-            return f"Для модели {label} цена за 1 штуку {unit_str} {currency}. В 1 мешке {DEFAULT_ITEMS_PER_MESHOK} штук, итого {total_str} {currency}. Какой размер нужен?"
-        return f"Для модели {label} цена за 1 штуку {unit_str} {currency}. В {meshok_count} мешках всего {total_items} штук, общая сумма {total_str} {currency}. Какой размер нужен?"
+            return f"Для модели {label} цена за 1 штуку {unit_str} {currency}. {pack_info} Итого {total_str} {currency}. {pack_question}"
+        return f"Для модели {label} цена за 1 штуку {unit_str} {currency}. В {meshok_count} мешках всего {total_items} единиц одежды, общая сумма {total_str} {currency}. {pack_question}"
     if lang == "kk":
         if meshok_count == 1:
-            follow_up = "Қай өлшем керек?" if not size_value else f"{size_value} өлшем болады. Қай қалаға не мекенжайға керек?"
-            return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. 1 қапта {DEFAULT_ITEMS_PER_MESHOK} дана болады, жалпы {total_str} {currency}. {follow_up}"
-        follow_up = "Қай өлшем керек?" if not size_value else f"{size_value} өлшем болады. Қай қалаға не мекенжайға керек?"
-        return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. {meshok_count} қапта барлығы {total_items} дана болады, жалпы баға {total_str} {currency}. {follow_up}"
+            return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. {pack_info} Жалпы {total_str} {currency}. {pack_question}"
+        return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. {meshok_count} қапта барлығы {total_items} киім болады, жалпы баға {total_str} {currency}. {pack_question}"
     if meshok_count == 1:
-        follow_up = "Qaysi razmer kerak?" if not size_value else f"{size_value} razmer bo'ladi. Qaysi shahar yoki manzilga kerak?"
-        return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. 1 qopda {DEFAULT_ITEMS_PER_MESHOK} ta bo'ladi, jami {total_str} {currency}. {follow_up}"
-    follow_up = "Qaysi razmer kerak?" if not size_value else f"{size_value} razmer bo'ladi. Qaysi shahar yoki manzilga kerak?"
-    return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {meshok_count} qopda jami {total_items} ta bo'ladi, umumiy narx {total_str} {currency}. {follow_up}"
+        return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {pack_info} Jami {total_str} {currency}. {pack_question}"
+    return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {meshok_count} qopda jami {total_items} ta kiyim bo'ladi, umumiy narx {total_str} {currency}. {pack_question}"
 
 
 def is_verified_media_match(media_match: dict = None) -> bool:
@@ -6516,6 +6650,10 @@ def get_ai_reply(
             direct_phone_reply = sales_phone_reply(user_text, business)
             if direct_phone_reply:
                 return direct_phone_reply
+
+        size_pack_reply = default_pack_size_reply(user_text, business)
+        if size_pack_reply:
+            return size_pack_reply
 
         off_topic_reply = unrelated_topic_reply(user_text, business)
         if off_topic_reply:
@@ -7301,7 +7439,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         media_match_strategy = normalize_id((resolved_media_match or {}).get("match_strategy"))
 
         if verified_exact_media_match and is_local_currency_question(message_text):
-            usd_only_reply = build_usd_only_reply(message_text, resolved_media_match)
+            usd_only_reply = build_usd_only_reply(message_text, resolved_media_match, business)
             if usd_only_reply:
                 media_reply_hint = usd_only_reply
                 force_direct_media_reply = True
@@ -7312,19 +7450,19 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 force_direct_media_reply = True
 
         if verified_exact_media_match and (is_price_question(message_text) or quantity_followup):
-            verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match)
+            verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match, business)
             if verified_meshok_reply:
                 media_reply_hint = verified_meshok_reply
                 force_direct_media_reply = True
 
         if needs_photo_fallback:
             if recent_media_context_found and (is_price_question(message_text) or quantity_followup):
-                verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match)
+                verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match, business)
                 if verified_meshok_reply:
                     media_reply_hint = verified_meshok_reply
                     media_match_context = (
                         "The customer is asking about bag/meshok pricing for a verified matched product. "
-                        "Use the verified unit price and the standard 60 pieces per meshok to answer directly."
+                        f"Use the verified unit price and the configured {configured_items_per_meshok(business)} pieces per meshok to answer directly."
                     )
                 else:
                     media_reply_hint = product_media_price_fallback_reply(message_text, business)
