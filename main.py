@@ -229,10 +229,10 @@ SUPER_ADMIN_EMAILS = {
 # Fallback store used only when `dashboard_workspace_state` table is missing.
 # This keeps operator tasks usable until SQL migration is applied.
 WORKSPACE_STATE_FALLBACK: dict[str, dict] = {}
-LEAD_CONTACT_REQUEST_UZ = "Ismingiz va telefon raqamingizni yozib qoldiring, siz bilan bog'lanamiz."
-LEAD_CONTACT_REQUEST_EN = "Please leave your name and phone number, and we will contact you."
-LEAD_CONTACT_REQUEST_RU = "Оставьте, пожалуйста, ваше имя и номер телефона, мы с вами свяжемся."
-LEAD_CONTACT_REQUEST_KK = "Атыңыз бен телефон нөміріңізді қалдырыңыз, біз сізбен байланысамыз."
+LEAD_CONTACT_REQUEST_UZ = "Buyurtmani yakunlashda menejerimiz yordam beradi."
+LEAD_CONTACT_REQUEST_EN = "Our manager will help finalize the order."
+LEAD_CONTACT_REQUEST_RU = "Менеджер поможет завершить заказ."
+LEAD_CONTACT_REQUEST_KK = "Тапсырысты аяқтауға менеджеріміз көмектеседі."
 STATS_CACHE_TTL_SECONDS = int(os.getenv("STATS_CACHE_TTL_SECONDS", "20"))
 STATS_CACHE: dict[str, dict] = {}
 INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS", str(60 * 60 * 6)))
@@ -2805,6 +2805,255 @@ def upsert_workspace_state(business_id: str, state_key: str, state_value, update
         WORKSPACE_STATE_FALLBACK[business_id][state_key] = data.get("state_value")
 
 
+def _safe_state_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _safe_state_items(value) -> list:
+    return value if isinstance(value, list) else []
+
+
+def load_business_conversation_lookup(business_id: str, limit: int = 2500) -> dict:
+    business_id = normalize_id(business_id)
+    if not business_id:
+        return {}
+
+    try:
+        rows = (
+            supabase.table("inbox_messages")
+            .select(
+                "business_id,platform,channel,customer_id,chat_id,customer_name,"
+                "content,created_at,direction,is_read,external_message_id,raw_payload"
+            )
+            .eq("business_id", business_id)
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+            .data
+            or []
+        )
+    except Exception as exc:
+        log("Could not load conversation rows for report", {"business_id": business_id, "error": str(exc)})
+        rows = []
+
+    grouped = {}
+    for row in rows:
+        platform = normalize_id(row.get("platform", "instagram")).lower() or "instagram"
+        channel = standard_channel(platform, row.get("channel", ""))
+        customer_id = normalize_id(row.get("customer_id"))
+        chat_id = normalize_id(row.get("chat_id"))
+        scope = conversation_scope(platform, channel, customer_id, chat_id)
+        if platform == "instagram" and "comment" in channel:
+            post_id = extract_instagram_comment_post_id(row)
+            scope = encode_comment_scope(customer_id, post_id) if post_id else scope
+        if not scope:
+            continue
+        key = f"{platform}::{business_id}::{channel}::{scope}"
+        grouped.setdefault(key, []).append(row)
+
+    business = get_business_by_id(business_id) or {}
+    lookup = {}
+    for key, conv_rows in grouped.items():
+        conv = transform_conversation_to_react(
+            key,
+            sorted(conv_rows, key=lambda item: item.get("created_at", "")),
+            business=business,
+            ai_lookup_enabled=False,
+        )
+        if conv:
+            lookup[key] = conv
+    return lookup
+
+
+def build_operator_deal_report_data(business_id: str) -> dict:
+    business_id = normalize_id(business_id)
+    business = get_business_by_id(business_id) or {}
+    state = get_workspace_state(business_id)
+    lead_stages = _safe_state_dict(state.get("lead_stages"))
+    lead_prices = _safe_state_dict(state.get("lead_prices"))
+    client_owners = _safe_state_dict(state.get("client_owners"))
+    manual_clients_bucket = state.get("manual_clients") or {}
+    manual_clients = _safe_state_items(manual_clients_bucket.get("items") if isinstance(manual_clients_bucket, dict) else [])
+    legacy_operator_deals = _safe_state_dict(state.get("operator_deals"))
+    conversations = load_business_conversation_lookup(business_id)
+
+    conversation_ids = set(str(item) for item in manual_clients if item)
+    conversation_ids.update(str(key) for key in client_owners.keys() if key)
+    conversation_ids.update(str(key) for key, stage in lead_stages.items() if normalize_id(stage).lower() == "won")
+    conversation_ids.update(str(key) for key in conversations.keys() if client_owners.get(key) or lead_stages.get(key) == "won")
+
+    rows = []
+    ranking = {}
+    for conversation_id in sorted(conversation_ids):
+        conv = conversations.get(conversation_id) or {}
+        owner = normalize_id(client_owners.get(conversation_id))
+        stage = normalize_id(lead_stages.get(conversation_id)) or "new"
+        successful = stage.lower() == "won" and bool(owner)
+        if successful:
+            ranking.setdefault(owner, {"operator": owner, "picked_clients": 0, "successful_deals": 0, "clients": []})
+            ranking[owner]["successful_deals"] += 1
+            ranking[owner]["clients"].append(conv.get("name") or conversation_id)
+        if owner:
+            ranking.setdefault(owner, {"operator": owner, "picked_clients": 0, "successful_deals": 0, "clients": []})
+            ranking[owner]["picked_clients"] += 1
+
+        parts = conversation_id.split("::")
+        platform = conv.get("platform") or (parts[0] if len(parts) == 4 else "")
+        channel = parts[2] if len(parts) == 4 else ""
+        rows.append({
+            "conversation_id": conversation_id,
+            "client": conv.get("name") or conv.get("handle") or (parts[3] if len(parts) == 4 else conversation_id),
+            "handle": conv.get("handle") or "",
+            "platform": platform,
+            "channel": channel,
+            "operator": owner or "Unassigned",
+            "stage": stage,
+            "successful_deal": successful,
+            "price": normalize_id(lead_prices.get(conversation_id)) or "-",
+            "last_message": normalize_id(conv.get("preview")) or "-",
+            "last_at": normalize_id(conv.get("lastAt") or conv.get("lastTime")) or "-",
+        })
+
+    for operator_id, count in legacy_operator_deals.items():
+        operator = normalize_id(operator_id)
+        if not operator:
+            continue
+        ranking.setdefault(operator, {"operator": operator, "picked_clients": 0, "successful_deals": 0, "clients": []})
+        if not ranking[operator]["successful_deals"]:
+            try:
+                ranking[operator]["successful_deals"] = int(count or 0)
+            except Exception:
+                pass
+
+    ranking_rows = sorted(
+        ranking.values(),
+        key=lambda item: (int(item.get("successful_deals") or 0), int(item.get("picked_clients") or 0), item.get("operator", "")),
+        reverse=True,
+    )
+    return {
+        "business": sanitize_business_row(business) or {"id": business_id},
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "ranking": ranking_rows,
+        "clients": rows,
+    }
+
+
+def _pdf_text(value) -> str:
+    text = re.sub(r"\s+", " ", normalize_id(value)).strip()
+    return text.encode("latin-1", "replace").decode("latin-1")
+
+
+def _pdf_escape(value) -> str:
+    return _pdf_text(value).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _wrap_pdf_line(text: str, width: int = 132) -> list[str]:
+    text = _pdf_text(text)
+    if len(text) <= width:
+        return [text]
+    words = text.split()
+    lines = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) <= width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+        current = word[:width]
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+def build_operator_deal_report_pdf(report: dict) -> bytes:
+    business = report.get("business") or {}
+    business_name = normalize_id(business.get("business_name")) or normalize_id(business.get("id")) or "Business"
+    lines = [
+        f"Operator deals report - {business_name}",
+        f"Generated: {report.get('generated_at')}",
+        "",
+        "Operator ranking",
+    ]
+    ranking = report.get("ranking") or []
+    if ranking:
+        for index, row in enumerate(ranking, start=1):
+            lines.append(
+                f"{index}. {row.get('operator')}: {row.get('successful_deals', 0)} successful deals, "
+                f"{row.get('picked_clients', 0)} picked clients"
+            )
+    else:
+        lines.append("No picked clients or successful deals yet.")
+
+    lines.extend(["", "Client details"])
+    clients = report.get("clients") or []
+    if clients:
+        for row in clients:
+            deal_status = "SUCCESS" if row.get("successful_deal") else "pending/not won"
+            lines.append(
+                f"- {row.get('client')} {row.get('handle')}: operator={row.get('operator')}; "
+                f"stage={row.get('stage')}; deal={deal_status}; price={row.get('price')}; "
+                f"channel={row.get('platform')}/{row.get('channel')}; last={row.get('last_message')}"
+            )
+    else:
+        lines.append("No client rows to report.")
+
+    wrapped_lines = []
+    for line in lines:
+        if not line:
+            wrapped_lines.append("")
+        else:
+            wrapped_lines.extend(_wrap_pdf_line(line))
+
+    page_width = 842
+    page_height = 595
+    margin_x = 36
+    start_y = 555
+    line_height = 12
+    lines_per_page = 42
+    pages = [wrapped_lines[i:i + lines_per_page] for i in range(0, len(wrapped_lines), lines_per_page)] or [[]]
+
+    objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    page_refs = []
+    for page_lines in pages:
+        content_parts = []
+        y = start_y
+        for line in page_lines:
+            font_size = 14 if y == start_y and page_lines is pages[0] else 9
+            content_parts.append(f"BT /F1 {font_size} Tf {margin_x} {y} Td ({_pdf_escape(line)}) Tj ET")
+            y -= line_height
+        stream = "\n".join(content_parts)
+        content_obj_num = len(objects) + 1
+        objects.append(f"<< /Length {len(stream.encode('latin-1'))} >>\nstream\n{stream}\nendstream")
+        page_obj_num = len(objects) + 1
+        page_refs.append(f"{page_obj_num} 0 R")
+        objects.append(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] "
+            f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_obj_num} 0 R >>"
+        )
+    objects[1] = f"<< /Type /Pages /Kids [{' '.join(page_refs)}] /Count {len(page_refs)} >>"
+
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{index} 0 obj\n{obj}\nendobj\n".encode("latin-1"))
+    xref_pos = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode("latin-1"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("latin-1"))
+    pdf.extend(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode("latin-1")
+    )
+    return bytes(pdf)
+
+
 def instagram_processed_message_state_key(message_id: str) -> str:
     message_id = normalize_id(message_id)
     return f"instagram_processed_message:{message_id}" if message_id else ""
@@ -3066,8 +3315,8 @@ Instagram rules:
 - Keep DMs concise and natural.
 - If customer asks catalog/price/model/photo, respond naturally and guide to DM flow.
 - Do not paste raw catalog links in Instagram replies.
-- For public comments containing "katalog", "narx", "qancha", "price": reply with:
-  "Direktdan yozdik, iloji bo'lsa raqamingizni qoldiring."
+- For public comments containing "+", "katalog", "narx", "qancha", "price": send details in DM and reply publicly without asking for phone, name, address, or any private information.
+- Never ask a customer to leave private information in a public Instagram comment.
 """.strip(),
     "telegram_prompt": """
 Telegram rules:
@@ -3088,15 +3337,13 @@ Assalomu alaykum 😊 Qanday yordam kerak?
     "lead_collection_rules": """
 Collect buyer context naturally and briefly.
 
-Use these qualification questions when relevant:
-- Ismingiz nima?
-- Qaysi shahardansiz?
-- Nomer bera olasizmi?
+Use qualification questions only in private chat when relevant:
+- Which product/model are you interested in?
+- Which city should delivery be checked for?
 
 When client is close to order, collect:
-- name
-- phone
-- city/address
+- only the details needed for the order
+- use private chat for any personal/contact details
 
 Never repeat the same lead-collection question more than once in the same conversation.
 If phone is already collected, do not ask for phone again.
@@ -3140,7 +3387,7 @@ Handoff immediately when:
 - payment/contract specifics are requested
 
 Handoff closing line:
-- "Ismingiz va telefon raqamingizni yozib qoldiring, siz bilan bog'lanamiz."
+- "Direktda yozing, menejerimiz yordam beradi."
 
 If the customer already sent a phone number, do not use the full name+phone request again.
 Ask only for the missing field.
@@ -3166,6 +3413,7 @@ Sales-agent rules:
 - Use only configured business strengths and facts.
 - Tone: samimiy, short, practical, complete enough to help the customer buy.
 - Ask qualification questions naturally: name, city, phone number.
+- In public comments, never ask for name, phone, address, Telegram, WhatsApp, passport, card, or other private details.
 - Never ask for a phone number again if the customer already sent one in the current conversation.
 - Never ask for a name again if the customer already sent one in the current conversation.
 - If both name and phone are already collected, confirm briefly and continue the sale.
@@ -3176,7 +3424,7 @@ Sales-agent rules:
 - Do not claim prices changed or will change unless configured.
 - Use wholesale/retail/minimum-order rules only when configured.
 - Use configured address and delivery process only.
-- Payment: ask the customer to leave name and phone number so the team can contact them.
+- Payment: move the customer to private chat or a manager; do not request private details in public comments.
 - When customer asks for photo/video/catalog, answer warmly with one light smile/emoji-style touch; do not over-explain.
 - Reply separately to each commenter; do not combine multiple customers into one response.
 - Sticker-only/simple reactions: answer with a simple friendly emoji/sticker-style short reply, not a sales paragraph.
@@ -3185,7 +3433,7 @@ Sales-agent rules:
 - If comparing with another shop: be respectful; no pressure.
 - Buying signs: asks for card, cargo, exact order flow, or says wholesale/optom.
 - Handoff immediately for optom intent, angry/norozi customer, payment details, or exact final order terms.
-- Handoff line: "Ismingiz va telefon raqamingizni yozib qoldiring, siz bilan bog'lanamiz."
+- Handoff line: "Direktda yozing, menejerimiz yordam beradi."
 - If bot made spelling/meaning mistake, apologize briefly and correct it.
 """.strip()
 
@@ -3523,7 +3771,11 @@ Safety rules:
 
 
 def wants_catalog(text: str) -> bool:
-    text = (text or "").lower()
+    clean = normalize_id(text).strip()
+    compact = re.sub(r"\s+", "", clean)
+    if compact in {"+", "++"}:
+        return True
+    text = clean.lower()
     keywords = [
         "catalog", "katalog", "каталог", "price", "prices", "narx", "narxlari",
         "narhi", "qancha", "qanchadan", "necha pul", "nechpul", "nechi pul",
@@ -3534,6 +3786,80 @@ def wants_catalog(text: str) -> bool:
         "mahsulotlar", "товар", "товары",
     ]
     return any(k in text for k in keywords)
+
+
+PUBLIC_PRIVATE_INFO_REQUEST_MARKERS = (
+    "telefon raqamingiz",
+    "telefon nomeringiz",
+    "raqamingizni",
+    "nomeringizni",
+    "nomer qoldiring",
+    "raqam qoldiring",
+    "yozib qoldiring",
+    "ismingizni",
+    "ismingiz va telefon",
+    "phone number",
+    "leave your name",
+    "leave your phone",
+    "your number",
+    "contact number",
+    "номер телефона",
+    "оставьте номер",
+    "оставьте имя",
+    "ваше имя",
+    "телефон нөмір",
+    "атыңыз",
+)
+
+
+def is_public_private_info_request(text: str) -> bool:
+    lower = normalize_id(text).lower()
+    if not lower:
+        return False
+    return any(marker in lower for marker in PUBLIC_PRIVATE_INFO_REQUEST_MARKERS)
+
+
+def safe_public_comment_reply(text: str, business: dict = None) -> str:
+    reply = complete_sentence_reply(remove_urls(text), limit=1000)
+    if reply and not is_public_private_info_request(reply):
+        return reply
+
+    business_name = normalize_id((business or {}).get("business_name"))
+    if business_name:
+        return "Ma'lumotni direktga yubordik. Xabaringiz uchun rahmat."
+    return "Ma'lumotni direktga yubordik. Xabaringiz uchun rahmat."
+
+
+def is_conversation_finished_message(text: str) -> bool:
+    s = normalize_id(text).lower()
+    if not s:
+        return False
+    compact = re.sub(r"[\s.!?。！？,;:()\\-]+", "", s)
+    exact_markers = {
+        "ok", "okay", "okey", "kk",
+        "hop", "хоп", "xo'p", "xop", "хорошо",
+        "rahmat", "raxmat", "спасибо", "thanks", "thankyou",
+        "tushunarli", "понятно", "ясно",
+        "boldi", "bo'ldi", "bo‘ldi", "всё", "все",
+        "kerakmas", "kerakemas", "не надо", "nenado",
+        "stop", "bas", "хватит",
+    }
+    if compact in {re.sub(r"[\s.!?。！？,;:()\\-]+", "", item) for item in exact_markers}:
+        return True
+    finish_phrases = [
+        "boshqa savol yo'q",
+        "boshqa savolim yo'q",
+        "kerak emas rahmat",
+        "hozircha kerak emas",
+        "that's all",
+        "no more questions",
+        "don't message me",
+        "do not message me",
+        "не пишите",
+        "больше не нужно",
+        "вопросов нет",
+    ]
+    return any(phrase in s for phrase in finish_phrases)
 
 
 def is_price_question(text: str) -> bool:
@@ -5917,6 +6243,15 @@ def get_ai_reply(
             return off_topic_reply
 
         messages = [{"role": "system", "content": build_sales_system_prompt(business, platform)}]
+        if platform == "instagram" and "comment" in normalize_id(channel).lower():
+            messages.append({
+                "role": "system",
+                "content": (
+                    "This is a public Instagram comment. Never ask for private information "
+                    "such as name, phone number, address, WhatsApp/Telegram, passport, card, "
+                    "or order contact details in the public reply. Move private details to DM."
+                ),
+            })
         normalized_lead_state = normalize_lead_state(lead_state)
         lead_context = build_known_customer_information_block(normalized_lead_state)
         if lead_context:
@@ -6117,7 +6452,7 @@ def reply_to_comment(access_token: str, comment_id: str, text: str, business: di
     else:
         url = f"{GRAPH_INSTAGRAM}/{comment_id}/replies"
 
-    text = remove_urls(text)[:1000]
+    text = safe_public_comment_reply(text, business)[:1000]
     if not text:
         text = "Xabaringiz uchun rahmat 😊 Batafsil ma'lumot uchun DM yozing."
 
@@ -6394,6 +6729,12 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             channel="dm",
             updated_by="instagram_bot",
         )
+
+        if is_conversation_finished_message(message_text):
+            set_chat_ai_enabled(business.get("id"), "instagram", "dm", sender_id, False)
+            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="finished_by_customer")
+            mark_processed(processed_message_ids, message_id)
+            return
 
         if not claim_instagram_message_processing(business.get("id"), message_id, sender_id, "dm"):
             log("Instagram DM reply skipped: already claimed in database", {
@@ -6889,6 +7230,12 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
         channel="instagram_comment",
     )
 
+    if is_conversation_finished_message(comment_text):
+        comment_scope = encode_comment_scope("", post_id) if post_id else (commenter_id or comment_id)
+        set_chat_ai_enabled(business.get("id"), "instagram", "instagram_comment", comment_scope, False)
+        mark_processed(processed_comment_ids, comment_id)
+        return
+
     if not business_allows_auto_reply(business, "instagram", "instagram_comment"):
         mark_processed(processed_comment_ids, comment_id)
         return
@@ -6924,14 +7271,15 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
                 is_read=True,
                 channel="dm",
             )
-            reply_text = "Katalog DM orqali yuborildi"
+            reply_text = "Katalog DM orqali yuborildi."
         else:
             log("Instagram catalog private reply failed", {"comment_id": comment_id, "result": dm_raw_result})
             reply_text = "Katalogni DM orqali yuborish uchun bizga xabar yozing."
     else:
         reply_text = get_ai_reply(comment_text, business, "instagram", commenter_id or comment_id, "instagram_comment")
-        reply_text = complete_sentence_reply(remove_urls(reply_text), limit=1000)
+        reply_text = safe_public_comment_reply(reply_text, business)
 
+    reply_text = safe_public_comment_reply(reply_text, business)
     send_result = reply_to_comment(access_token, comment_id, reply_text, business)
     raw_result = safe_json(send_result) if send_result is not None else {}
     if send_result is not None and send_result.ok:
@@ -9267,6 +9615,36 @@ async def get_workspace_state_v2(
     data["operator_admin_notes"] = {"items": task_items}
     data["operator_tasks"] = {"items": task_items}
     return {"status": "ok", "data": data}
+
+
+@app.get("/api/v2/operator-deals/report.pdf")
+async def get_operator_deals_report_pdf(
+    business_id: str = "",
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    business_id = normalize_id(business_id)
+    if not business_id:
+        return JSONResponse({"error": "Missing business_id"}, status_code=400)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    role = normalize_id(access.get("role", "")).lower()
+    if role not in BUSINESS_ADMIN_ROLES and not access.get("is_admin"):
+        return JSONResponse({"error": "Only owner/admin can download operator reports"}, status_code=403)
+
+    report = build_operator_deal_report_data(business_id)
+    pdf_bytes = build_operator_deal_report_pdf(report)
+    filename = f"operator-deals-{business_id}-{datetime.utcnow().strftime('%Y%m%d')}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/api/v2/workspace-state")
