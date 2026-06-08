@@ -1101,6 +1101,7 @@ def business_editor(business):
         catalog_link = st.text_input("Catalog link", value=business.get("catalog_link", ""))
         sales_phone = st.text_input("Sales phone", value=business.get("sales_phone", ""))
         telegram_chat_id = st.text_input("Telegram chat ID", value=business.get("telegram_chat_id", ""))
+        telegram_bag = st.text_area("Qop size rule", value=business.get("telegram_bag", ""), height=80)
         telegram_notes = st.text_area("Telegram notes", value=business.get("telegram_notes", ""), height=80)
 
         knowledge = st.text_area("Main knowledge prompt", value=business.get("knowledge", ""), height=180)
@@ -1151,6 +1152,7 @@ def business_editor(business):
                 "catalog_link": catalog_link,
                 "sales_phone": sales_phone,
                 "telegram_chat_id": telegram_chat_id,
+                "telegram_bag": telegram_bag,
                 "telegram_notes": telegram_notes,
                 "knowledge": knowledge,
                 "ai_reply_rules": ai_reply_rules,
