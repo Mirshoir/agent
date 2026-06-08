@@ -6,3 +6,4 @@ supabase
 telethon
 pillow
 numpy
+reportlab
