@@ -370,6 +370,128 @@ def language_instruction_for(text: str) -> str:
     return ""
 
 
+DEFAULT_SIZES_PER_MESHOK = 6
+DEFAULT_ITEMS_PER_SIZE_IN_MESHOK = 10
+DEFAULT_ITEMS_PER_MESHOK = DEFAULT_SIZES_PER_MESHOK * DEFAULT_ITEMS_PER_SIZE_IN_MESHOK
+
+
+def configured_pack_size_rule(business: dict = None) -> str:
+    business = business or {}
+    direct_keys = [
+        "default_pack_size_rule",
+        "default_qop_size_rule",
+        "qop_size_rule",
+        "pack_size_rule",
+        "meshok_size_rule",
+        "telegram_bag",
+    ]
+    for key in direct_keys:
+        value = normalize_text(business.get(key))
+        if not value:
+            continue
+        if key == "telegram_bag":
+            lower_value = value.lower()
+            has_pack_word = any(marker in lower_value for marker in ["qop", "meshok", "мешок", "bag"])
+            has_size_word = any(marker in lower_value for marker in ["razmer", "size", "размер", "o'lcham", "olcham", "өлшем"])
+            if not (has_pack_word and has_size_word):
+                continue
+        return value
+
+    combined = "\n".join([
+        normalize_text(business.get("knowledge")),
+        normalize_text(business.get("ai_reply_rules")),
+        normalize_text(business.get("faq")),
+    ])
+    for line in combined.splitlines():
+        clean = re.sub(r"\s+", " ", line).strip(" -")
+        lower = clean.lower()
+        if any(marker in lower for marker in ["qop", "meshok", "мешок", "bag"]) and any(marker in lower for marker in ["razmer", "size", "размер", "o'lcham", "olcham", "өлшем"]):
+            return clean
+    return ""
+
+
+def configured_items_per_meshok(business: dict = None) -> int:
+    business = business or {}
+    for key in ["items_per_meshok", "pack_total_items", "default_pack_total_items", "qop_total_items", "meshok_total_items"]:
+        raw = normalize_text(business.get(key))
+        if not raw:
+            continue
+        match = re.search(r"\d+", raw)
+        if match:
+            return max(1, int(match.group(0)))
+
+    rule = configured_pack_size_rule(business)
+    if rule:
+        total_match = re.search(r"(?:jami|total|всего|барлығы|жалпы)\D{0,24}(\d+)", rule, re.IGNORECASE)
+        if total_match:
+            return max(1, int(total_match.group(1)))
+        nums = [int(item) for item in re.findall(r"\d+", rule)]
+        if len(nums) >= 3:
+            return max(1, nums[-1])
+        if len(nums) >= 2:
+            return max(1, nums[0] * nums[1])
+
+    return DEFAULT_ITEMS_PER_MESHOK
+
+
+def default_pack_size_sentence(lang: str = "", include_model_hint: bool = False, business: dict = None) -> str:
+    configured_rule = configured_pack_size_rule(business)
+    if configured_rule:
+        if include_model_hint:
+            hint = {
+                "en": "Send the model and I will confirm the exact size run.",
+                "ru": "Отправьте модель, и я уточню размерный ряд.",
+                "kk": "Модельді жіберсеңіз, нақты өлшемдерін анықтап беремін.",
+            }.get(normalize_text(lang).lower(), "Modelni yuborsangiz, aniq razmerlarini aniqlab beraman.")
+            return f"{configured_rule.rstrip('.!?')}. {hint}"
+        return configured_rule
+
+    lang = normalize_text(lang).lower()
+    if lang == "en":
+        text = "One bag contains 6 different sizes: 10 pieces per size, 60 garments total."
+        if include_model_hint:
+            text += " Send the model and I will confirm the exact size run."
+        return text
+    if lang == "ru":
+        text = "В одном мешке 6 разных размеров: по 10 штук каждого размера, всего 60 единиц одежды."
+        if include_model_hint:
+            text += " Отправьте модель, и я уточню размерный ряд."
+        return text
+    if lang == "kk":
+        text = "1 қаптың ішінде 6 түрлі өлшем бар: әр өлшемнен 10 данадан, барлығы 60 киім болады."
+        if include_model_hint:
+            text += " Модельді жіберсеңіз, нақты өлшемдерін анықтап беремін."
+        return text
+    text = "1 qop ichida 6 xil razmer bor: har bir razmerdan 10 tadan, jami 60 ta kiyim bo'ladi."
+    if include_model_hint:
+        text += " Modelni yuborsangiz, aniq razmerlarini aniqlab beraman."
+    return text
+
+
+def wants_default_pack_size_info(text: str) -> bool:
+    low = normalize_text(text).lower()
+    if not low:
+        return False
+    size_markers = [
+        "razmer", "razmeri", "razmerlar", "size", "sizes", "размер", "размеры",
+        "o'lcham", "o‘lcham", "olcham", "өлшем",
+    ]
+    pack_markers = ["qop", "meshok", "мешок", "bag", "sack", "upakovka", "упаковка", "пакет"]
+    question_markers = [
+        "ichida", "nechta", "qancha", "qanaqa", "qanday", "qaysi", "bor", "bormi",
+        "сколько", "какие", "какой", "есть", "внутри", "қанша", "қандай", "бар",
+    ]
+    if any(marker in low for marker in size_markers):
+        return True
+    return any(marker in low for marker in pack_markers) and any(marker in low for marker in question_markers)
+
+
+def default_pack_size_reply(text: str, business: dict = None) -> str:
+    if not wants_default_pack_size_info(text):
+        return ""
+    return default_pack_size_sentence(detect_customer_language(text), include_model_hint=True, business=business)
+
+
 def get_catalog_link(business: dict) -> str:
     link = (business or {}).get("catalog_link") or (business or {}).get("catalog") or (business or {}).get("website") or ""
     link = normalize_text(link)
@@ -768,6 +890,7 @@ DEFAULT_AI_PROMPT_SETTINGS = {
     "sales_rules": (
         "Answer the exact question first. Ask only one follow-up question at a time. "
         "For price questions ('narx', 'nechpul', 'qancha', 'цена', 'сколько'), answer price directly first if known. "
+        "For qop/size questions, use the configured qop/size rule from Business facts. Do not invent size composition. "
         "Keep replies short and comfortable: usually 1-3 short sentences. "
         "Do not ask for phone number or address at the beginning. "
         "Do not repeat product names every message. "
@@ -850,6 +973,12 @@ Telegram groups:
 - Single product: {business.get("telegram_single", "")}
 - Package: {business.get("telegram_package", "")}
 - Bag / meshok: {business.get("telegram_bag", "")}
+
+Configured qop/size rule:
+{configured_pack_size_rule(business) or default_pack_size_sentence("uz")}
+
+Configured items per qop/meshok:
+{configured_items_per_meshok(business)}
 
 Knowledge:
 {business.get("knowledge", "")}
@@ -1331,6 +1460,10 @@ def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private
 
     if wants_business_scope_intro(user_text):
         return business_scope_reply(user_text, business)
+
+    size_pack_reply = default_pack_size_reply(user_text, business)
+    if size_pack_reply:
+        return size_pack_reply
 
     history = get_recent_chat_history(
         customer_id=customer_id,
