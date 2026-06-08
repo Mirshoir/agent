@@ -1534,7 +1534,7 @@ const WORKSPACE_TEXT = {
     globalPrompt: 'Global Prompt', usedBy: 'Used by Instagram + Telegram + WhatsApp', platformOverrides: 'Platform Overrides',
     instagramRules: 'Instagram rules', telegramRules: 'Telegram rules', whatsappRules: 'WhatsApp rules', businessKnowledge: 'Business Knowledge',
     knowledgeHint: 'Products, prices, delivery, FAQ, contacts, and catalog links are managed in the Knowledge page and injected into the final prompt automatically.',
-    products: 'Products', prices: 'Prices', delivery: 'Delivery', faq: 'FAQ', contacts: 'Contacts', catalogLinks: 'Catalog links',
+    products: 'Products', prices: 'Prices', delivery: 'Delivery', faq: 'FAQ', contacts: 'Contacts', catalogLinks: 'Catalog links', telegram_bag: 'Qop size rule',
     salesBehavior: 'Sales Behavior', openingMessage: 'Opening message', leadCollectionRules: 'Lead collection rules',
     followUpStyle: 'Follow-up style', humanHandoffRules: 'Human handoff rules', improvePrompt: 'Improve Prompt', improving: 'Improving...',
     regenerate: 'Regenerate', generatedSuggestion: 'Generated suggestion', suggestionFallback: 'Made it clearer, safer, and easier for agents to maintain.',
@@ -1614,7 +1614,7 @@ const WORKSPACE_TEXT = {
     globalPrompt: 'Umumiy prompt', usedBy: 'Instagram + Telegram + WhatsApp uchun', platformOverrides: 'Platforma qoidalari',
     instagramRules: 'Instagram qoidalari', telegramRules: 'Telegram qoidalari', whatsappRules: 'WhatsApp qoidalari', businessKnowledge: 'Biznes bilimlari',
     knowledgeHint: 'Mahsulot, narx, yetkazib berish, FAQ, kontakt va katalog linklari Bilim sahifasida boshqariladi va promptga qo‘shiladi.',
-    products: 'Mahsulotlar', prices: 'Narxlar', delivery: 'Yetkazib berish', faq: 'FAQ', contacts: 'Kontaktlar', catalogLinks: 'Katalog linklari',
+    products: 'Mahsulotlar', prices: 'Narxlar', delivery: 'Yetkazib berish', faq: 'FAQ', contacts: 'Kontaktlar', catalogLinks: 'Katalog linklari', telegram_bag: 'Qop razmer qoidasi',
     salesBehavior: 'Sotuv uslubi', openingMessage: 'Boshlang‘ich xabar', leadCollectionRules: 'Lead yig‘ish qoidalari',
     followUpStyle: 'Follow-up uslubi', humanHandoffRules: 'Operatorga o‘tkazish qoidalari', improvePrompt: 'Promptni yaxshilash', improving: 'Yaxshilanmoqda...',
     regenerate: 'Qayta yaratish', generatedSuggestion: 'Tavsiya qilingan prompt', suggestionFallback: 'Agentlarga osonroq, xavfsizroq va aniqroq qilindi.',
@@ -1694,7 +1694,7 @@ const WORKSPACE_TEXT = {
     globalPrompt: 'Общий prompt', usedBy: 'Для Instagram + Telegram + WhatsApp', platformOverrides: 'Правила платформ',
     instagramRules: 'Правила Instagram', telegramRules: 'Правила Telegram', whatsappRules: 'Правила WhatsApp', businessKnowledge: 'База знаний',
     knowledgeHint: 'Товары, цены, доставка, FAQ, контакты и ссылки каталога управляются на странице База знаний и добавляются в финальный prompt.',
-    products: 'Товары', prices: 'Цены', delivery: 'Доставка', faq: 'FAQ', contacts: 'Контакты', catalogLinks: 'Ссылки каталога',
+    products: 'Товары', prices: 'Цены', delivery: 'Доставка', faq: 'FAQ', contacts: 'Контакты', catalogLinks: 'Ссылки каталога', telegram_bag: 'Правило размеров мешка',
     salesBehavior: 'Стиль продаж', openingMessage: 'Первое сообщение', leadCollectionRules: 'Правила сбора лидов',
     followUpStyle: 'Стиль follow-up', humanHandoffRules: 'Правила передачи оператору', improvePrompt: 'Улучшить prompt', improving: 'Улучшаю...',
     regenerate: 'Сгенерировать заново', generatedSuggestion: 'Предложенный prompt', suggestionFallback: 'Сделано понятнее, безопаснее и проще для агентов.',
@@ -3612,14 +3612,14 @@ function WorkspacePanel({
 
       {view === 'knowledge' && (
         <div className="knowledge-view">
-          {['products', 'prices', 'delivery_info', 'working_hours', 'faq', 'catalog_link', 'sales_phone', 'knowledge'].map(key => (
+          {['products', 'prices', 'delivery_info', 'working_hours', 'faq', 'catalog_link', 'sales_phone', 'telegram_bag', 'knowledge'].map(key => (
             <label key={key}>
               <span>{w[key] || key.replaceAll('_', ' ')}</span>
               <textarea
                 value={selectedBusiness[key] || ''}
                 onChange={(e) => onBusinessSetting(selectedBusiness.id, { [key]: e.target.value }, false)}
                 onBlur={(e) => onBusinessSetting(selectedBusiness.id, { [key]: e.target.value }, true)}
-                rows={key === 'knowledge' || key === 'faq' ? 4 : 2}
+                rows={key === 'knowledge' || key === 'faq' ? 4 : key === 'telegram_bag' ? 3 : 2}
               />
             </label>
           ))}
