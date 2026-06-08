@@ -238,6 +238,7 @@ const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
 const LEAD_PRICES_STORAGE_KEY = 'instaagent_lead_prices';
 const CLIENT_OWNERS_STORAGE_KEY = 'instaagent_client_owners';
 const MANUAL_CLIENTS_STORAGE_KEY = 'instaagent_manual_clients';
+const MANUAL_LEADS_STORAGE_KEY = 'instaagent_manual_leads';
 const OPERATOR_DEALS_STORAGE_KEY = 'instaagent_operator_deals';
 const OPERATOR_ADMIN_NOTES_STORAGE_KEY = 'instaagent_operator_admin_notes';
 const USER_PROFILE_STORAGE_KEY = 'instaagent_user_profiles';
@@ -594,10 +595,42 @@ function telegramUserMediaUrl(row) {
   return `${API_BASE}/api/telegram-user-media/${encodeURIComponent(row.customer_id)}/${encodeURIComponent(row.external_message_id)}${qs.toString() ? `?${qs.toString()}` : ''}`;
 }
 
+function mediaUrlWithSecret(path) {
+  const clean = String(path || '').trim();
+  if (!clean) return '';
+  const qs = new URLSearchParams();
+  const secret = dashboardSecret();
+  if (secret) qs.set('token', secret);
+  return `${API_BASE}${clean}${qs.toString() ? `?${qs.toString()}` : ''}`;
+}
+
+function telegramBotMediaUrl(row) {
+  const fileId = String(row.media_file_id || row.mediaFileId || '').trim();
+  if (!fileId || String(row.platform || '').toLowerCase() !== 'telegram') return '';
+  return mediaUrlWithSecret(`/api/telegram-bot-media/${encodeURIComponent(fileId)}`);
+}
+
+function whatsappMediaUrl(row) {
+  const mediaId = getWhatsAppMediaId(row);
+  if (!mediaId || String(row.platform || '').toLowerCase() !== 'whatsapp') return '';
+  return mediaUrlWithSecret(`/api/whatsapp/media/${encodeURIComponent(mediaId)}`);
+}
+
+function resolveMediaUrl(row = {}) {
+  const direct = row.media_url || row.mediaUrl;
+  if (direct) return withMediaToken(direct);
+  return telegramUserMediaUrl(row) || telegramBotMediaUrl(row) || whatsappMediaUrl(row);
+}
+
 function withMediaToken(url) {
   if (!url) return '';
   const secret = dashboardSecret();
-  if (!secret || !url.includes('/api/whatsapp/media/')) return url;
+  const needsToken = [
+    '/api/whatsapp/media/',
+    '/api/telegram-user-media/',
+    '/api/telegram-bot-media/',
+  ].some(path => String(url).includes(path));
+  if (!secret || !needsToken) return url;
 
   try {
     const parsed = new URL(url, window.location.href);
@@ -1225,7 +1258,7 @@ function getWhatsAppMediaId(row) {
 function getMediaLabel(row) {
   const media = row.media_type || 'attachment';
   const source = row.platform === 'whatsapp' ? getWhatsAppMediaId(row) : row.media_file_id;
-  if (row.media_url || telegramUserMediaUrl(row)) return `${media} · open media`;
+  if (resolveMediaUrl(row)) return `${media} · open media`;
   if (source) return `${media} · id ${String(source).slice(0, 10)}...`;
   return `${media} · no preview`;
 }
@@ -1316,7 +1349,7 @@ function normalizeMessage(row, index) {
     time: row.time || formatClock(row.created_at),
     text,
     mediaKind: media || '',
-    mediaUrl: withMediaToken(row.media_url || row.mediaUrl || telegramUserMediaUrl(row)),
+    mediaUrl: resolveMediaUrl(row),
     forwardLink: resolveForwardedPostLink(row),
     mediaFileId: row.media_file_id || getWhatsAppMediaId(row),
     commentId: String(row.external_message_id || row.comment_id || row.raw_payload?.id || '').trim(),
@@ -1518,6 +1551,7 @@ const WORKSPACE_TEXT = {
     leadOpen: 'Open chat', leadPrice: 'Price', leadPricePlaceholder: 'Add price', leadPriceClear: 'Clear price',
     clientsTitle: 'Clients table', clientsSubtitle: 'All customers with status, channel, price, and last message.', clientsEmpty: 'No clients yet.',
     client: 'Client', lastMessage: 'Last message', status: 'Status', channel: 'Channel', ownerAssigned: 'Owner', pickClient: 'Pick me', unpickClient: 'Unpick',
+    manualLeadName: 'Lead name', manualLeadSource: 'Source', manualLeadOwner: 'Operator', manualLeadNote: 'Note', addManualLead: 'Add manual lead',
     operatorsTitle: 'Operators panel', operatorsSubtitle: 'Operator workspace for tasks, client messages, and leads.',
     textToOperators: 'Text to operators', textToOperatorsPlaceholder: 'Write task for operators...', saveAdminNote: 'Send task',
     adminNotes: 'Tasks history', noAdminNotes: 'No tasks yet.', messagesFromClients: 'Messages from clients',
@@ -1597,6 +1631,7 @@ const WORKSPACE_TEXT = {
     leadOpen: 'Chatni ochish', leadPrice: 'Narx', leadPricePlaceholder: 'Narx kiriting', leadPriceClear: 'Narxni o‘chirish',
     clientsTitle: 'Mijozlar jadvali', clientsSubtitle: 'Barcha mijozlar: status, kanal, narx va oxirgi xabar.', clientsEmpty: 'Hali mijoz yo‘q.',
     client: 'Mijoz', lastMessage: 'Oxirgi xabar', status: 'Status', channel: 'Kanal', ownerAssigned: 'Egası', pickClient: 'O‘zim olish', unpickClient: 'Bo‘shatish',
+    manualLeadName: 'Lead ismi', manualLeadSource: 'Manba', manualLeadOwner: 'Operator', manualLeadNote: 'Izoh', addManualLead: 'Manual lead qo‘shish',
     operatorsTitle: 'Operator paneli', operatorsSubtitle: 'Vazifalar, mijoz xabarlari va lidlar uchun operator ish maydoni.',
     textToOperators: 'Operatorlarga topshiriq', textToOperatorsPlaceholder: 'Operatorlar uchun vazifa yozing...', saveAdminNote: 'Vazifani yuborish',
     adminNotes: 'Vazifalar tarixi', noAdminNotes: 'Hali vazifa yo‘q.', messagesFromClients: 'Mijozlardan xabarlar',
@@ -1676,6 +1711,7 @@ const WORKSPACE_TEXT = {
     leadOpen: 'Открыть чат', leadPrice: 'Цена', leadPricePlaceholder: 'Добавить цену', leadPriceClear: 'Удалить цену',
     clientsTitle: 'Таблица клиентов', clientsSubtitle: 'Все клиенты со статусом, каналом, ценой и последним сообщением.', clientsEmpty: 'Клиентов пока нет.',
     client: 'Клиент', lastMessage: 'Последнее сообщение', status: 'Статус', channel: 'Канал', ownerAssigned: 'Ответственный', pickClient: 'Взять себе', unpickClient: 'Снять',
+    manualLeadName: 'Имя лида', manualLeadSource: 'Источник', manualLeadOwner: 'Оператор', manualLeadNote: 'Заметка', addManualLead: 'Добавить лид',
     operatorsTitle: 'Панель оператора', operatorsSubtitle: 'Рабочая зона оператора: задачи, клиенты и лиды.',
     textToOperators: 'Задача операторам', textToOperatorsPlaceholder: 'Напишите задачу для операторов...', saveAdminNote: 'Отправить задачу',
     adminNotes: 'История задач', noAdminNotes: 'Задач пока нет.', messagesFromClients: 'Сообщения клиентов',
@@ -2558,8 +2594,14 @@ function ClientsTable({
   onOpenConversation,
   clientOwners = {},
   manualClients = [],
+  manualLeads = [],
+  operatorAccounts = [],
   onAddManualClient = () => {},
   onRemoveManualClient = () => {},
+  onAddManualLead = () => {},
+  onRemoveManualLead = () => {},
+  onLeadStageChange = () => {},
+  onLeadPriceChange = () => {},
   currentUser = null,
   onPickClient = () => {},
   w,
@@ -2567,12 +2609,34 @@ function ClientsTable({
   const currentOwnerLabel = userOwnerLabel(currentUser);
   const currentOwnerKeys = useMemo(() => userOwnerKeys(currentUser), [currentUser]);
   const [candidateId, setCandidateId] = useState('');
+  const [manualLeadForm, setManualLeadForm] = useState({
+    name: '',
+    platform: 'telegram',
+    owner: currentOwnerLabel,
+    price: '',
+    note: '',
+  });
+  useEffect(() => {
+    setManualLeadForm(prev => prev.owner ? prev : { ...prev, owner: currentOwnerLabel });
+  }, [currentOwnerLabel]);
+  const operatorOptions = useMemo(() => {
+    const options = [];
+    const add = (value) => {
+      const clean = String(value || '').trim();
+      if (clean && !options.some(item => item.toLowerCase() === clean.toLowerCase())) options.push(clean);
+    };
+    add(currentOwnerLabel);
+    (operatorAccounts || []).forEach(item => add(item?.login_id));
+    Object.values(clientOwners || {}).forEach(add);
+    return options;
+  }, [currentOwnerLabel, operatorAccounts, clientOwners]);
   const conversationMap = useMemo(
     () => new Map((conversations || []).map(conv => [conv.id, conv])),
     [conversations],
   );
   const rows = useMemo(
-    () => (manualClients || [])
+    () => {
+      const conversationRows = (manualClients || [])
       .map(id => conversationMap.get(id))
       .filter(Boolean)
       .map(conv => ({
@@ -2580,8 +2644,30 @@ function ClientsTable({
         stage: leadStages[conv.id] || guessLeadStage(conv),
         price: leadPrices[conv.id] || '',
         owner: String(clientOwners?.[conv.id] || '').trim(),
-      })),
-    [manualClients, conversationMap, leadStages, leadPrices, clientOwners],
+        sourceType: 'conversation',
+      }));
+      const manualRows = (manualLeads || [])
+        .filter(Boolean)
+        .map(lead => {
+          const id = String(lead.id || '').trim();
+          return {
+            id,
+            name: String(lead.name || 'Manual lead').trim(),
+            handle: String(lead.note || '').trim() || '@manual',
+            platform: String(lead.platform || 'manual').trim(),
+            channelName: String(lead.platform || 'manual').trim(),
+            stage: leadStages[id] || lead.stage || 'new',
+            price: leadPrices[id] || lead.price || '',
+            owner: String(clientOwners?.[id] || lead.operator || lead.owner || '').trim(),
+            preview: String(lead.note || '').trim() || '-',
+            unread: 0,
+            avatar: avatarFor(String(lead.name || 'Manual lead'), id),
+            sourceType: 'manual',
+          };
+        });
+      return [...conversationRows, ...manualRows];
+    },
+    [manualClients, manualLeads, conversationMap, leadStages, leadPrices, clientOwners],
   );
   const availableCandidates = useMemo(
     () => (conversations || []).filter(conv => !(manualClients || []).includes(conv.id)),
@@ -2623,6 +2709,52 @@ function ClientsTable({
           Add client
         </button>
       </div>
+      <div className="manual-lead-form">
+        <input
+          value={manualLeadForm.name}
+          placeholder={w.manualLeadName || 'Lead name'}
+          onChange={(e) => setManualLeadForm(prev => ({ ...prev, name: e.target.value }))}
+        />
+        <select
+          value={manualLeadForm.platform}
+          aria-label={w.manualLeadSource || 'Source'}
+          onChange={(e) => setManualLeadForm(prev => ({ ...prev, platform: e.target.value }))}
+        >
+          <option value="telegram">Telegram</option>
+          <option value="whatsapp">WhatsApp</option>
+          <option value="instagram">Instagram</option>
+          <option value="phone">Phone</option>
+          <option value="other">Other</option>
+        </select>
+        <select
+          value={manualLeadForm.owner}
+          aria-label={w.manualLeadOwner || 'Operator'}
+          onChange={(e) => setManualLeadForm(prev => ({ ...prev, owner: e.target.value }))}
+        >
+          {operatorOptions.map(option => <option key={option} value={option}>{option}</option>)}
+        </select>
+        <input
+          value={manualLeadForm.price}
+          placeholder={w.leadPricePlaceholder || 'Add price'}
+          onChange={(e) => setManualLeadForm(prev => ({ ...prev, price: e.target.value }))}
+        />
+        <input
+          value={manualLeadForm.note}
+          placeholder={w.manualLeadNote || 'Note'}
+          onChange={(e) => setManualLeadForm(prev => ({ ...prev, note: e.target.value }))}
+        />
+        <button
+          type="button"
+          onClick={() => {
+            if (!manualLeadForm.name.trim()) return;
+            onAddManualLead(manualLeadForm);
+            setManualLeadForm({ name: '', platform: 'telegram', owner: currentOwnerLabel, price: '', note: '' });
+          }}
+          disabled={!manualLeadForm.name.trim() || !manualLeadForm.owner.trim()}
+        >
+          {w.addManualLead || 'Add manual lead'}
+        </button>
+      </div>
       <div className="clients-table-wrap">
         <table className="clients-table">
           <thead>
@@ -2655,8 +2787,21 @@ function ClientsTable({
                   </div>
                 </td>
                 <td>{row.channelName || row.platform}</td>
-                <td><span className={`stage-pill stage-${row.stage}`}>{stageNames[row.stage]}</span></td>
-                <td>{row.price || '-'}</td>
+                <td>
+                  <select value={row.stage} onChange={(e) => onLeadStageChange(row.id, e.target.value)}>
+                    {LEAD_STAGE_ORDER.map(option => (
+                      <option key={option} value={option}>{stageNames[option]}</option>
+                    ))}
+                  </select>
+                </td>
+                <td>
+                  <input
+                    className="client-price-input"
+                    value={row.price || ''}
+                    placeholder="-"
+                    onChange={(e) => onLeadPriceChange(row.id, e.target.value)}
+                  />
+                </td>
                 <td className="client-preview">{row.preview}</td>
                 <td>{row.unread || 0}</td>
                 <td>
@@ -2667,13 +2812,15 @@ function ClientsTable({
                   )}
                 </td>
                 <td style={{ display: 'flex', gap: 8 }}>
-                  <button className="table-action" onClick={() => onOpenConversation(row.id)}>{w.leadOpen}</button>
+                  {row.sourceType === 'conversation' ? (
+                    <button className="table-action" onClick={() => onOpenConversation(row.id)}>{w.leadOpen}</button>
+                  ) : null}
                   {row.owner && currentOwnerKeys.has(row.owner.toLowerCase()) ? (
                     <button className="table-action" onClick={() => onPickClient(row.id, '')}>{w.unpickClient || 'Unpick'}</button>
                   ) : (
                     <button className="table-action" onClick={() => onPickClient(row.id, currentOwnerLabel)}>{w.pickClient || 'Pick me'}</button>
                   )}
-                  <button className="table-action" onClick={() => onRemoveManualClient(row.id)}>Remove</button>
+                  <button className="table-action" onClick={() => row.sourceType === 'manual' ? onRemoveManualLead(row.id) : onRemoveManualClient(row.id)}>Remove</button>
                 </td>
               </tr>
             ))}
@@ -2706,7 +2853,7 @@ function userOwnerLabel(currentUser) {
   return raw.split('@')[0] || raw;
 }
 
-function buildOperatorRankingRows({ leadStages = {}, clientOwners = {}, operatorDeals = {}, operatorAccounts = [] }) {
+function buildOperatorRankingRows({ leadStages = {}, clientOwners = {}, manualLeads = [], operatorDeals = {}, operatorAccounts = [] }) {
   const stats = new Map();
   const ensureRow = (id) => {
     const operatorId = String(id || '').trim();
@@ -2741,6 +2888,15 @@ function buildOperatorRankingRows({ leadStages = {}, clientOwners = {}, operator
     if (String(leadStages?.[conversationId] || '').toLowerCase() === 'won') row.deals += 1;
   });
 
+  (manualLeads || []).forEach(lead => {
+    const id = String(lead?.id || '').trim();
+    if (!id || clientOwners?.[id]) return;
+    const row = ensureRow(lead?.operator || lead?.owner);
+    if (!row) return;
+    row.picked += 1;
+    if (String(leadStages?.[id] || lead?.stage || '').toLowerCase() === 'won') row.deals += 1;
+  });
+
   Object.entries(operatorDeals || {}).forEach(([operatorId, value]) => {
     const row = ensureRow(operatorId);
     if (!row || row.deals > 0) return;
@@ -2753,8 +2909,8 @@ function buildOperatorRankingRows({ leadStages = {}, clientOwners = {}, operator
   return rows.sort((a, b) => (b.deals - a.deals) || (b.picked - a.picked) || a.name.localeCompare(b.name));
 }
 
-function OperatorsRanking({ leadStages, clientOwners = {}, operatorDeals = {}, operatorAccounts = [], onDownloadReport, reportDisabled = false, w }) {
-  const rows = buildOperatorRankingRows({ leadStages, clientOwners, operatorDeals, operatorAccounts });
+function OperatorsRanking({ leadStages, clientOwners = {}, manualLeads = [], operatorDeals = {}, operatorAccounts = [], onDownloadReport, reportDisabled = false, w }) {
+  const rows = buildOperatorRankingRows({ leadStages, clientOwners, manualLeads, operatorDeals, operatorAccounts });
 
   return (
     <section className="operator-ranking">
@@ -3203,7 +3359,7 @@ function OperatorMessagesCard({ conversations, onOpenConversation, w }) {
 }
 
 function AdminPanel(props) {
-  const { conversations, leadStages, leadPrices, clientOwners, operatorDeals, adminNotes, onAdminNote, setLeadStage, setLeadPrice, onOpenConversation, selectedBusinessId, operatorAccounts, onReloadOperatorAccounts, onDownloadOperatorReport, w } = props;
+  const { conversations, leadStages, leadPrices, clientOwners, manualLeads, operatorDeals, adminNotes, onAdminNote, setLeadStage, setLeadPrice, onOpenConversation, selectedBusinessId, operatorAccounts, onReloadOperatorAccounts, onDownloadOperatorReport, w } = props;
   return (
     <div className="operator-panel">
       <AdminTaskDispatchCard adminNotes={adminNotes} onAdminNote={onAdminNote} operatorAccounts={operatorAccounts} w={w} />
@@ -3212,6 +3368,7 @@ function AdminPanel(props) {
       <OperatorsRanking
         leadStages={leadStages}
         clientOwners={clientOwners}
+        manualLeads={manualLeads}
         operatorDeals={operatorDeals}
         operatorAccounts={operatorAccounts}
         onDownloadReport={onDownloadOperatorReport}
@@ -3292,6 +3449,7 @@ function WorkspacePanel({
   leadPrices,
   clientOwners,
   manualClients,
+  manualLeads,
   operatorDeals,
   adminNotes,
   operatorAccounts,
@@ -3301,6 +3459,8 @@ function WorkspacePanel({
   onPickClient,
   onAddManualClient,
   onRemoveManualClient,
+  onAddManualLead,
+  onRemoveManualLead,
   onOperatorDealChange,
   onAdminNote,
   onDownloadOperatorReport,
@@ -3396,8 +3556,14 @@ function WorkspacePanel({
           leadPrices={leadPrices}
           clientOwners={clientOwners}
           manualClients={manualClients}
+          manualLeads={manualLeads}
+          operatorAccounts={operatorAccounts}
           onAddManualClient={onAddManualClient}
           onRemoveManualClient={onRemoveManualClient}
+          onAddManualLead={onAddManualLead}
+          onRemoveManualLead={onRemoveManualLead}
+          onLeadStageChange={onLeadStageChange}
+          onLeadPriceChange={onLeadPriceChange}
           currentUser={currentUser}
           onPickClient={onPickClient}
           onOpenConversation={onOpenConversation}
@@ -3413,6 +3579,7 @@ function WorkspacePanel({
           selectedBusinessId={selectedBusinessId}
           operatorDeals={operatorDeals}
           clientOwners={clientOwners}
+          manualLeads={manualLeads}
           adminNotes={adminNotes}
           operatorAccounts={operatorAccounts}
           onReloadOperatorAccounts={onReloadOperatorAccounts}
@@ -3993,9 +4160,16 @@ function Message({ m, conv, t, onReplyComment, onEditMessage, onDeleteMessage })
       {m.type === 'media' && (
         <div className="bubble media">
           {m.mediaKind === 'video' && isPlayableVideoUrl(m.mediaUrl) ? (
-            <video className="media-video" src={m.mediaUrl} controls />
+            <>
+              <video className="media-video" src={m.mediaUrl} controls />
+              <a className="open-post-link" href={m.mediaUrl} target="_blank" rel="noreferrer">
+                Open media
+              </a>
+            </>
           ) : m.mediaUrl && (m.mediaKind === 'photo' || isRenderableImageUrl(m.mediaUrl)) && !isInstagramPostLink(m.mediaUrl) ? (
-            <img className="media-img" src={m.mediaUrl} alt={m.label || 'attachment'} />
+            <a href={m.mediaUrl} target="_blank" rel="noreferrer">
+              <img className="media-img" src={m.mediaUrl} alt={m.label || 'attachment'} />
+            </a>
           ) : m.mediaKind === 'file' && m.mediaUrl && !isInstagramPostLink(m.mediaUrl) ? (
             <a className="file-chip" href={m.mediaUrl} target="_blank" rel="noreferrer">
               <I.Paperclip />
@@ -4745,6 +4919,10 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     const stored = readStoredObject(MANUAL_CLIENTS_STORAGE_KEY);
     return Array.isArray(stored.items) ? stored.items : [];
   });
+  const [manualLeads, setManualLeads] = useState(() => {
+    const stored = readStoredObject(MANUAL_LEADS_STORAGE_KEY);
+    return Array.isArray(stored.items) ? stored.items : [];
+  });
   const [operatorDeals, setOperatorDeals] = useState(() => readStoredObject(OPERATOR_DEALS_STORAGE_KEY));
   const [operatorAdminNotes, setOperatorAdminNotes] = useState(() => {
     const stored = readStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY);
@@ -4785,6 +4963,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       : window.getThread(selectedId));
   const roleScope = resolveRoleScope(currentUser, businesses);
   const isOperator = roleScope.isOperator;
+  const currentOwnerLabel = userOwnerLabel(currentUser);
 
   const [theme, setTheme] = useState(TWEAK_DEFAULTS.theme);
   useEffect(() => {
@@ -5013,6 +5192,11 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
         const clientIds = Array.isArray(state.manual_clients.items) ? state.manual_clients.items.map(String).filter(Boolean) : [];
         setManualClients(clientIds);
         writeStoredObject(MANUAL_CLIENTS_STORAGE_KEY, { items: clientIds });
+      }
+      if (state.manual_leads && typeof state.manual_leads === 'object') {
+        const leads = Array.isArray(state.manual_leads.items) ? state.manual_leads.items.filter(Boolean) : [];
+        setManualLeads(leads);
+        writeStoredObject(MANUAL_LEADS_STORAGE_KEY, { items: leads });
       }
       if (state.operator_deals && typeof state.operator_deals === 'object') {
         setOperatorDeals(state.operator_deals);
@@ -5933,7 +6117,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       showToast('Operator access is limited to Leads, Inbox, Posts, Clients, Operators, Settings, and Profile');
       return;
     }
-    if ((view === 'operators' || view === 'settings') && liveModeRef.current) {
+    if ((view === 'operators' || view === 'clients' || view === 'settings') && liveModeRef.current) {
       loadOperatorAccounts(selectedBusinessId);
     }
     setActiveView(view);
@@ -6017,6 +6201,69 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       return next;
     });
     showToast('Client removed from important list');
+  };
+
+  const addManualLead = (lead = {}) => {
+    const name = String(lead.name || '').trim();
+    const owner = String(lead.owner || lead.operator || currentOwnerLabel).trim();
+    if (!name || !owner) {
+      showToast('Lead name and operator are required');
+      return;
+    }
+    const id = `manual_lead_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+    const item = {
+      id,
+      name,
+      platform: String(lead.platform || 'manual').trim(),
+      operator: owner,
+      note: String(lead.note || '').trim(),
+      price: String(lead.price || '').trim(),
+      stage: 'new',
+      created_at: new Date().toISOString(),
+    };
+    setManualLeads(prev => {
+      const next = [item, ...prev].slice(0, 500);
+      writeStoredObject(MANUAL_LEADS_STORAGE_KEY, { items: next });
+      queueWorkspaceStateSave({ manual_leads: { items: next } });
+      return next;
+    });
+    setClientOwner(id, owner);
+    setLeadStage(id, 'new');
+    if (item.price) setLeadPrice(id, item.price);
+    showToast(`Manual lead assigned to ${owner}`);
+  };
+
+  const removeManualLead = (leadId) => {
+    const id = String(leadId || '').trim();
+    if (!id) return;
+    setManualLeads(prev => {
+      const next = prev.filter(item => String(item?.id || '') !== id);
+      writeStoredObject(MANUAL_LEADS_STORAGE_KEY, { items: next });
+      queueWorkspaceStateSave({ manual_leads: { items: next } });
+      return next;
+    });
+    setClientOwners(prev => {
+      const next = { ...prev };
+      delete next[id];
+      writeStoredObject(CLIENT_OWNERS_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ client_owners: next });
+      return next;
+    });
+    setLeadStages(prev => {
+      const next = { ...prev };
+      delete next[id];
+      writeStoredObject(LEAD_STAGES_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ lead_stages: next });
+      return next;
+    });
+    setLeadPrices(prev => {
+      const next = { ...prev };
+      delete next[id];
+      writeStoredObject(LEAD_PRICES_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ lead_prices: next });
+      return next;
+    });
+    showToast('Manual lead removed');
   };
 
   const addOperatorAdminNote = async (text, recipients = ['*'], mode = 'all') => {
@@ -6166,6 +6413,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
             leadPrices={leadPrices}
             clientOwners={clientOwners}
             manualClients={manualClients}
+            manualLeads={manualLeads}
             operatorDeals={operatorDeals}
             adminNotes={operatorAdminNotes}
             operatorAccounts={operatorAccounts}
@@ -6175,6 +6423,8 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
             onPickClient={setClientOwner}
             onAddManualClient={addManualClient}
             onRemoveManualClient={removeManualClient}
+            onAddManualLead={addManualLead}
+            onRemoveManualLead={removeManualLead}
             onOperatorDealChange={setOperatorDealCount}
             onAdminNote={addOperatorAdminNote}
             onDownloadOperatorReport={downloadOperatorReport}
