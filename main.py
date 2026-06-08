@@ -2813,6 +2813,22 @@ def _safe_state_items(value) -> list:
     return value if isinstance(value, list) else []
 
 
+def normalize_manual_lead(item: dict) -> dict:
+    if not isinstance(item, dict):
+        return {}
+    lead_id = normalize_id(item.get("id")) or f"manual_lead_{secrets.token_hex(5)}"
+    return {
+        "id": lead_id,
+        "name": normalize_id(item.get("name")) or "Manual lead",
+        "platform": normalize_id(item.get("platform")).lower() or "manual",
+        "operator": normalize_id(item.get("operator") or item.get("owner")),
+        "note": normalize_id(item.get("note") or item.get("last_message")),
+        "price": normalize_id(item.get("price")),
+        "stage": normalize_id(item.get("stage")).lower(),
+        "created_at": normalize_id(item.get("created_at") or item.get("createdAt")),
+    }
+
+
 def load_business_conversation_lookup(business_id: str, limit: int = 2500) -> dict:
     business_id = normalize_id(business_id)
     if not business_id:
@@ -2874,10 +2890,20 @@ def build_operator_deal_report_data(business_id: str) -> dict:
     client_owners = _safe_state_dict(state.get("client_owners"))
     manual_clients_bucket = state.get("manual_clients") or {}
     manual_clients = _safe_state_items(manual_clients_bucket.get("items") if isinstance(manual_clients_bucket, dict) else [])
+    manual_leads_bucket = state.get("manual_leads") or {}
+    manual_leads = [
+        lead for lead in (
+            normalize_manual_lead(item)
+            for item in _safe_state_items(manual_leads_bucket.get("items") if isinstance(manual_leads_bucket, dict) else [])
+        )
+        if lead.get("id")
+    ]
+    manual_lead_lookup = {lead["id"]: lead for lead in manual_leads}
     legacy_operator_deals = _safe_state_dict(state.get("operator_deals"))
     conversations = load_business_conversation_lookup(business_id)
 
     conversation_ids = set(str(item) for item in manual_clients if item)
+    conversation_ids.update(manual_lead_lookup.keys())
     conversation_ids.update(str(key) for key in client_owners.keys() if key)
     conversation_ids.update(str(key) for key, stage in lead_stages.items() if normalize_id(stage).lower() == "won")
     conversation_ids.update(str(key) for key in conversations.keys() if client_owners.get(key) or lead_stages.get(key) == "won")
@@ -2886,8 +2912,9 @@ def build_operator_deal_report_data(business_id: str) -> dict:
     ranking = {}
     for conversation_id in sorted(conversation_ids):
         conv = conversations.get(conversation_id) or {}
-        owner = normalize_id(client_owners.get(conversation_id))
-        stage = normalize_id(lead_stages.get(conversation_id)) or "new"
+        manual_lead = manual_lead_lookup.get(conversation_id) or {}
+        owner = normalize_id(client_owners.get(conversation_id) or manual_lead.get("operator"))
+        stage = normalize_id(lead_stages.get(conversation_id) or manual_lead.get("stage")) or "new"
         successful = stage.lower() == "won" and bool(owner)
         if successful:
             ranking.setdefault(owner, {"operator": owner, "picked_clients": 0, "successful_deals": 0, "clients": []})
@@ -2902,16 +2929,17 @@ def build_operator_deal_report_data(business_id: str) -> dict:
         channel = parts[2] if len(parts) == 4 else ""
         rows.append({
             "conversation_id": conversation_id,
-            "client": conv.get("name") or conv.get("handle") or (parts[3] if len(parts) == 4 else conversation_id),
+            "client": manual_lead.get("name") or conv.get("name") or conv.get("handle") or (parts[3] if len(parts) == 4 else conversation_id),
             "handle": conv.get("handle") or "",
-            "platform": platform,
-            "channel": channel,
+            "platform": manual_lead.get("platform") or platform,
+            "channel": channel or ("manual" if manual_lead else ""),
             "operator": owner or "Unassigned",
             "stage": stage,
             "successful_deal": successful,
-            "price": normalize_id(lead_prices.get(conversation_id)) or "-",
-            "last_message": normalize_id(conv.get("preview")) or "-",
-            "last_at": normalize_id(conv.get("lastAt") or conv.get("lastTime")) or "-",
+            "price": normalize_id(lead_prices.get(conversation_id) or manual_lead.get("price")) or "-",
+            "last_message": normalize_id(manual_lead.get("note") or conv.get("preview")) or "-",
+            "last_at": normalize_id(conv.get("lastAt") or conv.get("lastTime") or manual_lead.get("created_at")) or "-",
+            "source": "Manual lead" if manual_lead else "Conversation",
         })
 
     for operator_id, count in legacy_operator_deals.items():
@@ -2935,6 +2963,12 @@ def build_operator_deal_report_data(business_id: str) -> dict:
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "ranking": ranking_rows,
         "clients": rows,
+        "summary": {
+            "total_clients": len(rows),
+            "manual_leads": len(manual_leads),
+            "picked_clients": sum(1 for row in rows if row.get("operator") and row.get("operator") != "Unassigned"),
+            "successful_deals": sum(1 for row in rows if row.get("successful_deal")),
+        },
     }
 
 
@@ -2968,6 +3002,11 @@ def _wrap_pdf_line(text: str, width: int = 132) -> list[str]:
 
 
 def build_operator_deal_report_pdf(report: dict) -> bytes:
+    try:
+        return build_operator_deal_report_pdf_reportlab(report)
+    except Exception as exc:
+        log("ReportLab operator report failed, using fallback PDF", str(exc))
+
     business = report.get("business") or {}
     business_name = normalize_id(business.get("business_name")) or normalize_id(business.get("id")) or "Business"
     lines = [
@@ -3052,6 +3091,231 @@ def build_operator_deal_report_pdf(report: dict) -> bytes:
         f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode("latin-1")
     )
     return bytes(pdf)
+
+
+def build_operator_deal_report_pdf_reportlab(report: dict) -> bytes:
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_RIGHT
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import mm
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    def register_font() -> tuple[str, str]:
+        regular_candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+        ]
+        bold_candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/Library/Fonts/Arial Bold.ttf",
+        ]
+        regular = next((path for path in regular_candidates if Path(path).exists()), "")
+        bold = next((path for path in bold_candidates if Path(path).exists()), "")
+        if regular:
+            pdfmetrics.registerFont(TTFont("InstaReport", regular))
+            if bold:
+                pdfmetrics.registerFont(TTFont("InstaReport-Bold", bold))
+                return "InstaReport", "InstaReport-Bold"
+            return "InstaReport", "InstaReport"
+        return "Helvetica", "Helvetica-Bold"
+
+    font_name, bold_font = register_font()
+    buffer = io.BytesIO()
+    page_size = landscape(A4)
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=page_size,
+        rightMargin=14 * mm,
+        leftMargin=14 * mm,
+        topMargin=14 * mm,
+        bottomMargin=13 * mm,
+        title="Operator Deals Report",
+    )
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "ReportTitle",
+        parent=styles["Title"],
+        fontName=bold_font,
+        fontSize=22,
+        leading=26,
+        textColor=colors.HexColor("#111827"),
+        spaceAfter=4,
+    )
+    subtitle_style = ParagraphStyle(
+        "ReportSubtitle",
+        parent=styles["Normal"],
+        fontName=font_name,
+        fontSize=9,
+        leading=12,
+        textColor=colors.HexColor("#6B7280"),
+        spaceAfter=10,
+    )
+    section_style = ParagraphStyle(
+        "ReportSection",
+        parent=styles["Heading2"],
+        fontName=bold_font,
+        fontSize=13,
+        leading=16,
+        textColor=colors.HexColor("#111827"),
+        spaceBefore=8,
+        spaceAfter=6,
+    )
+    body_style = ParagraphStyle(
+        "ReportBody",
+        parent=styles["Normal"],
+        fontName=font_name,
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor("#111827"),
+    )
+    muted_style = ParagraphStyle(
+        "ReportMuted",
+        parent=body_style,
+        textColor=colors.HexColor("#6B7280"),
+    )
+    header_style = ParagraphStyle(
+        "ReportHeader",
+        parent=body_style,
+        fontName=bold_font,
+        textColor=colors.white,
+    )
+    right_style = ParagraphStyle("Right", parent=body_style, alignment=TA_RIGHT)
+
+    business = report.get("business") or {}
+    business_name = normalize_id(business.get("business_name")) or normalize_id(business.get("id")) or "Business"
+    generated_at = normalize_id(report.get("generated_at"))
+    summary = report.get("summary") or {}
+    ranking = report.get("ranking") or []
+    clients = report.get("clients") or []
+
+    story = [
+        Paragraph("Operator Performance Report", title_style),
+        Paragraph(f"{business_name} · Generated {generated_at}", subtitle_style),
+    ]
+
+    metrics = [
+        ["Successful deals", str(summary.get("successful_deals", 0))],
+        ["Picked clients", str(summary.get("picked_clients", 0))],
+        ["Manual leads", str(summary.get("manual_leads", 0))],
+        ["Total tracked clients", str(summary.get("total_clients", 0))],
+    ]
+    metrics_table = Table(
+        [[Paragraph(label, muted_style), Paragraph(value, ParagraphStyle(f"Metric{idx}", parent=right_style, fontName=bold_font, fontSize=16, leading=18))]
+         for idx, (label, value) in enumerate(metrics)],
+        colWidths=[45 * mm, 26 * mm],
+        hAlign="LEFT",
+    )
+    metrics_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F8FAFC")),
+        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#D1D5DB")),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#E5E7EB")),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+    ]))
+    story.extend([metrics_table, Spacer(1, 8)])
+
+    story.append(Paragraph("Operator Ranking", section_style))
+    ranking_data = [[
+        Paragraph("#", header_style),
+        Paragraph("Operator", header_style),
+        Paragraph("Picked", header_style),
+        Paragraph("Successful deals", header_style),
+        Paragraph("Conversion", header_style),
+    ]]
+    for idx, row in enumerate(ranking, start=1):
+        picked = int(row.get("picked_clients") or 0)
+        deals = int(row.get("successful_deals") or 0)
+        conversion = f"{round((deals / picked) * 100)}%" if picked else "0%"
+        ranking_data.append([
+            Paragraph(str(idx), body_style),
+            Paragraph(normalize_id(row.get("operator")) or "Unassigned", body_style),
+            Paragraph(str(picked), right_style),
+            Paragraph(str(deals), right_style),
+            Paragraph(conversion, right_style),
+        ])
+    if len(ranking_data) == 1:
+        ranking_data.append(["-", Paragraph("No operator activity yet.", body_style), "0", "0", "0%"])
+
+    ranking_table = Table(ranking_data, colWidths=[12 * mm, 78 * mm, 28 * mm, 38 * mm, 30 * mm], repeatRows=1)
+    ranking_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#111827")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), bold_font),
+        ("BACKGROUND", (0, 1), (-1, -1), colors.white),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F9FAFB")]),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E5E7EB")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.extend([ranking_table, Spacer(1, 8)])
+
+    story.append(Paragraph("Client And Deal Details", section_style))
+    client_data = [[
+        Paragraph("Client", header_style),
+        Paragraph("Platform", header_style),
+        Paragraph("Operator", header_style),
+        Paragraph("Stage", header_style),
+        Paragraph("Deal", header_style),
+        Paragraph("Value", header_style),
+        Paragraph("Last note / message", header_style),
+    ]]
+    stage_label = {"new": "New", "qualified": "Qualified", "negotiation": "Negotiation", "won": "Won", "lost": "Lost"}
+    for row in clients:
+        deal = "Won" if row.get("successful_deal") else "-"
+        client_data.append([
+            Paragraph(normalize_id(row.get("client")) or "-", body_style),
+            Paragraph(normalize_id(row.get("platform")) or "-", body_style),
+            Paragraph(normalize_id(row.get("operator")) or "Unassigned", body_style),
+            Paragraph(stage_label.get(normalize_id(row.get("stage")).lower(), normalize_id(row.get("stage")) or "-"), body_style),
+            Paragraph(deal, body_style),
+            Paragraph(normalize_id(row.get("price")) or "-", body_style),
+            Paragraph(normalize_id(row.get("last_message"))[:220] or "-", body_style),
+        ])
+    if len(client_data) == 1:
+        client_data.append(["-", "-", "-", "-", "-", "-", Paragraph("No clients to report.", body_style)])
+
+    client_table = Table(
+        client_data,
+        colWidths=[36 * mm, 24 * mm, 42 * mm, 27 * mm, 18 * mm, 24 * mm, 92 * mm],
+        repeatRows=1,
+    )
+    client_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#111827")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), bold_font),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F9FAFB")]),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E5E7EB")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+    ]))
+    story.append(client_table)
+
+    def decorate(canvas, doc_obj):
+        canvas.saveState()
+        canvas.setStrokeColor(colors.HexColor("#E5E7EB"))
+        canvas.line(14 * mm, 12 * mm, page_size[0] - 14 * mm, 12 * mm)
+        canvas.setFont(font_name, 8)
+        canvas.setFillColor(colors.HexColor("#6B7280"))
+        canvas.drawString(14 * mm, 7 * mm, "Instaagent operator performance report")
+        canvas.drawRightString(page_size[0] - 14 * mm, 7 * mm, f"Page {doc_obj.page}")
+        canvas.restoreState()
+
+    doc.build(story, onFirstPage=decorate, onLaterPages=decorate)
+    return buffer.getvalue()
 
 
 def instagram_processed_message_state_key(message_id: str) -> str:
@@ -3819,7 +4083,22 @@ def is_public_private_info_request(text: str) -> bool:
     return any(marker in lower for marker in PUBLIC_PRIVATE_INFO_REQUEST_MARKERS)
 
 
+def reaction_only_reply_text(text: str) -> str:
+    clean = normalize_id(text).strip()
+    if not clean:
+        return ""
+    compact = re.sub(r"\s+", "", clean)
+    if compact in {"+", "++"}:
+        return ""
+    emoji_only_re = re.compile(r"^[\u2600-\u27BF\U0001F300-\U0001FAFF\U0001F1E6-\U0001F1FF\u200d\ufe0f]+$")
+    return compact if emoji_only_re.fullmatch(compact) else ""
+
+
 def safe_public_comment_reply(text: str, business: dict = None) -> str:
+    reaction_reply = reaction_only_reply_text(text)
+    if reaction_reply:
+        return reaction_reply
+
     reply = complete_sentence_reply(remove_urls(text), limit=1000)
     if reply and not is_public_private_info_request(reply):
         return reply
@@ -7253,7 +7532,10 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
         mark_processed(processed_comment_ids, comment_id)
         return
 
-    if wants_catalog(comment_text):
+    reaction_reply = reaction_only_reply_text(comment_text)
+    if reaction_reply:
+        reply_text = reaction_reply
+    elif wants_catalog(comment_text):
         catalog_link = get_catalog_link(business)
         dm_result = send_catalog_private_reply(access_token, comment_id, business)
         dm_raw_result = safe_json(dm_result) if dm_result is not None else {}
@@ -9669,6 +9951,7 @@ async def update_workspace_state_v2(
             "lead_stages",
             "lead_prices",
             "manual_clients",
+            "manual_leads",
             "client_owners",
             "operator_deals",
             "operator_admin_notes",
@@ -9762,6 +10045,7 @@ async def api_update_combined_settings(
         "lead_stages",
         "lead_prices",
         "manual_clients",
+        "manual_leads",
         "client_owners",
         "operator_deals",
         "operator_admin_notes",
