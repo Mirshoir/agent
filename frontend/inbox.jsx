@@ -1373,10 +1373,17 @@ function normalizeMessage(row, index) {
   return message;
 }
 
-function mergeLocalOutboundMessages(serverMessages = [], currentMessages = []) {
-  const localOutbound = (currentMessages || []).filter(message => (
+const LOCAL_OUTBOUND_TTL_MS = 5 * 60 * 1000;
+
+function mergeLocalOutboundMessages(serverMessages = [], currentMessages = [], rememberedMessages = []) {
+  const localById = new Map();
+  for (const message of [...(currentMessages || []), ...(rememberedMessages || [])]) {
+    if (!message?.id) continue;
+    localById.set(String(message.id), message);
+  }
+  const localOutbound = Array.from(localById.values()).filter(message => (
     message?.side === 'outbound' &&
-    (message.pending || message.failed || String(message.id || '').startsWith('optimistic-'))
+    (message.local || message.pending || message.failed || String(message.id || '').startsWith('optimistic-'))
   ));
   const usedLocal = new Set();
 
@@ -4985,6 +4992,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const threadWarmupQueueRef = useRef([]);
   const threadWarmupSeenRef = useRef(new Set());
   const threadLoadPromisesRef = useRef({});
+  const localOutboundMessagesRef = useRef({});
   const businessesRef = useRef([]);
   const workspaceStateHydratedRef = useRef(false);
   const workspaceStateTimersRef = useRef({});
@@ -5487,6 +5495,27 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     });
   };
 
+  const rememberedLocalOutboundMessages = (conversationId) => {
+    const now = Date.now();
+    const rows = localOutboundMessagesRef.current[conversationId] || [];
+    const fresh = rows.filter(message => (now - Number(message.sentAt || now)) <= LOCAL_OUTBOUND_TTL_MS);
+    localOutboundMessagesRef.current[conversationId] = fresh;
+    return fresh;
+  };
+
+  const rememberLocalOutboundMessage = (conversationId, message) => {
+    if (!conversationId || !message?.id) return;
+    const existing = rememberedLocalOutboundMessages(conversationId).filter(item => item.id !== message.id);
+    localOutboundMessagesRef.current[conversationId] = [...existing, message];
+  };
+
+  const updateLocalOutboundMessage = (conversationId, messageId, updates) => {
+    if (!conversationId || !messageId) return;
+    localOutboundMessagesRef.current[conversationId] = rememberedLocalOutboundMessages(conversationId).map(item => (
+      item.id === messageId ? { ...item, ...updates } : item
+    ));
+  };
+
   const removeConversationFromUi = (conversationId) => {
     setConversations(cs => {
       const next = cs.filter(c => c.id !== conversationId);
@@ -5521,7 +5550,19 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
         .map(item => Object.prototype.hasOwnProperty.call(aiOverridesRef.current, item.id)
           ? { ...item, aiOn: aiOverridesRef.current[item.id] === true }
           : item)
-        .map(item => item.id === selectedCurrent ? clearConversationUnread(item) : item);
+        .map(item => item.id === selectedCurrent ? clearConversationUnread(item) : item)
+        .map(item => {
+          const localMessages = rememberedLocalOutboundMessages(item.id);
+          const latestLocal = localMessages[localMessages.length - 1];
+          if (!latestLocal) return item;
+          return {
+            ...item,
+            preview: latestLocal.text,
+            lastTime: 'now',
+            lastFromMe: true,
+            kpis: { ...(item.kpis || {}), last: 'now' },
+          };
+        });
       if (!next.length) {
         setConversations([]);
         setSelectedId('');
@@ -5599,7 +5640,11 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
           ...prev,
           [conversationId]: {
             updatedAt: Date.now(),
-            messages: mergeLocalOutboundMessages(normalized, getThreadMessages(prev[conversationId])),
+            messages: mergeLocalOutboundMessages(
+              normalized,
+              getThreadMessages(prev[conversationId]),
+              rememberedLocalOutboundMessages(conversationId)
+            ),
           },
         }));
         setConversations(rows => rows.map(item => item.id === conversationId ? clearConversationUnread(item) : item));
@@ -5793,8 +5838,11 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       type: 'text',
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       text,
+      local: true,
       pending: true,
+      sentAt: Date.now(),
     };
+    rememberLocalOutboundMessage(targetConv.id, optimisticMessage);
     setThreads(prev => {
       const existing = prev[targetConv.id]?.messages || prev[targetConv.id] || [];
       return {
@@ -5805,10 +5853,18 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
         },
       };
     });
+    setConversations(rows => rows.map(item => item.id === targetConv.id ? {
+      ...item,
+      preview: text,
+      lastTime: 'now',
+      lastFromMe: true,
+      kpis: { ...(item.kpis || {}), last: 'now' },
+    } : item));
 
     (async () => {
       try {
         await sendLiveMessage(targetConv, text, options);
+        updateLocalOutboundMessage(targetConv.id, optimisticId, { pending: false, failed: false, error: '' });
         setThreads(prev => {
           const existing = prev[targetConv.id]?.messages || prev[targetConv.id] || [];
           const nextMessages = existing.map(item => (
@@ -5824,10 +5880,13 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
             },
           };
         });
-        await loadThread(targetConv.id, { silent: true, limit: 300, noCache: true });
-        await loadConversations({ silent: true, sideLoad: false });
+        window.setTimeout(() => {
+          loadThread(targetConv.id, { silent: true, limit: 300, noCache: true });
+          loadConversations({ silent: true, sideLoad: false });
+        }, 1500);
         showToast('Message sent');
       } catch (e) {
+        updateLocalOutboundMessage(targetConv.id, optimisticId, { pending: false, failed: true, error: e.message });
         setThreads(prev => {
           const existing = prev[targetConv.id]?.messages || prev[targetConv.id] || [];
           const nextMessages = existing.map(item => (
