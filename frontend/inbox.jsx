@@ -1374,22 +1374,41 @@ function normalizeMessage(row, index) {
 }
 
 function mergeLocalOutboundMessages(serverMessages = [], currentMessages = []) {
-  const merged = [...serverMessages];
-  const serverTexts = new Set(
-    serverMessages
-      .filter(m => m.side === 'outbound')
-      .map(m => String(m.text || '').trim())
-      .filter(Boolean)
-  );
+  const localOutbound = (currentMessages || []).filter(message => (
+    message?.side === 'outbound' &&
+    (message.pending || message.failed || String(message.id || '').startsWith('optimistic-'))
+  ));
+  const usedLocal = new Set();
 
-  for (const message of currentMessages || []) {
-    const isLocalOutbound = (
-      message?.side === 'outbound' &&
-      (message.pending || message.failed || String(message.id || '').startsWith('optimistic-'))
-    );
-    if (!isLocalOutbound) continue;
-    if (serverTexts.has(String(message.text || '').trim())) continue;
-    merged.push(message);
+  const merged = serverMessages.map(serverMessage => {
+    if (serverMessage.side !== 'outbound') return serverMessage;
+    const serverText = String(serverMessage.text || '').trim();
+    const localIndex = localOutbound.findIndex((message, index) => (
+      !usedLocal.has(index) &&
+      serverText &&
+      String(message.text || '').trim() === serverText
+    ));
+    if (localIndex < 0) return serverMessage;
+
+    usedLocal.add(localIndex);
+    const localMessage = localOutbound[localIndex];
+    return {
+      ...serverMessage,
+      ...localMessage,
+      day: serverMessage.day || localMessage.day,
+      time: localMessage.time || serverMessage.time,
+      raw: serverMessage.raw,
+      serverId: serverMessage.id,
+      pending: false,
+      failed: false,
+      error: '',
+    };
+  });
+
+  for (let index = 0; index < localOutbound.length; index += 1) {
+    if (!usedLocal.has(index)) {
+      merged.push(localOutbound[index]);
+    }
   }
 
   return merged;
@@ -5790,6 +5809,21 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     (async () => {
       try {
         await sendLiveMessage(targetConv, text, options);
+        setThreads(prev => {
+          const existing = prev[targetConv.id]?.messages || prev[targetConv.id] || [];
+          const nextMessages = existing.map(item => (
+            item.id === optimisticId
+              ? { ...item, pending: false, failed: false, error: '' }
+              : item
+          ));
+          return {
+            ...prev,
+            [targetConv.id]: {
+              updatedAt: Date.now(),
+              messages: nextMessages,
+            },
+          };
+        });
         await loadThread(targetConv.id, { silent: true, limit: 300, noCache: true });
         await loadConversations({ silent: true, sideLoad: false });
         showToast('Message sent');
