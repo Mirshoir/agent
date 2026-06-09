@@ -839,6 +839,11 @@ input, textarea { background: none; border: 0; outline: 0; }
   color: var(--accent);
   letter-spacing: 0;
 }
+.msg-meta .send-state {
+  color: var(--muted);
+  font-style: italic;
+}
+.msg-meta .send-state.failed { color: var(--danger); }
 .msg-meta .check { color: var(--success); display: inline-flex; }
 .msg-reply-btn {
   margin-top: 5px;
