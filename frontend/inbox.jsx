@@ -1373,6 +1373,28 @@ function normalizeMessage(row, index) {
   return message;
 }
 
+function mergeLocalOutboundMessages(serverMessages = [], currentMessages = []) {
+  const merged = [...serverMessages];
+  const serverTexts = new Set(
+    serverMessages
+      .filter(m => m.side === 'outbound')
+      .map(m => String(m.text || '').trim())
+      .filter(Boolean)
+  );
+
+  for (const message of currentMessages || []) {
+    const isLocalOutbound = (
+      message?.side === 'outbound' &&
+      (message.pending || message.failed || String(message.id || '').startsWith('optimistic-'))
+    );
+    if (!isLocalOutbound) continue;
+    if (serverTexts.has(String(message.text || '').trim())) continue;
+    merged.push(message);
+  }
+
+  return merged;
+}
+
 function resolveCommentPostPreview(conv, messages = []) {
   const base = {
     postId: conv?.postId || '',
@@ -4213,7 +4235,9 @@ function Message({ m, conv, t, onReplyComment, onEditMessage, onDeleteMessage })
       <div className="msg-meta">
         {fromAi && <span className="ai-mark">auto</span>}
         <span>{m.time}</span>
-        {m.side === 'outbound' && <span className="check"><I.DoubleCheck /></span>}
+        {m.pending && <span className="send-state">sending</span>}
+        {m.failed && <span className="send-state failed">failed</span>}
+        {m.side === 'outbound' && !m.failed && <span className="check"><I.DoubleCheck /></span>}
         {canManageOutbound && (
           <span className="msg-actions">
             {m.type === 'text' && (
@@ -5556,7 +5580,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
           ...prev,
           [conversationId]: {
             updatedAt: Date.now(),
-            messages: normalized,
+            messages: mergeLocalOutboundMessages(normalized, getThreadMessages(prev[conversationId])),
           },
         }));
         setConversations(rows => rows.map(item => item.id === conversationId ? clearConversationUnread(item) : item));
@@ -5772,7 +5796,11 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       } catch (e) {
         setThreads(prev => {
           const existing = prev[targetConv.id]?.messages || prev[targetConv.id] || [];
-          const nextMessages = existing.filter(item => item.id !== optimisticId);
+          const nextMessages = existing.map(item => (
+            item.id === optimisticId
+              ? { ...item, pending: false, failed: true, error: e.message }
+              : item
+          ));
           return {
             ...prev,
             [targetConv.id]: {
