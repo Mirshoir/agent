@@ -2651,6 +2651,7 @@ function ClientsTable({
   onLeadStageChange = () => {},
   onLeadPriceChange = () => {},
   currentUser = null,
+  isOperator = false,
   onPickClient = () => {},
   w,
 }) {
@@ -2674,10 +2675,11 @@ function ClientsTable({
       if (clean && !options.some(item => item.toLowerCase() === clean.toLowerCase())) options.push(clean);
     };
     add(currentOwnerLabel);
+    if (isOperator) return options;
     (operatorAccounts || []).forEach(item => add(item?.login_id));
     Object.values(clientOwners || {}).forEach(add);
     return options;
-  }, [currentOwnerLabel, operatorAccounts, clientOwners]);
+  }, [currentOwnerLabel, isOperator, operatorAccounts, clientOwners]);
   const conversationMap = useMemo(
     () => new Map((conversations || []).map(conv => [conv.id, conv])),
     [conversations],
@@ -2718,8 +2720,11 @@ function ClientsTable({
     [manualClients, manualLeads, conversationMap, leadStages, leadPrices, clientOwners],
   );
   const availableCandidates = useMemo(
-    () => (conversations || []).filter(conv => !(manualClients || []).includes(conv.id)),
-    [conversations, manualClients],
+    () => (conversations || []).filter(conv => {
+      if ((manualClients || []).includes(conv.id)) return false;
+      return !isOperator || !String(clientOwners?.[conv.id] || '').trim();
+    }),
+    [conversations, manualClients, clientOwners, isOperator],
   );
 
   const stageNames = {
@@ -2739,70 +2744,74 @@ function ClientsTable({
         </div>
         <span>{rows.length}</span>
       </div>
-      <div className="panel-actions" style={{ marginBottom: 12 }}>
-        <select value={candidateId} onChange={(e) => setCandidateId(e.target.value)}>
-          <option value="">Select conversation...</option>
-          {availableCandidates.map(conv => (
-            <option key={conv.id} value={conv.id}>{conv.name} ({conv.handle})</option>
-          ))}
-        </select>
-        <button
-          onClick={() => {
-            if (!candidateId) return;
-            onAddManualClient(candidateId);
-            setCandidateId('');
-          }}
-          disabled={!candidateId}
-        >
-          Add client
-        </button>
-      </div>
-      <div className="manual-lead-form">
-        <input
-          value={manualLeadForm.name}
-          placeholder={w.manualLeadName || 'Lead name'}
-          onChange={(e) => setManualLeadForm(prev => ({ ...prev, name: e.target.value }))}
-        />
-        <select
-          value={manualLeadForm.platform}
-          aria-label={w.manualLeadSource || 'Source'}
-          onChange={(e) => setManualLeadForm(prev => ({ ...prev, platform: e.target.value }))}
-        >
-          <option value="telegram">Telegram</option>
-          <option value="whatsapp">WhatsApp</option>
-          <option value="instagram">Instagram</option>
-          <option value="phone">Phone</option>
-          <option value="other">Other</option>
-        </select>
-        <select
-          value={manualLeadForm.owner}
-          aria-label={w.manualLeadOwner || 'Operator'}
-          onChange={(e) => setManualLeadForm(prev => ({ ...prev, owner: e.target.value }))}
-        >
-          {operatorOptions.map(option => <option key={option} value={option}>{option}</option>)}
-        </select>
-        <input
-          value={manualLeadForm.price}
-          placeholder={w.leadPricePlaceholder || 'Add price'}
-          onChange={(e) => setManualLeadForm(prev => ({ ...prev, price: e.target.value }))}
-        />
-        <input
-          value={manualLeadForm.note}
-          placeholder={w.manualLeadNote || 'Note'}
-          onChange={(e) => setManualLeadForm(prev => ({ ...prev, note: e.target.value }))}
-        />
-        <button
-          type="button"
-          onClick={() => {
-            if (!manualLeadForm.name.trim()) return;
-            onAddManualLead(manualLeadForm);
-            setManualLeadForm({ name: '', platform: 'telegram', owner: currentOwnerLabel, price: '', note: '' });
-          }}
-          disabled={!manualLeadForm.name.trim() || !manualLeadForm.owner.trim()}
-        >
-          {w.addManualLead || 'Add manual lead'}
-        </button>
-      </div>
+      {!isOperator && (
+        <>
+          <div className="panel-actions" style={{ marginBottom: 12 }}>
+            <select value={candidateId} onChange={(e) => setCandidateId(e.target.value)}>
+              <option value="">Select conversation...</option>
+              {availableCandidates.map(conv => (
+                <option key={conv.id} value={conv.id}>{conv.name} ({conv.handle})</option>
+              ))}
+            </select>
+            <button
+              onClick={() => {
+                if (!candidateId) return;
+                onAddManualClient(candidateId);
+                setCandidateId('');
+              }}
+              disabled={!candidateId}
+            >
+              Add client
+            </button>
+          </div>
+          <div className="manual-lead-form">
+            <input
+              value={manualLeadForm.name}
+              placeholder={w.manualLeadName || 'Lead name'}
+              onChange={(e) => setManualLeadForm(prev => ({ ...prev, name: e.target.value }))}
+            />
+            <select
+              value={manualLeadForm.platform}
+              aria-label={w.manualLeadSource || 'Source'}
+              onChange={(e) => setManualLeadForm(prev => ({ ...prev, platform: e.target.value }))}
+            >
+              <option value="telegram">Telegram</option>
+              <option value="whatsapp">WhatsApp</option>
+              <option value="instagram">Instagram</option>
+              <option value="phone">Phone</option>
+              <option value="other">Other</option>
+            </select>
+            <select
+              value={manualLeadForm.owner}
+              aria-label={w.manualLeadOwner || 'Operator'}
+              onChange={(e) => setManualLeadForm(prev => ({ ...prev, owner: e.target.value }))}
+            >
+              {operatorOptions.map(option => <option key={option} value={option}>{option}</option>)}
+            </select>
+            <input
+              value={manualLeadForm.price}
+              placeholder={w.leadPricePlaceholder || 'Add price'}
+              onChange={(e) => setManualLeadForm(prev => ({ ...prev, price: e.target.value }))}
+            />
+            <input
+              value={manualLeadForm.note}
+              placeholder={w.manualLeadNote || 'Note'}
+              onChange={(e) => setManualLeadForm(prev => ({ ...prev, note: e.target.value }))}
+            />
+            <button
+              type="button"
+              onClick={() => {
+                if (!manualLeadForm.name.trim()) return;
+                onAddManualLead(manualLeadForm);
+                setManualLeadForm({ name: '', platform: 'telegram', owner: currentOwnerLabel, price: '', note: '' });
+              }}
+              disabled={!manualLeadForm.name.trim() || !manualLeadForm.owner.trim()}
+            >
+              {w.addManualLead || 'Add manual lead'}
+            </button>
+          </div>
+        </>
+      )}
       <div className="clients-table-wrap">
         <table className="clients-table">
           <thead>
@@ -2823,7 +2832,13 @@ function ClientsTable({
                 <td colSpan="8" className="clients-empty">{w.clientsEmpty}</td>
               </tr>
             )}
-            {rows.map(row => (
+            {rows.map(row => {
+              const rowOwnerKey = String(row.owner || '').trim().toLowerCase();
+              const isOwnedByCurrentUser = rowOwnerKey && currentOwnerKeys.has(rowOwnerKey);
+              const canPickClient = !row.owner || (!isOperator && !isOwnedByCurrentUser);
+              const canUnpickClient = !isOperator && isOwnedByCurrentUser;
+              const canRemoveClient = !isOperator;
+              return (
               <tr key={row.id}>
                 <td>
                   <div className="client-cell">
@@ -2863,15 +2878,19 @@ function ClientsTable({
                   {row.sourceType === 'conversation' ? (
                     <button className="table-action" onClick={() => onOpenConversation(row.id)}>{w.leadOpen}</button>
                   ) : null}
-                  {row.owner && currentOwnerKeys.has(row.owner.toLowerCase()) ? (
+                  {canUnpickClient ? (
                     <button className="table-action" onClick={() => onPickClient(row.id, '')}>{w.unpickClient || 'Unpick'}</button>
-                  ) : (
+                  ) : null}
+                  {canPickClient ? (
                     <button className="table-action" onClick={() => onPickClient(row.id, currentOwnerLabel)}>{w.pickClient || 'Pick me'}</button>
-                  )}
-                  <button className="table-action" onClick={() => row.sourceType === 'manual' ? onRemoveManualLead(row.id) : onRemoveManualClient(row.id)}>Remove</button>
+                  ) : null}
+                  {canRemoveClient ? (
+                    <button className="table-action" onClick={() => row.sourceType === 'manual' ? onRemoveManualLead(row.id) : onRemoveManualClient(row.id)}>Remove</button>
+                  ) : null}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -3613,6 +3632,7 @@ function WorkspacePanel({
           onLeadStageChange={onLeadStageChange}
           onLeadPriceChange={onLeadPriceChange}
           currentUser={currentUser}
+          isOperator={isOperator}
           onPickClient={onPickClient}
           onOpenConversation={onOpenConversation}
           w={w}
