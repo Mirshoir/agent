@@ -1407,6 +1407,99 @@ def can_access_business(access: dict, business_id: str) -> bool:
     return normalize_id(business_id) in set(access.get("business_ids") or [])
 
 
+def is_business_admin_access(access: dict, business_id: str = "") -> bool:
+    if not access:
+        return False
+    if access.get("is_admin"):
+        return True
+    role = get_user_business_role(access.get("email", ""), business_id) if business_id else ""
+    return normalize_id(role or access.get("role", "")).lower() in BUSINESS_ADMIN_ROLES
+
+
+def operator_owner_labels(access: dict) -> set[str]:
+    email = normalize_email((access or {}).get("email", ""))
+    labels = {email} if email else set()
+    if email and "@" in email:
+        labels.add(email.split("@", 1)[0])
+    return {normalize_id(item).lower() for item in labels if normalize_id(item)}
+
+
+def workspace_state_items(value) -> list:
+    if isinstance(value, dict):
+        items = value.get("items")
+    else:
+        items = value
+    return items if isinstance(items, list) else []
+
+
+def merge_unique_items(existing_items: list, requested_items: list) -> list:
+    merged = []
+    seen = set()
+    for item in [*existing_items, *requested_items]:
+        key = normalize_id(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(key)
+    return merged
+
+
+def manual_lead_key(item) -> str:
+    return normalize_id(item.get("id")) if isinstance(item, dict) else ""
+
+
+def manual_lead_owner(item) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return normalize_id(item.get("operator") or item.get("owner"))
+
+
+def scope_workspace_state_update_for_access(state: dict, access: dict, business_id: str) -> dict:
+    if is_business_admin_access(access, business_id):
+        return state
+
+    existing_state = get_workspace_state(business_id)
+    operator_labels = operator_owner_labels(access)
+    scoped = dict(state)
+
+    if "client_owners" in scoped:
+        existing_owners = existing_state.get("client_owners") if isinstance(existing_state.get("client_owners"), dict) else {}
+        requested_owners = scoped.get("client_owners") if isinstance(scoped.get("client_owners"), dict) else {}
+        merged_owners = dict(existing_owners)
+        for raw_client_id, raw_owner in requested_owners.items():
+            client_id = normalize_id(raw_client_id)
+            requested_owner = normalize_id(raw_owner)
+            existing_owner = normalize_id(existing_owners.get(client_id))
+            if not client_id or existing_owner or not requested_owner:
+                continue
+            if requested_owner.lower() in operator_labels:
+                merged_owners[client_id] = requested_owner
+        scoped["client_owners"] = merged_owners
+
+    if "manual_clients" in scoped:
+        existing_items = workspace_state_items(existing_state.get("manual_clients"))
+        requested_items = workspace_state_items(scoped.get("manual_clients"))
+        scoped["manual_clients"] = {"items": merge_unique_items(existing_items, requested_items)}
+
+    if "manual_leads" in scoped:
+        existing_items = [item for item in workspace_state_items(existing_state.get("manual_leads")) if isinstance(item, dict)]
+        existing_ids = {manual_lead_key(item) for item in existing_items if manual_lead_key(item)}
+        merged_items = list(existing_items)
+        for item in workspace_state_items(scoped.get("manual_leads")):
+            if not isinstance(item, dict):
+                continue
+            item_id = manual_lead_key(item)
+            if not item_id or item_id in existing_ids:
+                continue
+            owner = manual_lead_owner(item)
+            if owner and owner.lower() in operator_labels:
+                merged_items.append(item)
+                existing_ids.add(item_id)
+        scoped["manual_leads"] = {"items": merged_items[:500]}
+
+    return scoped
+
+
 def get_latest_instagram_comment_anchor(business_id: str, commenter_id: str = "", post_id: str = "") -> dict:
     """
     Find the most recent inbound customer comment for (business, commenter[, post]).
@@ -10098,6 +10191,7 @@ async def update_workspace_state_v2(
         state = payload.get("state") or {}
         if not isinstance(state, dict):
             return JSONResponse({"error": "state must be an object"}, status_code=400)
+        state = scope_workspace_state_update_for_access(state, access, business_id)
 
         updated_keys = []
         for key, value in state.items():
@@ -10190,6 +10284,7 @@ async def api_update_combined_settings(
         "operator_tasks",
     }
     if isinstance(workspace_state, dict) and workspace_state:
+        workspace_state = scope_workspace_state_update_for_access(workspace_state, access, business_id)
         updated_workspace = []
         for key, value in workspace_state.items():
             if key not in allowed_workspace_keys:
