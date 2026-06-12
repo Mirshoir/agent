@@ -1086,6 +1086,27 @@ def download_instagram_reel_to_cache(permalink: str) -> dict:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def cache_instagram_reel_for_message(message_id: str, post_permalink: str):
+    message_id = normalize_id(message_id)
+    post_permalink = normalize_id(post_permalink)
+    if not message_id or not post_permalink:
+        return
+    try:
+        cached_reel = download_instagram_reel_to_cache(post_permalink) or {}
+        cached_media_url = normalize_id(cached_reel.get("media_url"))
+        if not cached_media_url:
+            return
+        supabase.table("inbox_messages").update({
+            "media_url": cached_media_url,
+            "media_type": "video",
+            "post_permalink": post_permalink,
+            "post_media_type": "video",
+        }).eq("id", message_id).execute()
+        clear_inbox_caches()
+    except Exception as exc:
+        log("Could not persist Instagram reel cache", {"message_id": message_id, "error": str(exc)})
+
+
 def extract_instagram_permalink_from_payload(raw_payload: dict) -> str:
     raw_payload = raw_payload or {}
     candidates = []
@@ -9679,6 +9700,7 @@ async def get_conversation_messages_v2(
         # This keeps forwarded reels stable in UI (no random "NO PREVIEW" regressions).
         if platform == "instagram" and rows:
             update_rows = []
+            cache_tasks = []
             for row in rows:
                 media_type = normalize_id(row.get("media_type")).lower()
                 if media_type not in ("", "video", "file", "photo", "image"):
@@ -9694,21 +9716,29 @@ async def get_conversation_messages_v2(
 
                 media_url = normalize_id(row.get("media_url"))
                 preview = {}
-                cached_reel = {}
                 if not is_instagram_reel_cache_url(media_url):
-                    cached_reel = download_instagram_reel_to_cache(post_permalink) or {}
-                if not cached_reel and not media_url:
-                    preview = fetch_instagram_public_preview(post_permalink) or {}
+                    cache_id = instagram_reel_cache_id(post_permalink)
+                    cached_path = find_instagram_reel_cache_path(cache_id)
+                    if cached_path:
+                        row["media_url"] = instagram_reel_cache_url(cached_path.name)
+                        row["media_type"] = "video"
+                        row["post_media_type"] = "video"
+                    elif normalize_id(row.get("id")):
+                        cache_tasks.append({
+                            "id": normalize_id(row.get("id")),
+                            "post_permalink": post_permalink,
+                        })
+                if not normalize_id(row.get("media_url")):
+                    cached_preview = INSTAGRAM_PUBLIC_PREVIEW_CACHE.get(post_permalink)
+                    if cached_preview and (time.time() - cached_preview[0]) < INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS:
+                        preview = cached_preview[1] or {}
 
-                cached_media_url = normalize_id(cached_reel.get("media_url"))
                 preview_media_url = normalize_id(preview.get("media_url"))
                 preview_image_url = normalize_id(preview.get("post_image_url"))
                 preview_media_type = normalize_id(preview.get("post_media_type")).lower()
 
                 changed = False
-                if cached_media_url:
-                    row["media_url"] = cached_media_url
-                    row["media_type"] = "video"
+                if is_instagram_reel_cache_url(row.get("media_url")) and media_url != normalize_id(row.get("media_url")):
                     changed = True
                 elif preview_media_url:
                     row["media_url"] = preview_media_url
@@ -9719,7 +9749,7 @@ async def get_conversation_messages_v2(
                 if post_permalink and not normalize_id(row.get("post_permalink")):
                     row["post_permalink"] = post_permalink
                     changed = True
-                if cached_media_url and normalize_id(row.get("post_media_type")).lower() != "video":
+                if is_instagram_reel_cache_url(row.get("media_url")) and normalize_id(row.get("post_media_type")).lower() != "video":
                     row["post_media_type"] = "video"
                     changed = True
                 elif preview_media_type and media_type in ("", "file"):
@@ -9754,6 +9784,20 @@ async def get_conversation_messages_v2(
                     background_tasks.add_task(persist_preview_backfill, update_rows)
                 else:
                     persist_preview_backfill(update_rows)
+
+            if cache_tasks:
+                seen_cache_tasks = set()
+                for item in cache_tasks[:3]:
+                    task_key = f"{item.get('id')}:{item.get('post_permalink')}"
+                    if task_key in seen_cache_tasks:
+                        continue
+                    seen_cache_tasks.add(task_key)
+                    if background_tasks is not None:
+                        background_tasks.add_task(
+                            cache_instagram_reel_for_message,
+                            item.get("id"),
+                            item.get("post_permalink"),
+                        )
 
         messages = [transform_message_to_react(row) for row in rows]
 
