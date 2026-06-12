@@ -7,3 +7,4 @@ telethon
 pillow
 numpy
 reportlab
+yt-dlp
