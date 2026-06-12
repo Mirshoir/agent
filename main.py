@@ -239,6 +239,9 @@ INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_PUBLIC_PRE
 INSTAGRAM_PUBLIC_PREVIEW_CACHE: dict[str, tuple[float, dict]] = {}
 INSTAGRAM_CUSTOMER_PROFILE_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_CUSTOMER_PROFILE_CACHE_TTL_SECONDS", str(60 * 60 * 24)))
 INSTAGRAM_CUSTOMER_PROFILE_CACHE: dict[str, tuple[float, dict]] = {}
+INSTAGRAM_HUMAN_AGENT_RETRY_ENABLED = str(
+    os.getenv("INSTAGRAM_HUMAN_AGENT_RETRY_ENABLED", "0")
+).strip().lower() in {"1", "true", "yes", "on"}
 PRODUCT_MATCHER_ENABLED = str(os.getenv("PRODUCT_MATCHER_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
 _product_matcher_urls = env_list("PRODUCT_MATCHER_API_URLS", "")
 if not _product_matcher_urls:
@@ -1532,10 +1535,20 @@ def instagram_reply_window_closed(result: dict) -> bool:
     return str(code) == "10" and str(subcode) == "2534022"
 
 
+def instagram_human_agent_review_required(result: dict) -> bool:
+    error = result.get("error") if isinstance(result, dict) else {}
+    if not isinstance(error, dict):
+        error = {}
+    message = normalize_id(error.get("message") or result.get("message"))
+    return "human agent" in message.lower() and "review" in message.lower()
+
+
 def send_failure_response(result: dict, default_message: str = "Failed to send message"):
     message = default_message
     if instagram_reply_window_closed(result or {}):
         message = "Instagram reply window is closed. Ask the customer to send a new DM first."
+    elif instagram_human_agent_review_required(result or {}):
+        message = "Instagram Human Agent is not approved for this Meta app. Ask the customer to send a new DM first."
 
     return JSONResponse(
         {"status": "error", "message": message, "details": result or {}},
@@ -6826,6 +6839,8 @@ def send_manual_instagram_dm(access_token: str, recipient_id: str, text: str, bu
     ok, result = send_instagram_dm(access_token, recipient_id, text, business, preserve_text=True)
     if ok or not instagram_reply_window_closed(result or {}):
         return ok, result
+    if not INSTAGRAM_HUMAN_AGENT_RETRY_ENABLED:
+        return ok, result
 
     ok, retry_result = send_instagram_dm(
         access_token,
@@ -6835,6 +6850,11 @@ def send_manual_instagram_dm(access_token: str, recipient_id: str, text: str, bu
         message_tag="HUMAN_AGENT",
         preserve_text=True,
     )
+    if not ok:
+        retry_error = retry_result.get("error") if isinstance(retry_result, dict) else {}
+        retry_message = normalize_id((retry_error or {}).get("message") if isinstance(retry_error, dict) else "")
+        if "human agent" in retry_message.lower() and "review" in retry_message.lower():
+            return False, result
     if isinstance(retry_result, dict):
         retry_result = {
             **retry_result,
