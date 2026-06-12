@@ -672,12 +672,7 @@ function isInstagramPostLink(url) {
 
 function isPlayableVideoUrl(url) {
   const value = String(url || '').toLowerCase();
-  return /^https?:\/\//.test(value) && !isInstagramPostLink(value) && (
-    /\.(mp4|mov|m4v|webm)(\?|$)/i.test(value) ||
-    value.includes('cdninstagram.com') ||
-    value.includes('fbcdn.net') ||
-    value.includes('lookaside.fbsbx.com')
-  );
+  return /^https?:\/\//.test(value) && !isInstagramPostLink(value) && /\.(mp4|mov|m4v|webm)(\?|$)/i.test(value);
 }
 
 function isRenderableImageUrl(url) {
@@ -722,6 +717,46 @@ function resolveForwardedPostLink(row = {}) {
     if (isInstagramPostLink(unwrapped) || isInstagramPostLink(url)) return unwrapped || url;
   }
   return fallback;
+}
+
+function resolveMediaPoster(row = {}) {
+  const payload = row.raw_payload || {};
+  const msg = payload.message || {};
+  const shares = Array.isArray(msg.shares) ? msg.shares : [];
+  const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+  const candidates = [
+    row.post_image_url,
+    row.postImageUrl,
+    row.thumbnail_url,
+    row.thumbnailUrl,
+    row.preview_url,
+    row.previewUrl,
+    payload.post_image_url,
+    payload.postImageUrl,
+    payload.thumbnail_url,
+    payload.thumbnailUrl,
+    payload.image_url,
+    payload.imageUrl,
+    msg.thumbnail_url,
+    msg.image_url,
+  ];
+
+  shares.forEach((share) => {
+    if (!share || typeof share !== 'object') return;
+    candidates.push(share.thumbnail_url, share.thumbnailUrl, share.image_url, share.imageUrl);
+  });
+
+  attachments.forEach((att) => {
+    if (!att || typeof att !== 'object') return;
+    const p = att.payload || {};
+    candidates.push(att.thumbnail_url, att.thumbnailUrl, p.thumbnail_url, p.thumbnailUrl, p.image_url, p.imageUrl);
+  });
+
+  for (const raw of candidates) {
+    const url = String(raw || '').trim();
+    if (/^https?:\/\//i.test(url) && !isInstagramPostLink(url)) return withMediaToken(url);
+  }
+  return '';
 }
 
 function businessOwnerEmail(business = {}) {
@@ -1353,6 +1388,7 @@ function normalizeMessage(row, index) {
     text,
     mediaKind: media || '',
     mediaUrl: resolveMediaUrl(row),
+    mediaPoster: resolveMediaPoster(row),
     forwardLink: resolveForwardedPostLink(row),
     mediaFileId: row.media_file_id || getWhatsAppMediaId(row),
     commentId: String(row.external_message_id || row.comment_id || row.raw_payload?.id || '').trim(),
@@ -4179,6 +4215,37 @@ function VoiceWave({ count = 28 }) {
 }
 
 // ---------- Message bubble ----------
+function MediaVideo({ src, poster, fallbackHref, label = 'video' }) {
+  const [failed, setFailed] = useState(false);
+  const href = fallbackHref || src;
+  const title = label || 'video';
+
+  if (!src || failed) {
+    return (
+      <a className="media-fallback" href={href} target="_blank" rel="noreferrer">
+        {poster ? (
+          <img className="media-img" src={poster} alt={title} />
+        ) : (
+          <span className="ph" data-label={title} />
+        )}
+        <span className="media-fallback-label">Open video</span>
+      </a>
+    );
+  }
+
+  return (
+    <video
+      className="media-video"
+      src={src}
+      poster={poster || undefined}
+      controls
+      playsInline
+      preload="metadata"
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 function Message({ m, conv, t, onReplyComment, onEditMessage, onDeleteMessage }) {
   if (m.side === 'system' && m.type === 'handoff') {
     return (
@@ -4213,12 +4280,9 @@ function Message({ m, conv, t, onReplyComment, onEditMessage, onDeleteMessage })
       {m.type === 'media' && (
         <div className="bubble media">
           {m.mediaKind === 'video' && isPlayableVideoUrl(m.mediaUrl) ? (
-            <>
-              <video className="media-video" src={m.mediaUrl} controls />
-              <a className="open-post-link" href={m.mediaUrl} target="_blank" rel="noreferrer">
-                Open media
-              </a>
-            </>
+            <MediaVideo src={m.mediaUrl} poster={m.mediaPoster} fallbackHref={m.forwardLink || m.mediaUrl} label={m.label || 'video'} />
+          ) : m.mediaKind === 'video' && m.mediaUrl ? (
+            <MediaVideo src="" poster={m.mediaPoster} fallbackHref={m.forwardLink || m.mediaUrl} label={m.label || 'video'} />
           ) : m.mediaUrl && (m.mediaKind === 'photo' || isRenderableImageUrl(m.mediaUrl)) && !isInstagramPostLink(m.mediaUrl) ? (
             <a href={m.mediaUrl} target="_blank" rel="noreferrer">
               <img className="media-img" src={m.mediaUrl} alt={m.label || 'attachment'} />
