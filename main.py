@@ -1,11641 +1,6674 @@
-import os
-import re
-import time
-import secrets
-import base64
-import io
-import json
-import hashlib
-import hmac
-import tempfile
-import shutil
-import subprocess
-import requests
-import mimetypes
-from urllib.parse import urlencode, urlparse, parse_qs, unquote
-from typing import Optional
-from datetime import datetime, timedelta
-from pathlib import Path
-try:
-    import bcrypt
-except Exception:
-    bcrypt = None
+/* global window */
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { createRoot } from 'react-dom/client';
+import { I } from './icons.jsx';
 
-from dotenv import load_dotenv
-from pydantic import BaseModel
-from fastapi import APIRouter, FastAPI, Request, Header, BackgroundTasks
-from fastapi.responses import PlainTextResponse, JSONResponse, RedirectResponse, Response, HTMLResponse
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from supabase import create_client
+import './app.css';
+import './tweaks-panel.jsx';
+import './data.jsx';
+const IS_LOCALHOST = ['localhost', '127.0.0.1'].includes(window.location.hostname);
 
-try:
-    import telegram_bot as telegram_bot_module
-    from telegram_bot import (
-        telegram_router,
-        start_telegram_user_client,
-        stop_telegram_user_client,
-        send_telegram_user_message,
-        send_telegram_user_file,
-        send_telegram_user_voice_file,
-        send_telegram_bot_message,
-        save_telegram_message,
-        get_active_business,
-    )
-except Exception as exc:
-    telegram_bot_module = None
-    telegram_router = APIRouter()
-    TELEGRAM_IMPORT_ERROR = exc
-    print(f"Telegram module disabled during startup: {exc}")
+const ENV_API_BASE = import.meta.env.VITE_API_URL || 'https://agent-1-xi6h.onrender.com';
+const ENV_DASHBOARD_SECRET = import.meta.env.VITE_DASHBOARD_SECRET || '';
 
-    async def start_telegram_user_client():
-        return None
-
-    async def stop_telegram_user_client():
-        return None
-
-    async def send_telegram_user_message(*args, **kwargs):
-        return False, {"error": f"Telegram module unavailable: {TELEGRAM_IMPORT_ERROR}"}
-
-    async def send_telegram_user_file(*args, **kwargs):
-        return False, {"error": f"Telegram module unavailable: {TELEGRAM_IMPORT_ERROR}"}
-
-    async def send_telegram_user_voice_file(*args, **kwargs):
-        return False, {"error": f"Telegram module unavailable: {TELEGRAM_IMPORT_ERROR}"}
-
-    def send_telegram_bot_message(*args, **kwargs):
-        return None
-
-    def save_telegram_message(*args, **kwargs):
-        return None
-
-    def get_active_business():
-        return None
-
-try:
-    import catalog_matcher as catalog_matcher_module
-except Exception as exc:
-    catalog_matcher_module = None
-    CATALOG_MATCHER_IMPORT_ERROR = exc
-    print(f"catalog_matcher import disabled: {exc}")
-
-try:
-    from video_analyzer import VideoAnalyzerError, analyze_video_content
-except Exception as exc:
-    VideoAnalyzerError = None
-    VIDEO_ANALYZER_IMPORT_ERROR = exc
-    print(f"video_analyzer import disabled: {exc}")
-
-    def analyze_video_content(*args, **kwargs):
-        raise RuntimeError(f"Video analyzer unavailable: {VIDEO_ANALYZER_IMPORT_ERROR}")
-
-
-def load_local_env():
-    current = Path(__file__).resolve().parent
-    for parent in (current, *current.parents):
-        env_file = parent / ".env"
-        if env_file.exists():
-            load_dotenv(env_file, override=False)
-            return env_file
-    return None
-
-
-LOADED_ENV_FILE = load_local_env()
-
-
-def env_list(name: str, default: str = ""):
-    return [item.strip() for item in os.getenv(name, default).split(",") if item.strip()]
-
-
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=env_list(
-        "CORS_ORIGINS",
-        "https://agent-kqwah9x4f-mirshoir-s-projects.vercel.app,https://agent-rust-delta.vercel.app,https://agent-psi-liard.vercel.app,http://localhost:5173,http://localhost:5174,http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:5173,http://127.0.0.1:5174,https://instaagent.streamlit.app,https://agent-1-xi6h.onrender.com",
-    ),
-    allow_origin_regex=os.getenv("CORS_ORIGIN_REGEX", r"https://.*\.vercel\.app|https?://(localhost|127\.0\.0\.1)(:\d+)?"),
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(telegram_router)
-
-
-@app.middleware("http")
-async def security_headers(request: Request, call_next):
-    response = await call_next(request)
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    response.headers.setdefault("Referrer-Policy", "no-referrer")
-    response.headers.setdefault("X-Frame-Options", "DENY")
-    return response
-
-# ============================================================================
-# SERVE REACT UI
-# ============================================================================
-try:
-    app.mount("/static", StaticFiles(directory="static", html=True), name="static")
-except Exception:
-    pass
-try:
-    app.mount("/assets", StaticFiles(directory="frontend/dist/assets"), name="frontend-assets")
-except Exception:
-    pass
-
-
-@app.get("/dashboard", response_class=HTMLResponse)
-async def dashboard():
-    """Serve React dashboard"""
-    for path in (
-        "frontend/dist/index.html",
-        "static/index.html",
-        "static/Instaagent Dashboard.html",
-    ):
-        try:
-            with open(path, "r") as f:
-                return f.read()
-        except FileNotFoundError:
-            continue
-    return RedirectResponse(DASHBOARD_URL)
-
-
-@app.on_event("startup")
-async def startup_telegram_user_client():
-    await start_telegram_user_client()
-
-
-@app.on_event("shutdown")
-async def shutdown_telegram_user_client():
-    await stop_telegram_user_client()
-
-
-# ============================================================================
-# ENV
-# ============================================================================
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "1234")
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-DASHBOARD_SECRET = os.getenv("DASHBOARD_SECRET", "")
-
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-CATALOG_SUPABASE_URL = (
-    os.getenv("CATALOG_SUPABASE_URL")
-    or os.getenv("PRODUCT_CATALOG_SUPABASE_URL")
-    or os.getenv("PRODUCT_MATCHER_SUPABASE_URL")
-    or os.getenv("MILANA_CATALOG_SUPABASE_URL")
-    or SUPABASE_URL
-)
-CATALOG_SUPABASE_SERVICE_KEY = (
-    os.getenv("CATALOG_SUPABASE_SERVICE_KEY")
-    or os.getenv("PRODUCT_CATALOG_SUPABASE_SERVICE_KEY")
-    or os.getenv("PRODUCT_MATCHER_SUPABASE_SERVICE_KEY")
-    or os.getenv("MILANA_CATALOG_SUPABASE_SERVICE_KEY")
-    or SUPABASE_SERVICE_KEY
-)
-
-META_APP_ID = os.getenv("META_APP_ID")
-META_APP_SECRET = os.getenv("META_APP_SECRET")
-
-GRAPH_VERSION = os.getenv("GRAPH_API_VERSION") or os.getenv("GRAPH_VERSION", "v21.0")
-GRAPH_FACEBOOK = f"https://graph.facebook.com/{GRAPH_VERSION}"
-GRAPH_INSTAGRAM = f"https://graph.instagram.com/{GRAPH_VERSION}"
-
-INSTAGRAM_REDIRECT_URI = os.getenv(
-    "INSTAGRAM_REDIRECT_URI",
-    "https://agent-1-xi6h.onrender.com/auth/instagram/callback",
-)
-
-FACEBOOK_REDIRECT_URI = os.getenv(
-    "FACEBOOK_REDIRECT_URI",
-    "https://agent-1-xi6h.onrender.com/auth/facebook/callback",
-)
-
-DASHBOARD_URL = os.getenv("DASHBOARD_URL", "https://agent-rust-delta.vercel.app")
-if DASHBOARD_URL.rstrip("/") == "https://instaagent.streamlit.app":
-    DASHBOARD_URL = "https://agent-rust-delta.vercel.app"
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://agent-1-xi6h.onrender.com")
-ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "")
-SUPER_ADMIN_EMAILS = {
-    str(item).strip().lower()
-    for item in os.getenv("SUPER_ADMIN_EMAILS", "").split(",")
-    if str(item).strip()
+const urlParams = new URLSearchParams(window.location.search);
+if (urlParams.get('clear_auth')) {
+  window.localStorage.removeItem('instaagent_dashboard_secret');
+  window.sessionStorage.removeItem('instaagent_dashboard_secret');
+  window.localStorage.removeItem('instaagent_dashboard_auth');
+  window.localStorage.removeItem('instaagent_owner_email');
+  window.localStorage.removeItem('instaagent_api_base');
+}
+function sanitizeApiBase(rawValue) {
+  const value = String(rawValue || '').trim().replace(/\/$/, '');
+  if (!value) return '';
+  if (/^https?:\/\//i.test(value)) {
+    // Prevent mixed-content fetch errors when dashboard is opened on HTTPS.
+    if (window.location.protocol === 'https:' && /^http:\/\//i.test(value)) {
+      return '';
+    }
+    return value;
+  }
+  return '';
 }
 
-# Fallback store used only when `dashboard_workspace_state` table is missing.
-# This keeps operator tasks usable until SQL migration is applied.
-WORKSPACE_STATE_FALLBACK: dict[str, dict] = {}
-LEAD_CONTACT_REQUEST_UZ = "Buyurtmani yakunlashda menejerimiz yordam beradi."
-LEAD_CONTACT_REQUEST_EN = "Our manager will help finalize the order."
-LEAD_CONTACT_REQUEST_RU = "Менеджер поможет завершить заказ."
-LEAD_CONTACT_REQUEST_KK = "Тапсырысты аяқтауға менеджеріміз көмектеседі."
-STATS_CACHE_TTL_SECONDS = int(os.getenv("STATS_CACHE_TTL_SECONDS", "20"))
-STATS_CACHE: dict[str, dict] = {}
-INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS", str(60 * 60 * 6)))
-INSTAGRAM_PUBLIC_PREVIEW_CACHE: dict[str, tuple[float, dict]] = {}
-INSTAGRAM_CUSTOMER_PROFILE_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_CUSTOMER_PROFILE_CACHE_TTL_SECONDS", str(60 * 60 * 24)))
-INSTAGRAM_CUSTOMER_PROFILE_CACHE: dict[str, tuple[float, dict]] = {}
-INSTAGRAM_HUMAN_AGENT_RETRY_ENABLED = str(
-    os.getenv("INSTAGRAM_HUMAN_AGENT_RETRY_ENABLED", "0")
-).strip().lower() in {"1", "true", "yes", "on"}
-PRODUCT_MATCHER_ENABLED = str(os.getenv("PRODUCT_MATCHER_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
-_product_matcher_urls = env_list("PRODUCT_MATCHER_API_URLS", "")
-if not _product_matcher_urls:
-    _legacy_matcher_url = os.getenv("PRODUCT_MATCHER_API_URL", "").strip()
-    _product_matcher_urls = [_legacy_matcher_url] if _legacy_matcher_url else []
-PRODUCT_MATCHER_API_URLS = [str(url or "").strip() for url in _product_matcher_urls if str(url or "").strip()]
-PRODUCT_MATCHER_TIMEOUT_SECONDS = max(10, min(180, int(os.getenv("PRODUCT_MATCHER_TIMEOUT_SECONDS", "90"))))
-PRODUCT_MATCHER_TOP_K = max(1, min(10, int(os.getenv("PRODUCT_MATCHER_TOP_K", "3"))))
-PRODUCT_MATCHER_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_MIN_SCORE", "0.20"))))
-PRODUCT_MATCHER_WEAK_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_WEAK_MIN_SCORE", "0.10"))))
-PRODUCT_MATCHER_CONTEXT_TTL_SECONDS = max(60, min(24 * 60 * 60, int(os.getenv("PRODUCT_MATCHER_CONTEXT_TTL_SECONDS", "1800"))))
-PRODUCT_MATCHER_MAX_MEDIA_MB = max(2, min(40, int(os.getenv("PRODUCT_MATCHER_MAX_MEDIA_MB", "20"))))
-PRODUCT_MATCHER_RECENT_MEDIA_LOOKBACK_SECONDS = max(
-    60,
-    min(24 * 60 * 60, int(os.getenv("PRODUCT_MATCHER_RECENT_MEDIA_LOOKBACK_SECONDS", "1800"))),
-)
-OUTBOUND_DUPLICATE_WINDOW_SECONDS = max(
-    5,
-    min(300, int(os.getenv("OUTBOUND_DUPLICATE_WINDOW_SECONDS", "25"))),
-)
-PRODUCT_MATCHER_LOCAL_ENABLED = str(os.getenv("PRODUCT_MATCHER_LOCAL_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
-PRODUCT_MATCHER_LOCAL_ONLY = str(os.getenv("PRODUCT_MATCHER_LOCAL_ONLY", "1")).strip().lower() in {"1", "true", "yes", "on"}
-PRODUCT_MATCHER_LOCAL_CATALOG_TABLE = str(os.getenv("PRODUCT_MATCHER_LOCAL_CATALOG_TABLE", "milana_products") or "").strip() or "milana_products"
-PRODUCT_MATCHER_LOCAL_CATALOG_CACHE_TTL_SECONDS = max(
-    30,
-    min(60 * 60, int(os.getenv("PRODUCT_MATCHER_LOCAL_CATALOG_CACHE_TTL_SECONDS", "300"))),
-)
-PRODUCT_MATCHER_LOCAL_FETCH_LIMIT = max(
-    50,
-    min(3000, int(os.getenv("PRODUCT_MATCHER_LOCAL_FETCH_LIMIT", "1200"))),
-)
-PRODUCT_MATCHER_LOCAL_MAX_KEYWORDS = max(
-    3,
-    min(40, int(os.getenv("PRODUCT_MATCHER_LOCAL_MAX_KEYWORDS", "24"))),
-)
-PRODUCT_MATCHER_OPENAI_VISION_MODEL = str(
-    os.getenv("PRODUCT_MATCHER_OPENAI_VISION_MODEL", os.getenv("OPENAI_MODEL", "gpt-4.1-mini")) or ""
-).strip() or "gpt-4.1-mini"
-PRODUCT_MATCHER_OPENAI_VISION_TIMEOUT_SECONDS = max(
-    8,
-    min(120, int(os.getenv("PRODUCT_MATCHER_OPENAI_VISION_TIMEOUT_SECONDS", "20"))),
-)
-PRODUCT_MATCHER_OPENAI_VISION_DETAIL = str(os.getenv("PRODUCT_MATCHER_OPENAI_VISION_DETAIL", "low") or "").strip().lower() or "low"
-OPENAI_TRANSCRIBE_MODEL = str(os.getenv("OPENAI_TRANSCRIBE_MODEL", "gpt-4o-transcribe") or "").strip() or "gpt-4o-transcribe"
-OPENAI_TRANSCRIBE_TIMEOUT_SECONDS = max(
-    10,
-    min(180, int(os.getenv("OPENAI_TRANSCRIBE_TIMEOUT_SECONDS", "90"))),
-)
-INSTAGRAM_MEDIA_MATCH_MEMORY: dict[str, dict] = {}
-INSTAGRAM_RECENT_OUTBOUND_MEMORY: dict[str, dict] = {}
-PRODUCT_MATCHER_LOCAL_CATALOG_CACHE = {"loaded_at": 0.0, "rows": []}
-WHATSAPP_EMBEDDED_REDIRECT_URI = os.getenv(
-    "WHATSAPP_EMBEDDED_REDIRECT_URI",
-    f"{PUBLIC_BASE_URL.rstrip('/')}/auth/whatsapp/embedded/callback",
-)
-
-WHATSAPP_ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
-WHATSAPP_PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID", "")
-WHATSAPP_BUSINESS_ACCOUNT_ID = os.getenv("WHATSAPP_BUSINESS_ACCOUNT_ID", "")
-WHATSAPP_FALLBACK_MODEL = os.getenv("OPENAI_MODEL", os.getenv("MISTRAL_MODEL", "gpt-4o-mini"))
-WHATSAPP_CATALOG_LINK = os.getenv("CATALOG_LINK", "Catalog link will be shared soon.")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-
-if not SUPABASE_URL:
-    raise RuntimeError("Missing SUPABASE_URL")
-
-if not SUPABASE_SERVICE_KEY:
-    raise RuntimeError("Missing SUPABASE_SERVICE_KEY")
-
-supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-catalog_supabase = create_client(CATALOG_SUPABASE_URL, CATALOG_SUPABASE_SERVICE_KEY)
-
-processed_message_ids = {}
-processed_comment_ids = {}
-processing_message_ids = set()
-processing_comment_ids = set()
-DEDUP_TTL_SECONDS = 60 * 60
-WHATSAPP_CHAT_MEMORY = {}
-WHATSAPP_EMBEDDED_SESSIONS = {}
-LAST_WEBHOOK_EVENTS = []
-
-
-# ============================================================================
-# MODELS
-# ============================================================================
-class ManualInstagramReply(BaseModel):
-    business_id: str
-    customer_id: str
-    text: str
-
-
-class ManualInstagramMedia(BaseModel):
-    business_id: str
-    customer_id: str
-    caption: str = ""
-    media_type: str
-    media_url: str
-
-
-class ManualTelegramMessage(BaseModel):
-    business_id: str = ""
-    customer_id: str
-    chat_id: str = ""
-    text: str
-
-
-class ManualTelegramFile(BaseModel):
-    customer_id: str
-    chat_id: str
-    caption: str = ""
-    media_type: str
-    file_data: str
-    filename: str
-
-
-class ManualTelegramVoiceFile(BaseModel):
-    customer_id: str
-    chat_id: str
-    file_data: str
-    filename: str
-
-
-class ManualInstagramFile(BaseModel):
-    business_id: str
-    customer_id: str
-    caption: str = ""
-    media_type: str
-    file_data: str
-    filename: str
-
-
-class DashboardImageFile(BaseModel):
-    business_id: str = ""
-    conversation_id: str = ""
-    platform: str
-    channel: str = ""
-    customer_id: str
-    chat_id: str = ""
-    caption: str = ""
-    file_data: str
-    filename: str = "image.jpg"
-    mime_type: str = "image/jpeg"
-
-
-class DashboardVoiceFile(BaseModel):
-    business_id: str = ""
-    conversation_id: str = ""
-    platform: str
-    channel: str = ""
-    customer_id: str
-    chat_id: str = ""
-    file_data: str
-    filename: str = "voice.ogg"
-    mime_type: str = "audio/ogg"
-
-
-class BusinessSettingsUpdate(BaseModel):
-    business_id: str
-    settings: dict
-
-
-class AIPromptSettingsUpdate(BaseModel):
-    business_id: str
-    settings: dict
-
-
-class AIPromptGenerateRequest(BaseModel):
-    business_id: str
-    field: str
-    current_prompt: str = ""
-    goal: str = "make it more natural and sales-focused"
-
-
-class ManualWhatsAppReply(BaseModel):
-    business_id: str = ""
-    customer_id: str
-    text: str
-
-
-class EmbeddedWhatsAppSendMessage(BaseModel):
-    to: str
-    text: str
-    phone_number_id: str = ""
-    access_token: str = ""
-
-
-class BusinessChannelPayload(BaseModel):
-    platform: str
-    account_label: str
-    account_external_id: str
-    is_active: bool = True
-    config: dict = {}
-
-
-class DashboardLoginRequest(BaseModel):
-    email: str
-    password: str
-
-
-class DashboardSignupRequest(BaseModel):
-    email: str
-    password: str
-    role: str = "operator"
-    business_id: str = ""
-    full_name: str = ""
-
-
-class OperatorCreateRequest(BaseModel):
-    business_id: str
-    login_id: str
-    password: str
-
-
-class BusinessCreateRequest(BaseModel):
-    business_name: str
-    owner_email: str
-    business_type: str = ""
-    language: str = "uz"
-    tone: str = "friendly"
-
-
-class BusinessAdminCreateRequest(BaseModel):
-    email: str
-    password: str
-    role: str = "admin"
-    full_name: str = ""
-
-
-class OperatorTaskCreateRequest(BaseModel):
-    business_id: str
-    text: str
-    recipients: list[str] = []
-    assign_mode: str = "all"
-
-
-# ============================================================================
-# HELPERS - GENERAL
-# ============================================================================
-def log(title, data=None):
-    print("\n" + "=" * 80)
-    print(title)
-    if data is not None:
-        print(data)
-    print("=" * 80 + "\n")
-
-
-def normalize_id(value) -> str:
-    return str(value or "").strip()
-
-
-def normalize_bool(value, default: bool = True) -> bool:
-    if value is None or value == "":
-        return default
-    if isinstance(value, bool):
-        return value
-    text = normalize_id(value).lower()
-    if text in {"1", "true", "yes", "y", "on", "enabled", "enable", "full_auto"}:
-        return True
-    if text in {"0", "false", "no", "n", "off", "disabled", "disable", "manual", "human_only", "human"}:
-        return False
-    return default
-
-
-def get_business_automation_mode(business: dict = None) -> str:
-    return normalize_id((business or {}).get("automation_mode")).upper()
-
-
-def business_memory_limit(business: dict = None, default: int = 8) -> int:
-    business = business or {}
-    if not normalize_bool(business.get("memory_enabled"), True):
-        return 0
-    raw_limit = business.get("memory_limit")
-    try:
-        limit = int(raw_limit if raw_limit not in (None, "") else default)
-    except Exception:
-        limit = default
-    return max(0, min(20, limit))
-
-
-def lead_state_workspace_key(platform: str, customer_id: str, channel: str = "") -> str:
-    platform = normalize_id(platform).lower()
-    customer_id = normalize_id(customer_id)
-    channel = normalize_id(channel).lower()
-    if not platform or not customer_id:
-        return ""
-    if channel:
-        return f"lead_state:{platform}:{channel}:{customer_id}"
-    return f"lead_state:{platform}:{customer_id}"
-
-
-def normalize_phone_number(value: str) -> str:
-    digits = re.sub(r"\D+", "", normalize_id(value))
-    if not digits:
-        return ""
-    if digits.startswith("00"):
-        digits = digits[2:]
-    if digits.startswith("8") and len(digits) == 10:
-        return f"998{digits[1:]}"
-    if digits.startswith("998") and len(digits) >= 12:
-        return digits[:12]
-    return digits
-
-
-def extract_phone_candidates(text: str) -> list[str]:
-    source = normalize_id(text)
-    if not source:
-        return []
-
-    candidates = []
-    patterns = [
-        r"(?<!\d)(?:\+?\d[\d\s().-]{6,}\d)(?!\d)",
-        r"(?<!\d)\d{7,15}(?!\d)",
-    ]
-    for pattern in patterns:
-        for match in re.finditer(pattern, source):
-            digits = normalize_phone_number(match.group(0))
-            if 7 <= len(digits) <= 15 and digits not in candidates:
-                candidates.append(digits)
-    return candidates
-
-
-def _looks_like_customer_name(value: str) -> bool:
-    text = normalize_id(value)
-    if not text or len(text) > 60:
-        return False
-    if re.search(r"\d", text):
-        return False
-    if is_greeting_only(text.lower()) or is_low_signal_message(text.lower()):
-        return False
-    if has_business_sales_context(text):
-        return False
-    tokens = [token for token in re.split(r"\s+", text.strip()) if token]
-    if not 1 <= len(tokens) <= 4:
-        return False
-    return all(re.fullmatch(r"[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼ'`-]{2,}", token) for token in tokens)
-
-
-def extract_customer_name_candidate(text: str) -> str:
-    source = normalize_id(text).strip()
-    if not source:
-        return ""
-
-    explicit_patterns = [
-        r"(?:ismim|mening ismim|mening adim|mening ism|my name is|name is|меня зовут|менің атым|mening ismim[:\-]?)\s+([A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼ'`-]{2,}(?:\s+[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼ'`-]{2,}){0,3})",
-    ]
-    for pattern in explicit_patterns:
-        match = re.search(pattern, source, flags=re.IGNORECASE)
-        if match:
-            candidate = normalize_id(match.group(1)).strip(" ,.!?:;")
-            if _looks_like_customer_name(candidate):
-                return candidate
-
-    if _looks_like_customer_name(source):
-        return source
-    return ""
-
-
-def normalize_lead_state(state: dict = None) -> dict:
-    state = dict(state or {})
-    phone = normalize_phone_number(state.get("phone"))
-    customer_name = normalize_id(state.get("customer_name"))
-    phone_collected = bool(state.get("phone_collected")) or bool(phone)
-    name_collected = bool(state.get("name_collected")) or bool(customer_name and not _looks_like_generated_instagram_name(customer_name))
-    last_lead_update = normalize_id(state.get("last_lead_update"))
-    last_message_id = normalize_id(state.get("last_message_id"))
-    return {
-        "phone": phone,
-        "customer_name": customer_name,
-        "phone_collected": phone_collected,
-        "name_collected": name_collected,
-        "last_lead_update": last_lead_update,
-        "last_message_id": last_message_id,
-    }
-
-
-def lead_state_missing_fields(state: dict = None) -> list[str]:
-    normalized = normalize_lead_state(state)
-    missing = []
-    if not normalized.get("name_collected"):
-        missing.append("name")
-    if not normalized.get("phone_collected"):
-        missing.append("phone")
-    return missing
-
-
-def build_known_customer_information_block(lead_state: dict = None) -> str:
-    state = normalize_lead_state(lead_state)
-    missing = lead_state_missing_fields(state)
-    return f"""
-Known customer information:
-- Name: {state.get("customer_name") or "unknown"}
-- Phone: {state.get("phone") or "unknown"}
-- Phone collected: {"yes" if state.get("phone_collected") else "no"}
-- Name collected: {"yes" if state.get("name_collected") else "no"}
-- Last lead update: {state.get("last_lead_update") or "unknown"}
-- Missing fields: {", ".join(missing) if missing else "none"}
-
-Lead handling rules:
-- Before asking for the customer's name or phone number, always check the known customer information and conversation history.
-- If the customer has already sent a phone number in any valid format, never ask for the phone number again.
-- If the customer has already sent their name, never ask for the name again.
-- If only the phone number is missing, ask only for the phone number.
-- If only the name is missing, ask only for the name.
-- If both name and phone number are already collected, confirm briefly and move to the next sales step.
-- Do not repeat the same lead-collection question more than once in the same conversation.
-""".strip()
-
-
-def extract_lead_state_from_text(
-    text: str,
-    current_state: dict = None,
-    customer_name_hint: str = "",
-    message_id: str = "",
-) -> dict:
-    state = normalize_lead_state(current_state)
-    text = normalize_id(text)
-
-    phone_candidates = extract_phone_candidates(text)
-    if phone_candidates:
-        state["phone"] = phone_candidates[0]
-        state["phone_collected"] = True
-
-    name_candidate = extract_customer_name_candidate(text)
-    if not name_candidate:
-        hinted_name = normalize_id(customer_name_hint)
-        if hinted_name and not _looks_like_generated_instagram_name(hinted_name):
-            if _looks_like_customer_name(hinted_name):
-                name_candidate = hinted_name
-
-    if name_candidate:
-        state["customer_name"] = name_candidate
-        state["name_collected"] = True
-
-    if message_id:
-        state["last_message_id"] = normalize_id(message_id)
-    if text:
-        state["last_lead_update"] = datetime.utcnow().isoformat()
-
-    return normalize_lead_state(state)
-
-
-def get_customer_lead_state(platform: str, business_id: str, customer_id: str, channel: str = "") -> dict:
-    platform = normalize_id(platform).lower()
-    business_id = normalize_id(business_id)
-    customer_id = normalize_id(customer_id)
-    channel = normalize_id(channel).lower()
-    if not platform or not business_id or not customer_id:
-        return normalize_lead_state({})
-
-    state_key = lead_state_workspace_key(platform, customer_id, channel)
-    if not state_key:
-        return normalize_lead_state({})
-
-    try:
-        rows = (
-            supabase.table("dashboard_workspace_state")
-            .select("state_value")
-            .eq("business_id", business_id)
-            .eq("state_key", state_key)
-            .limit(1)
-            .execute()
-            .data
-            or []
-        )
-        if rows:
-            value = rows[0].get("state_value")
-            if isinstance(value, dict):
-                return normalize_lead_state(value)
-    except Exception as exc:
-        log("Could not load customer lead state", {"business_id": business_id, "customer_id": customer_id, "error": str(exc)})
-
-    return normalize_lead_state({})
-
-
-def upsert_customer_lead_state(
-    business_id: str,
-    platform: str,
-    customer_id: str,
-    lead_state: dict,
-    channel: str = "",
-    updated_by: str = "instagram_bot",
-) -> dict:
-    business_id = normalize_id(business_id)
-    platform = normalize_id(platform).lower()
-    customer_id = normalize_id(customer_id)
-    channel = normalize_id(channel).lower()
-    state_key = lead_state_workspace_key(platform, customer_id, channel)
-    state_value = normalize_lead_state(lead_state)
-
-    if not business_id or not state_key:
-        return state_value
-
-    try:
-        supabase.table("dashboard_workspace_state").upsert(
-            {
-                "business_id": business_id,
-                "state_key": state_key,
-                "state_value": state_value,
-                "updated_by": normalize_id(updated_by),
-            },
-            on_conflict="business_id,state_key",
-        ).execute()
-    except Exception as exc:
-        log("Could not upsert customer lead state", {"business_id": business_id, "customer_id": customer_id, "error": str(exc)})
-
-    return state_value
-
-
-def derive_customer_lead_state(
-    platform: str,
-    business: dict,
-    customer_id: str,
-    channel: str = "",
-    recent_rows: list = None,
-    current_text: str = "",
-    customer_name_hint: str = "",
-    message_id: str = "",
-) -> dict:
-    state = get_customer_lead_state(platform, business.get("id", ""), customer_id, channel)
-    rows = list(recent_rows or [])
-
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        if normalize_id(row.get("direction")).lower() != "inbound":
-            continue
-        row_text = normalize_id(row.get("content"))
-        row_name = normalize_id(row.get("customer_name"))
-        row_state = {
-            "phone": state.get("phone", ""),
-            "customer_name": state.get("customer_name", ""),
-            "phone_collected": state.get("phone_collected", False),
-            "name_collected": state.get("name_collected", False),
-            "last_lead_update": state.get("last_lead_update", ""),
-            "last_message_id": normalize_id(row.get("external_message_id")),
-        }
-        if row_text:
-            row_state = extract_lead_state_from_text(row_text, row_state, row_name, row.get("external_message_id"))
-            if row_name and not _looks_like_generated_instagram_name(row_name) and _looks_like_customer_name(row_name):
-                row_state["customer_name"] = row_name
-                row_state["name_collected"] = True
-        state = normalize_lead_state({
-            **state,
-            **row_state,
-        })
-
-    if current_text or customer_name_hint:
-        state = extract_lead_state_from_text(current_text, state, customer_name_hint, message_id)
-
-    if state.get("customer_name") and _looks_like_generated_instagram_name(state.get("customer_name")):
-        state["name_collected"] = False
-
-    return normalize_lead_state(state)
-
-
-def business_allows_auto_reply(business: dict, platform: str, channel: str = "") -> bool:
-    business = business or {}
-    if not normalize_bool(business.get("bot_enabled"), True):
-        return False
-
-    mode = get_business_automation_mode(business)
-    if mode in {"OFF", "DISABLED", "MANUAL", "HUMAN_ONLY"}:
-        return False
-
-    platform = normalize_id(platform).lower()
-    channel = normalize_id(channel).lower()
-
-    if platform == "instagram":
-        if channel == "dm":
-            return normalize_bool(business.get("auto_reply_dms"), True)
-        if "comment" in channel:
-            return normalize_bool(business.get("auto_reply_comments"), True)
-        return True
-
-    if platform == "telegram":
-        if channel in {"bot", "telegram_bot"}:
-            return normalize_bool(business.get("telegram_bot_enabled"), True)
-        return True
-
-    if platform == "whatsapp":
-        return normalize_bool(business.get("whatsapp_enabled"), True)
-
-    return True
-
-
-def business_allows_human_handoff(business: dict = None) -> bool:
-    return normalize_bool((business or {}).get("human_takeover_enabled"), True)
-
-
-def unwrap_meta_redirect_url(value: str) -> str:
-    value = normalize_id(value)
-    if not value:
-        return ""
-    try:
-        parsed = urlparse(value)
-        host = normalize_id(parsed.netloc).lower()
-        if host.endswith("instagram.com") or host.endswith("facebook.com"):
-            target = parse_qs(parsed.query).get("u", [""])[0]
-            target = unquote(normalize_id(target))
-            if target.startswith(("http://", "https://")):
-                return target
-    except Exception:
-        pass
-    return value
-
-
-def is_instagram_public_link(value: str) -> bool:
-    value = normalize_id(value).lower()
-    return (
-        value.startswith(("http://", "https://"))
-        and "instagram.com/" in value
-        and any(seg in value for seg in ("/reel/", "/p/", "/tv/", "/share/"))
-    )
-
-
-def _extract_meta_content(html: str, *keys: str) -> str:
-    if not html:
-        return ""
-    for key in keys:
-        key_re = re.escape(key)
-        patterns = [
-            rf'<meta[^>]+property=["\']{key_re}["\'][^>]*content=["\']([^"\']+)["\']',
-            rf'<meta[^>]+name=["\']{key_re}["\'][^>]*content=["\']([^"\']+)["\']',
-            rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']{key_re}["\']',
-            rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']{key_re}["\']',
-        ]
-        for pattern in patterns:
-            match = re.search(pattern, html, flags=re.IGNORECASE)
-            if match:
-                value = normalize_id(match.group(1))
-                if value:
-                    return value
-    return ""
-
-
-def fetch_instagram_public_preview(permalink: str) -> dict:
-    """
-    Best-effort fallback for forwarded Instagram reels/posts that arrive without direct media URL.
-    Scrapes OG meta from public link and caches it.
-    """
-    permalink = normalize_id(unwrap_meta_redirect_url(permalink))
-    if not is_instagram_public_link(permalink):
-        return {}
-
-    now = time.time()
-    cached = INSTAGRAM_PUBLIC_PREVIEW_CACHE.get(permalink)
-    if cached and (now - cached[0]) < INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS:
-        return cached[1] or {}
-
-    user_agents = [
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
-        "Twitterbot/1.0",
-    ]
-
-    try:
-        best_video = ""
-        best_image = ""
-        for user_agent in user_agents:
-            headers = {
-                "User-Agent": user_agent,
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-            res = requests.get(permalink, headers=headers, timeout=12, allow_redirects=True)
-            html = res.text if res.ok else ""
-            if not html:
-                continue
-            og_video = _extract_meta_content(
-                html,
-                "og:video:secure_url",
-                "og:video:url",
-                "og:video",
-                "twitter:player:stream",
-            )
-            og_image = _extract_meta_content(
-                html,
-                "og:image:secure_url",
-                "og:image:url",
-                "og:image",
-                "twitter:image",
-            )
-            if og_video and not best_video:
-                best_video = og_video
-            if og_image and not best_image:
-                best_image = og_image
-            if best_video or best_image:
-                break
-
-        media_type = "video" if best_video else ("image" if best_image else "")
-        payload = {
-            "media_url": best_video or "",
-            "post_image_url": best_image or "",
-            "post_media_type": media_type,
-            "post_permalink": permalink,
-        }
-        INSTAGRAM_PUBLIC_PREVIEW_CACHE[permalink] = (now, payload)
-        return payload
-    except Exception:
-        INSTAGRAM_PUBLIC_PREVIEW_CACHE[permalink] = (now, {})
-        return {}
-
-
-def extract_instagram_permalink_from_payload(raw_payload: dict) -> str:
-    raw_payload = raw_payload or {}
-    candidates = []
-
-    def collect_candidate(value):
-        value = normalize_id(value)
-        if not value:
-            return
-        value = unwrap_meta_redirect_url(value)
-        if is_instagram_public_link(value) and value not in candidates:
-            candidates.append(value)
-
-    for key in ("post_permalink", "permalink", "link", "url"):
-        collect_candidate(raw_payload.get(key))
-
-    msg = raw_payload.get("message") if isinstance(raw_payload.get("message"), dict) else {}
-    for key in ("permalink", "link", "url"):
-        collect_candidate(msg.get(key))
-
-    shares = msg.get("shares") if isinstance(msg.get("shares"), list) else []
-    for share in shares:
-        if not isinstance(share, dict):
-            continue
-        for key in ("permalink", "link", "url"):
-            collect_candidate(share.get(key))
-
-    attachments = msg.get("attachments") if isinstance(msg.get("attachments"), list) else []
-    for att in attachments:
-        if not isinstance(att, dict):
-            continue
-        payload = att.get("payload") if isinstance(att.get("payload"), dict) else {}
-        for key in ("permalink", "link", "url", "external_url"):
-            collect_candidate(payload.get(key))
-
-    return candidates[0] if candidates else ""
-
-
-def normalize_email(value) -> str:
-    return str(value or "").strip().lower()
-
-
-def build_whatsapp_embedded_state(owner_email: str = "") -> str:
-    payload = {
-        "owner_email": normalize_email(owner_email),
-        "nonce": secrets.token_urlsafe(10),
-        "ts": int(time.time()),
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
-
-
-def parse_whatsapp_embedded_state(state: str) -> dict:
-    try:
-        if not state:
-            return {}
-        padded = state + ("=" * (-len(state) % 4))
-        raw = base64.urlsafe_b64decode(padded.encode()).decode()
-        data = json.loads(raw)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def safe_token(token: str) -> str:
-    if not token:
-        return ""
-    token = str(token)
-    if len(token) <= 18:
-        return token[:4] + "..."
-    return token[:10] + "..." + token[-6:]
-
-
-def safe_json(res):
-    if res is None:
-        return {}
-    try:
-        return res.json()
-    except Exception:
-        return {"text": res.text}
-
-
-def remember_webhook_event(event: dict):
-    LAST_WEBHOOK_EVENTS.append({
-        **event,
-        "received_at": datetime.utcnow().isoformat() + "Z",
-    })
-    del LAST_WEBHOOK_EVENTS[:-30]
-
-
-def standard_channel(platform: str, channel: str = "") -> str:
-    platform = normalize_id(platform).lower()
-    channel = normalize_id(channel).lower()
-    if platform == "instagram":
-        return "dm" if channel in ("", "instagram", "instagram_dm") else channel
-    if platform == "whatsapp":
-        return "whatsapp"
-    if platform == "telegram":
-        if channel in ("private", "telegram_bot", "telegram_bot_dm"):
-            return "telegram_bot_private"
-        if channel in ("user", "telegram_user"):
-            return "telegram_user_private"
-        return channel or "telegram_bot_private"
-    return channel or platform
-
-
-def conversation_scope(platform: str, channel: str, customer_id: str, chat_id: str = "") -> str:
-    """
-    Stable conversation identity:
-    - Telegram group/supergroup chats are scoped by chat_id (single window per group)
-    - Other chats remain scoped by customer_id
-    """
-    platform = normalize_id(platform).lower()
-    channel = standard_channel(platform, channel)
-    customer_id = normalize_id(customer_id)
-    chat_id = normalize_id(chat_id)
-
-    if platform == "telegram":
-        if channel in ("telegram_bot_group", "telegram_chat"):
-            return chat_id or customer_id
-        return customer_id or chat_id
-
-    return customer_id
-
-
-def extract_instagram_comment_post_id(row: dict) -> str:
-    row = row or {}
-    raw = row.get("raw_payload") or {}
-    media = raw.get("media") if isinstance(raw, dict) else {}
-    direct_media = row.get("media") if isinstance(row, dict) else {}
-    return normalize_id(
-        row.get("post_id")
-        or row.get("media_id")
-        or (raw.get("post_id") if isinstance(raw, dict) else "")
-        or (raw.get("media_id") if isinstance(raw, dict) else "")
-        or (media or {}).get("id")
-        or (direct_media or {}).get("id")
-    )
-
-
-def fetch_instagram_media_info(access_token: str, post_id: str, business: dict = None) -> dict:
-    post_id = normalize_id(post_id)
-    if not access_token or not post_id:
-        return {}
-    fields = "id,media_type,media_url,thumbnail_url,permalink"
-    oauth_provider = (business or {}).get("oauth_provider", "")
-    urls = [f"{GRAPH_FACEBOOK}/{post_id}"] if oauth_provider == "facebook_page" else [f"{GRAPH_INSTAGRAM}/{post_id}", f"{GRAPH_FACEBOOK}/{post_id}"]
-    for url in urls:
-        try:
-            res = requests.get(url, params={"access_token": access_token, "fields": fields}, timeout=20)
-            body = safe_json(res)
-            if not res.ok:
-                continue
-            return {
-                "post_permalink": body.get("permalink") or f"https://www.instagram.com/p/{post_id}/",
-                "post_image_url": body.get("media_url") or body.get("thumbnail_url") or "",
-                "post_media_type": normalize_id(body.get("media_type")).lower(),
-            }
-        except Exception:
-            continue
-    return {"post_permalink": f"https://www.instagram.com/p/{post_id}/", "post_image_url": "", "post_media_type": ""}
-
-
-def encode_comment_scope(customer_id: str, post_id: str) -> str:
-    """
-    Canonical Instagram comment-thread scope.
-    New format is post-based to keep one thread per post:
-      post__<post_id>
-    If post_id is unavailable, fall back to customer scope for safety.
-    """
-    customer_id = normalize_id(customer_id)
-    post_id = normalize_id(post_id)
-    if post_id:
-        return f"post__{post_id}"
-    return customer_id
-
-
-def decode_comment_scope(scope: str) -> tuple[str, str]:
-    """
-    Return (customer_id, post_id).
-    Supports:
-    - New format: post__<post_id>
-    - Legacy format: <customer_id>__post__<post_id>
-    - Fallback: <customer_id>
-    """
-    scope = normalize_id(scope)
-    if scope.startswith("post__"):
-        return "", normalize_id(scope[6:])
-    if "__post__" not in scope:
-        return scope, ""
-    customer_id, post_id = scope.split("__post__", 1)
-    return normalize_id(customer_id), normalize_id(post_id)
-
-
-def is_own_instagram_comment_actor(business: dict, entry_id: str, commenter_id: str, commenter_username: str = "") -> bool:
-    """
-    Ignore comment events authored by our own Instagram business account/page.
-    These webhook echoes were creating duplicate comment threads.
-    """
-    entry_id = normalize_id(entry_id)
-    commenter_id = normalize_id(commenter_id)
-    commenter_username = normalize_id(commenter_username).lower()
-
-    own_ids = {
-        normalize_id((business or {}).get("instagram_business_id")),
-        normalize_id((business or {}).get("facebook_page_id")),
-        entry_id,
-    }
-    own_ids.discard("")
-    if commenter_id and commenter_id in own_ids:
-        return True
-
-    own_usernames = {
-        normalize_id((business or {}).get("instagram_username")).lower(),
-        normalize_id((business or {}).get("business_name")).lower().replace(" ", ""),
-    }
-    own_usernames.discard("")
-    if commenter_username and commenter_username in own_usernames:
-        return True
-
-    return False
-
-
-def normalize_email(value: str) -> str:
-    return str(value or "").strip().lower()
-
-
-def hash_dashboard_password(password: str) -> str:
-    password = str(password or "")
-    if bcrypt:
-        return bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
-    return "sha256$" + hashlib.sha256((password + str(DASHBOARD_SECRET)).encode()).hexdigest()
-
-
-def verify_dashboard_password(password: str, password_hash: str) -> bool:
-    if not password or not password_hash:
-        return False
-    raw_hash = str(password_hash or "")
-    if raw_hash.startswith("$2") and bcrypt:
-        try:
-            return bool(bcrypt.checkpw(str(password).encode(), raw_hash.encode()))
-        except Exception:
-            return False
-    if raw_hash.startswith("sha256$"):
-        expected = "sha256$" + hashlib.sha256((str(password) + str(DASHBOARD_SECRET)).encode()).hexdigest()
-        return hmac.compare_digest(expected, raw_hash)
-    legacy = hashlib.sha256((str(password) + str(DASHBOARD_SECRET)).encode()).hexdigest()
-    return hmac.compare_digest(legacy, raw_hash)
-
-
-AUTH_TOKEN_TTL_SECONDS = int(os.getenv("DASHBOARD_AUTH_TTL_SECONDS", str(60 * 60 * 24 * 30)))
-CONVERSATIONS_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATIONS_CACHE_TTL_SECONDS", "10"))
-_conversations_cache: dict[str, tuple[float, dict]] = {}
-CONVERSATION_MESSAGES_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATION_MESSAGES_CACHE_TTL_SECONDS", "12"))
-_conversation_messages_cache: dict[str, tuple[float, dict]] = {}
-CONVERSATIONS_FAST_LOOKBACK_DAYS = max(7, min(365, int(os.getenv("CONVERSATIONS_FAST_LOOKBACK_DAYS", "120"))))
-CONVERSATIONS_FAST_FETCH_LIMIT = max(80, min(5000, int(os.getenv("CONVERSATIONS_FAST_FETCH_LIMIT", "800"))))
-CONVERSATIONS_MAX_FETCH_ROWS = max(200, min(20000, int(os.getenv("CONVERSATIONS_MAX_FETCH_ROWS", "5000"))))
-CONVERSATIONS_FETCH_BATCH_SIZE = max(100, min(1000, int(os.getenv("CONVERSATIONS_FETCH_BATCH_SIZE", "1000"))))
-BUSINESS_ADMIN_ROLES = {"owner", "admin", "super_admin"}
-
-
-def clear_inbox_caches():
-    _conversations_cache.clear()
-    _conversation_messages_cache.clear()
-
-
-def create_dashboard_auth_token(email: str, is_admin: bool = False, role: str = "") -> str:
-    payload = {
-        "email": normalize_email(email),
-        "is_admin": bool(is_admin),
-        "role": normalize_id(role).lower(),
-        "exp": int(time.time()) + AUTH_TOKEN_TTL_SECONDS,
-    }
-    payload_b64 = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()).decode().rstrip("=")
-    signature = hmac.new(str(DASHBOARD_SECRET).encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
-    return f"{payload_b64}.{signature}"
-
-
-def decode_dashboard_auth_token(token: str) -> Optional[dict]:
-    token = normalize_id(token)
-    if "." not in token:
-        return None
-    payload_b64, signature = token.rsplit(".", 1)
-    expected = hmac.new(str(DASHBOARD_SECRET).encode(), payload_b64.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(signature, expected):
-        return None
-
-    padded = payload_b64 + "=" * (-len(payload_b64) % 4)
-    try:
-        payload = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
-    except Exception:
-        return None
-
-    exp = int(payload.get("exp") or 0)
-    if exp and exp < int(time.time()):
-        return None
-    payload["email"] = normalize_email(payload.get("email", ""))
-    payload["is_admin"] = bool(payload.get("is_admin", False))
-    payload["role"] = normalize_id(payload.get("role", "")).lower()
-    return payload
-
-
-def is_local_dashboard_demo_mode() -> bool:
-    secret = str(DASHBOARD_SECRET or "").strip().lower()
-    supabase_url = str(SUPABASE_URL or "").strip().lower()
-    return secret == "localdev" or "example.supabase.co" in supabase_url
-
-
-def build_local_dashboard_demo_business(email: str = "") -> dict:
-    clean_email = normalize_email(email)
-    return {
-        "id": "localdev-demo-business",
-        "business_name": "Milana Premium",
-        "owner_email": clean_email or "localdev@example.com",
-        "business_type": "fashion",
-        "bot_enabled": True,
-        "auto_reply_dms": True,
-        "auto_reply_comments": True,
-        "language": "ru",
-        "tone": "friendly",
-        "ai_model": "gemini-3-flash-preview",
-    }
-
-
-def build_local_dashboard_demo_stats() -> dict:
-    return {
-        "total_accounts": 1,
-        "active_accounts": 1,
-        "instagram_messages": 0,
-        "telegram_messages": 0,
-        "whatsapp_messages": 0,
-        "conversations": 0,
-        "messages": 0,
-        "needs_reply": 0,
-        "unread": 0,
-    }
-
-
-def list_user_business_ids(email: str) -> list[str]:
-    email = normalize_email(email)
-    if not email:
-        return []
-    rows = (
-        supabase.table("business_users")
-        .select("business_id")
-        .eq("user_email", email)
-        .execute()
-        .data
-        or []
-    )
-    return [normalize_id(row.get("business_id")) for row in rows if normalize_id(row.get("business_id"))]
-
-
-def list_user_business_memberships(email: str) -> list[dict]:
-    email = normalize_email(email)
-    if not email:
-        return []
-    try:
-        rows = (
-            supabase.table("business_users")
-            .select("business_id,role")
-            .eq("user_email", email)
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        return []
-
-    memberships = []
-    for row in rows:
-        business_id = normalize_id(row.get("business_id"))
-        if not business_id:
-            continue
-        memberships.append(
-            {
-                "business_id": business_id,
-                "role": normalize_id(row.get("role") or "operator").lower() or "operator",
-            }
-        )
-    return memberships
-
-
-def pick_user_business_role(email: str, business_id: str = "") -> str:
-    business_id = normalize_id(business_id)
-    memberships = list_user_business_memberships(email)
-    if not memberships:
-        return ""
-    if business_id:
-        for membership in memberships:
-            if normalize_id(membership.get("business_id")) == business_id:
-                return normalize_id(membership.get("role"))
-    for preferred in ("owner", "admin", "operator"):
-        for membership in memberships:
-            if normalize_id(membership.get("role")) == preferred:
-                return preferred
-    return normalize_id(memberships[0].get("role"))
-
-
-def get_user_business_role(email: str, business_id: str = "") -> str:
-    email = normalize_email(email)
-    business_id = normalize_id(business_id)
-    if not email:
-        return ""
-    try:
-        query = supabase.table("business_users").select("role").eq("user_email", email)
-        if business_id:
-            query = query.eq("business_id", business_id)
-        rows = query.limit(1).execute().data or []
-        return normalize_id(rows[0].get("role")) if rows else ""
-    except Exception:
-        return ""
-
-
-def is_super_admin_email(email: str) -> bool:
-    clean = normalize_email(email)
-    if not clean:
-        return False
-    if clean in SUPER_ADMIN_EMAILS:
-        return True
-    return bool(ADMIN_EMAIL and clean == normalize_email(ADMIN_EMAIL))
-
-
-def parse_auth_header(authorization: str) -> str:
-    value = normalize_id(authorization)
-    if value.lower().startswith("bearer "):
-        return normalize_id(value[7:])
-    return ""
-
-
-def resolve_dashboard_access(authorization: str = "", x_dashboard_secret: str = "") -> Optional[dict]:
-    token = parse_auth_header(authorization)
-    if token:
-        payload = decode_dashboard_auth_token(token)
-        if payload:
-            email = normalize_email(payload.get("email"))
-            is_admin = bool(payload.get("is_admin")) and is_super_admin_email(email)
-            token_role = normalize_id(payload.get("role", "")).lower()
-            if is_admin:
-                role = "super_admin"
-                business_ids = []
-            else:
-                memberships = list_user_business_memberships(email)
-                business_ids = [normalize_id(item.get("business_id")) for item in memberships if normalize_id(item.get("business_id"))]
-                # Always prefer current DB membership over stale token/global dashboard role.
-                role = pick_user_business_role(email) or token_role or "operator"
-            return {"email": email, "is_admin": is_admin, "business_ids": business_ids, "role": role or "operator"}
-        # Fallback path for stale/invalid browser token when dashboard secret is valid.
-        if not require_dashboard_secret(x_dashboard_secret):
-            return {"email": "system", "is_admin": True, "business_ids": [], "role": "admin"}
-        return None
-
-    # Backward-compatible admin/system path
-    if not require_dashboard_secret(x_dashboard_secret):
-        return {"email": "system", "is_admin": True, "business_ids": [], "role": "admin"}
-    return None
-
-
-def can_access_business(access: dict, business_id: str) -> bool:
-    if not access:
-        return False
-    if access.get("is_admin"):
-        return True
-    return normalize_id(business_id) in set(access.get("business_ids") or [])
-
-
-def can_manage_business(access: dict, business_id: str = "") -> bool:
-    if not access:
-        return False
-    if access.get("is_admin"):
-        return True
-    business_id = normalize_id(business_id)
-    if business_id and not can_access_business(access, business_id):
-        return False
-    role = normalize_id(get_user_business_role(access.get("email"), business_id) or access.get("role")).lower()
-    return role in {"owner", "admin", "super_admin"}
-
-
-def get_latest_instagram_comment_anchor(business_id: str, commenter_id: str = "", post_id: str = "") -> dict:
-    """
-    Find the most recent inbound customer comment for (business, commenter[, post]).
-    We reply to that comment_id so manual replies stay in the same comment thread.
-    """
-    business_id = normalize_id(business_id)
-    commenter_id = normalize_id(commenter_id)
-    post_id = normalize_id(post_id)
-    if not business_id:
-        return {}
-
-    try:
-        query = (
-            supabase.table("inbox_messages")
-            .select("*")
-            .eq("platform", "instagram")
-            .eq("business_id", business_id)
-            .eq("channel", "instagram_comment")
-            .eq("direction", "inbound")
-        )
-        if commenter_id:
-            query = query.eq("customer_id", commenter_id)
-        rows = query.order("created_at", desc=True).limit(120).execute().data or []
-    except Exception:
-        return {}
-
-    if not rows:
-        return {}
-
-    if not post_id:
-        return rows[0]
-
-    for row in rows:
-        if extract_instagram_comment_post_id(row) == post_id:
-            return row
-    return {}
-
-
-def get_instagram_comment_anchor_by_comment_id(business_id: str, comment_id: str, post_id: str = "") -> dict:
-    business_id = normalize_id(business_id)
-    comment_id = normalize_id(comment_id)
-    post_id = normalize_id(post_id)
-    if not business_id or not comment_id:
-        return {}
-
-    rows = []
-    try:
-        rows = (
-            supabase.table("inbox_messages")
-            .select("*")
-            .eq("platform", "instagram")
-            .eq("business_id", business_id)
-            .eq("channel", "instagram_comment")
-            .eq("direction", "inbound")
-            .eq("external_message_id", comment_id)
-            .order("created_at", desc=True)
-            .limit(10)
-            .execute()
-            .data
-            or []
-        )
-    except Exception:
-        rows = []
-
-    # Fallback path for legacy rows where external_message_id was not stored.
-    if not rows:
-        try:
-            recent = (
-                supabase.table("inbox_messages")
-                .select("*")
-                .eq("platform", "instagram")
-                .eq("business_id", business_id)
-                .eq("channel", "instagram_comment")
-                .eq("direction", "inbound")
-                .order("created_at", desc=True)
-                .limit(300)
-                .execute()
-                .data
-                or []
-            )
-            rows = [
-                r for r in recent
-                if normalize_id((r.get("raw_payload") or {}).get("id") or (r.get("raw_payload") or {}).get("comment_id")) == comment_id
-            ]
-        except Exception:
-            rows = []
-
-    if not rows:
-        return {}
-    if not post_id:
-        return rows[0]
-    for row in rows:
-        if extract_instagram_comment_post_id(row) == post_id:
-            return row
-    return {}
-
-
-def instagram_reply_window_closed(result: dict) -> bool:
-    error = result.get("error") if isinstance(result, dict) else {}
-    if not isinstance(error, dict):
-        error = {}
-
-    code = error.get("code") or result.get("code") or result.get("error_code")
-    subcode = (
-        error.get("error_subcode")
-        or error.get("subcode")
-        or result.get("error_subcode")
-        or result.get("subcode")
-    )
-
-    return str(code) == "10" and str(subcode) == "2534022"
-
-
-def instagram_human_agent_review_required(result: dict) -> bool:
-    error = result.get("error") if isinstance(result, dict) else {}
-    if not isinstance(error, dict):
-        error = {}
-    message = normalize_id(error.get("message") or result.get("message"))
-    return "human agent" in message.lower() and "review" in message.lower()
-
-
-def send_failure_response(result: dict, default_message: str = "Failed to send message"):
-    message = default_message
-    if instagram_reply_window_closed(result or {}):
-        message = "Instagram reply window is closed. Ask the customer to send a new DM first."
-    elif instagram_human_agent_review_required(result or {}):
-        message = "Instagram Human Agent is not approved for this Meta app. Ask the customer to send a new DM first."
-
-    return JSONResponse(
-        {"status": "error", "message": message, "details": result or {}},
-        status_code=400,
-    )
-
-
-def unsupported_message_mutation_response(platform: str, action: str):
-    platform_label = (platform or "this platform").title()
-    return JSONResponse(
-        {
-            "status": "error",
-            "message": f"{platform_label} does not support dashboard {action} for already-delivered messages through the connected API.",
-        },
-        status_code=400,
-    )
-
-
-def telegram_bot_request(business: dict, method: str, payload: dict):
-    token = get_telegram_bot_token(business)
-    if not token:
-        return None
-    return requests.post(
-        f"https://api.telegram.org/bot{token}/{method}",
-        json=payload,
-        timeout=30,
-    )
-
-
-def edit_telegram_bot_message(chat_id: str, message_id: str, text: str, business: dict):
-    return telegram_bot_request(
-        business,
-        "editMessageText",
-        {"chat_id": chat_id, "message_id": int(message_id), "text": text[:4096]},
-    )
-
-
-def delete_telegram_bot_message(chat_id: str, message_id: str, business: dict):
-    return telegram_bot_request(
-        business,
-        "deleteMessage",
-        {"chat_id": chat_id, "message_id": int(message_id)},
-    )
-
-
-async def edit_telegram_user_message_safe(customer_id: str, message_id: str, text: str):
-    handler = getattr(telegram_bot_module, "edit_telegram_user_message", None)
-    if not handler:
-        return False, {"error": "Telegram user-account edit support is not deployed yet. Deploy the updated telegram_bot.py too."}
-    return await handler(customer_id, message_id, text)
-
-
-async def delete_telegram_user_message_safe(customer_id: str, message_id: str):
-    handler = getattr(telegram_bot_module, "delete_telegram_user_message", None)
-    if not handler:
-        return False, {"error": "Telegram user-account delete support is not deployed yet. Deploy the updated telegram_bot.py too."}
-    return await handler(customer_id, message_id)
-
-
-def get_inbox_message_for_dashboard(message_id: str, access: dict):
-    message_id = normalize_id(message_id)
-    if not message_id:
-        return None, JSONResponse({"error": "Missing message_id"}, status_code=400)
-
-    rows = (
-        supabase.table("inbox_messages")
-        .select("*")
-        .eq("id", message_id)
-        .limit(1)
-        .execute()
-        .data
-        or []
-    )
-    if not rows:
-        return None, JSONResponse({"error": "Message not found"}, status_code=404)
-
-    row = rows[0]
-    if not can_access_business(access, normalize_id(row.get("business_id"))):
-        return None, JSONResponse({"error": "Forbidden"}, status_code=403)
-
-    if normalize_id(row.get("direction")).lower() != "outbound":
-        return None, JSONResponse({"error": "Only outbound dashboard messages can be changed"}, status_code=400)
-
-    return row, None
-
-
-def message_target_chat_id(row: dict):
-    payload = row.get("raw_payload") or {}
-    if not isinstance(payload, dict):
-        payload = {}
-    return normalize_id(
-        row.get("chat_id")
-        or payload.get("chat_id")
-        or payload.get("customer_id")
-        or row.get("customer_id")
-    )
-
-
-async def mutate_delivered_telegram_message(row: dict, business: dict, action: str, text: str = ""):
-    channel = standard_channel("telegram", row.get("channel"))
-    target_id = message_target_chat_id(row)
-    message_id = normalize_id(row.get("external_message_id"))
-
-    if not target_id or not message_id:
-        return False, {"error": "Telegram message id is missing. This older row cannot be changed remotely."}
-
-    try:
-        if channel == "telegram_user_private":
-            if action == "edit":
-                return await edit_telegram_user_message_safe(target_id, message_id, text)
-            return await delete_telegram_user_message_safe(target_id, message_id)
-
-        if action == "edit":
-            res = edit_telegram_bot_message(target_id, message_id, text, business)
-        else:
-            res = delete_telegram_bot_message(target_id, message_id, business)
-
-        if not res:
-            return False, {"error": "Telegram bot token is not configured"}
-
-        data = safe_json(res)
-        return bool(res.ok and data.get("ok", True)), data
-    except Exception as exc:
-        return False, {"error": str(exc)}
-
-
-def decode_upload_data(file_data: str, max_bytes: int = 10 * 1024 * 1024):
-    raw = str(file_data or "")
-
-    if "," in raw and raw.startswith("data:"):
-        raw = raw.split(",", 1)[1]
-
-    try:
-        decoded = base64.b64decode(raw, validate=True)
-    except Exception:
-        raise ValueError("Invalid base64 file data")
-
-    if not decoded:
-        raise ValueError("Empty file upload")
-
-    if len(decoded) > max_bytes:
-        raise ValueError("File is too large. Maximum upload size is 10 MB.")
-
-    return decoded
-
-
-def transcode_to_telegram_voice(file_bytes: bytes, filename: str = "", mime_type: str = ""):
-    """
-    Telegram native voice notes should be OGG/Opus. Browser recordings usually
-    arrive as WebM, which Telegram clients display as a downloadable file.
-    """
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg is required to convert browser recordings into Telegram voice notes")
-
-    suffix = ".webm"
-    if "." in str(filename or ""):
-        suffix = "." + str(filename).rsplit(".", 1)[-1].lower()
-
-    input_path = ""
-    output_path = ""
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as source:
-            source.write(file_bytes)
-            input_path = source.name
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as target:
-            output_path = target.name
-
-        subprocess.run(
-            [
-                ffmpeg,
-                "-y",
-                "-i",
-                input_path,
-                "-vn",
-                "-ac",
-                "1",
-                "-ar",
-                "48000",
-                "-c:a",
-                "libopus",
-                "-b:a",
-                "32k",
-                "-application",
-                "voip",
-                "-f",
-                "ogg",
-                output_path,
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=45,
-        )
-
-        with open(output_path, "rb") as converted:
-            return converted.read(), "voice.ogg", "audio/ogg"
-
-    finally:
-        for path in [input_path, output_path]:
-            if path:
-                try:
-                    os.unlink(path)
-                except Exception:
-                    pass
-
-
-def transcribe_audio_bytes(file_bytes: bytes, filename: str = "", mime_type: str = "") -> str:
-    if not OPENAI_API_KEY or not file_bytes:
-        return ""
-
-    safe_name = normalize_id(filename) or "audio.ogg"
-    guessed_mime = normalize_id(mime_type) or mimetypes.guess_type(safe_name)[0] or "audio/ogg"
-
-    try:
-        response = requests.post(
-            "https://api.openai.com/v1/audio/transcriptions",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
-            data={"model": OPENAI_TRANSCRIBE_MODEL},
-            files={"file": (safe_name, file_bytes, guessed_mime)},
-            timeout=OPENAI_TRANSCRIBE_TIMEOUT_SECONDS,
-        )
-        log("OpenAI audio transcription", {"status": response.status_code, "body": response.text[:500]})
-        if not response.ok:
-            return ""
-        payload = response.json() if response.content else {}
-        return normalize_id(payload.get("text"))
-    except Exception as exc:
-        log("OpenAI audio transcription failed", str(exc))
-        return ""
-
-
-def transcribe_media_url_for_voice(media_url: str, access_token: str = "") -> str:
-    media_url = normalize_id(media_url)
-    if not media_url:
-        return ""
-    try:
-        media_bytes, filename, mime_type = download_media_for_matcher(media_url, access_token=access_token)
-        return transcribe_audio_bytes(media_bytes, filename=filename, mime_type=mime_type)
-    except Exception as exc:
-        log("Voice media transcription failed", {"media_url": media_url[:200], "error": str(exc)})
-        return ""
-
-
-def cleanup_dedup_cache():
-    now = time.time()
-    for cache in (processed_message_ids, processed_comment_ids):
-        expired = [k for k, v in cache.items() if now - v > DEDUP_TTL_SECONDS]
-        for key in expired:
-            cache.pop(key, None)
-
-
-def is_processed(cache: dict, event_id: str) -> bool:
-    if not event_id:
-        return False
-    cleanup_dedup_cache()
-    return event_id in cache
-
-
-def mark_processed(cache: dict, event_id: str):
-    if event_id:
-        cleanup_dedup_cache()
-        cache[event_id] = time.time()
-
-
-def already_processed(cache: dict, event_id: str) -> bool:
-    if not event_id:
-        return False
-    cleanup_dedup_cache()
-    if event_id in cache:
-        return True
-    cache[event_id] = time.time()
-    return False
-
-
-def require_dashboard_secret(x_dashboard_secret: str):
-    return bool(DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET)
-
-
-def require_dashboard_media_secret(token: str = "", x_dashboard_secret: str = ""):
-    return bool(DASHBOARD_SECRET and token != DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET)
-
-
-# ============================================================================
-# HELPERS - REACT UI SPECIFIC
-# ============================================================================
-def generate_avatar(name: str) -> dict:
-    """Generate avatar with initials and color for React UI"""
-    clean_name = str(name or "").strip()
-    parts = clean_name.split()
-    if len(parts) >= 2:
-        initials = (parts[0][0] + parts[1][0]).upper()
-    else:
-        initials = (parts[0][:2] if parts[0] else "??").upper()
-
-    hash_val = sum(ord(c) for c in clean_name or initials) % 8
-    colors = [
-        "linear-gradient(135deg,#e8a07a,#c75d3f)",
-        "linear-gradient(135deg,#7fa8d1,#3a6aa3)",
-        "linear-gradient(135deg,#d6b48a,#a07a4a)",
-        "linear-gradient(135deg,#d97b8a,#9b3f5a)",
-        "linear-gradient(135deg,#a8b899,#5d7548)",
-        "linear-gradient(135deg,#cfa8d6,#7e4f9b)",
-        "linear-gradient(135deg,#e3c87a,#a07e2a)",
-        "linear-gradient(135deg,#7a8aa8,#3f4f6f)",
-    ]
-
-    return {
-        "initials": initials,
-        "color": colors[hash_val]
-    }
-
-
-def format_time(timestamp: str) -> str:
-    """Format ISO timestamp to relative time"""
-    try:
-        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-        now = datetime.now(dt.tzinfo)
-        delta = now - dt
-        seconds = delta.total_seconds()
-
-        if seconds < 60:
-            return "just now"
-        elif seconds < 3600:
-            minutes = int(seconds // 60)
-            return f"{minutes} min" if minutes != 1 else "1 min"
-        elif seconds < 86400:
-            hours = int(seconds // 3600)
-            return f"{hours} hr" if hours != 1 else "1 hr"
-        elif seconds < 604800:
-            days = int(seconds // 86400)
-            return "yesterday" if days == 1 else f"{days} days"
-        else:
-            weeks = int(seconds // 604800)
-            return f"{weeks} weeks" if weeks != 1 else "1 week"
-    except Exception:
-        return "unknown"
-
-
-def extract_date(timestamp: str) -> str:
-    """Extract date like 'March 2025' from ISO timestamp"""
-    try:
-        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-        return dt.strftime('%B %Y')
-    except Exception:
-        return "unknown"
-
-
-def telegram_user_media_proxy_url(customer_id: str, message_id: str) -> str:
-    customer_id = normalize_id(customer_id)
-    message_id = normalize_id(message_id)
-    if not customer_id or not message_id:
-        return ""
-
-    base_root = (PUBLIC_BASE_URL or "").rstrip("/")
-    base = f"{base_root}/api/telegram-user-media/{customer_id}/{message_id}" if base_root else f"/api/telegram-user-media/{customer_id}/{message_id}"
-    if DASHBOARD_SECRET:
-        return f"{base}?token={DASHBOARD_SECRET}"
-    return base
-
-
-def telegram_bot_media_proxy_url(file_id: str) -> str:
-    file_id = normalize_id(file_id)
-    if not file_id:
-        return ""
-    base_root = (PUBLIC_BASE_URL or "").rstrip("/")
-    base = f"{base_root}/api/telegram-bot-media/{file_id}" if base_root else f"/api/telegram-bot-media/{file_id}"
-    if DASHBOARD_SECRET:
-        return f"{base}?token={DASHBOARD_SECRET}"
-    return base
-
-
-def transform_message_to_react(row: dict) -> dict:
-    """Transform database message row to React UI format"""
-    message = {
-        'id': row.get('id', ''),
-        'side': 'out' if row['direction'] == 'outbound' else 'in',
-        'from': 'ai' if row['role'] == 'assistant' else 'user',
-        'time': format_time(row.get('created_at', '')),
-    }
-
-    media_type = row.get('media_type')
-    content = row.get('content', '')
-    platform = normalize_id(row.get("platform")).lower()
-    channel = standard_channel(platform, row.get("channel", ""))
-    customer_id = normalize_id(row.get("customer_id"))
-    external_message_id = normalize_id(row.get("external_message_id"))
-    media_file_id = normalize_id(row.get("media_file_id"))
-    media_url = row.get("media_url") or ""
-
-    # Telegram user client media is often stored without direct media_url.
-    # Build proxy URL from customer_id + external_message_id so browser can stream it.
-    if (
-        not media_url
-        and platform == "telegram"
-        and channel == "telegram_user_private"
-        and media_type in ("photo", "video", "voice", "audio", "file")
-        and customer_id
-        and external_message_id
-    ):
-        media_url = telegram_user_media_proxy_url(customer_id, external_message_id)
-
-    # Fallback for legacy Telegram rows where external_message_id is missing,
-    # but file_id was stored (common for bot API updates and some migrations).
-    if not media_url and platform == "telegram" and media_file_id:
-        media_url = telegram_bot_media_proxy_url(media_file_id)
-
-    if media_type:
-        message['type'] = 'media'
-        message['label'] = media_type
-        message['mediaCaption'] = content
-        message['mediaUrl'] = media_url
-        # Keep raw identity fields so frontend can reconstruct fallback media URLs when needed.
-        message['media_type'] = media_type
-        message['media_url'] = media_url
-        message['platform'] = platform
-        message['channel'] = channel
-        message['customer_id'] = customer_id
-        message['external_message_id'] = external_message_id
-        message['media_file_id'] = media_file_id
-    else:
-        message['type'] = 'text'
-        message['text'] = content
-
-    raw_payload = row.get("raw_payload") or {}
-    # Keep identifiers on every row (including plain text) so manual per-comment reply can target correctly.
-    message['external_message_id'] = external_message_id
-    message['comment_id'] = normalize_id(raw_payload.get("comment_id") or raw_payload.get("id") or external_message_id)
-    message['raw_payload'] = raw_payload
-    message["post_id"] = extract_instagram_comment_post_id(row)
-    message["post_permalink"] = row.get("post_permalink") or raw_payload.get("post_permalink") or ""
-    message["post_image_url"] = row.get("post_image_url") or raw_payload.get("post_image_url") or ""
-    message["post_media_type"] = normalize_id(row.get("post_media_type") or raw_payload.get("post_media_type")).lower()
-
-    return message
-
-
-def _looks_like_numeric_id(value: str) -> bool:
-    text = normalize_id(value)
-    return bool(text and re.fullmatch(r"\d{6,}", text))
-
-
-def _looks_like_generated_instagram_name(value: str) -> bool:
-    text = normalize_id(value).lower()
-    return bool(
-        not text
-        or _looks_like_numeric_id(text)
-        or re.fullmatch(r"instagram (user|client|ig user)\s+\d{2,}", text)
-        or re.fullmatch(r"ig user\s+\d{2,}", text)
-    )
-
-
-def _extract_username_candidates(raw_payload: dict) -> list[str]:
-    raw = raw_payload or {}
-    candidates = []
-    for key in ("username", "user_name", "from_username", "customer_username"):
-        value = normalize_id(raw.get(key))
-        if value:
-            candidates.append(value)
-
-    for obj_key in ("from", "sender", "user", "contact", "profile"):
-        obj = raw.get(obj_key)
-        if isinstance(obj, dict):
-            for key in ("username", "user_name", "name"):
-                value = normalize_id(obj.get(key))
-                if value:
-                    candidates.append(value)
-    return [item for item in candidates if item]
-
-
-def resolve_customer_label(rows: list, platform: str, fallback_scope: str) -> tuple[str, str]:
-    """
-    Returns (display_name, handle_value_without_at).
-    Prefers real usernames/names found in payloads and historical customer_name,
-    falls back to scoped ids only when nothing human-readable is available.
-    """
-    best_name = ""
-    best_username = ""
-
-    for row in reversed(rows or []):
-        customer_name = normalize_id(row.get("customer_name"))
-        if customer_name and not _looks_like_numeric_id(customer_name):
-            if not best_name:
-                best_name = customer_name
-            if platform == "instagram" and re.fullmatch(r"[A-Za-z0-9._]{2,64}", customer_name):
-                best_username = best_username or customer_name
-
-        raw = row.get("raw_payload") if isinstance(row, dict) else {}
-        for candidate in _extract_username_candidates(raw if isinstance(raw, dict) else {}):
-            if platform == "instagram":
-                if re.fullmatch(r"[A-Za-z0-9._]{2,64}", candidate):
-                    best_username = best_username or candidate
-                    if not best_name:
-                        best_name = candidate
-            elif not best_name:
-                best_name = candidate
-
-        if best_name and (best_username or platform != "instagram"):
-            break
-
-    if not best_name:
-        if platform == "instagram":
-            best_name = f"Instagram user {fallback_scope[-4:]}"
-        elif platform == "telegram":
-            best_name = f"Telegram user {fallback_scope[-4:]}"
-        elif platform == "whatsapp":
-            best_name = f"WhatsApp user {fallback_scope[-4:]}"
-        else:
-            best_name = f"Customer {fallback_scope[-4:]}"
-
-    handle_value = best_username or fallback_scope
-    return best_name, handle_value
-
-
-def fetch_instagram_customer_profile(access_token: str, customer_id: str) -> dict:
-    access_token = normalize_id(access_token)
-    customer_id = normalize_id(customer_id)
-    if not access_token or not customer_id:
-        return {}
-
-    cache_key = f"{customer_id}:{hashlib.sha1(access_token.encode()).hexdigest()[:10]}"
-    now = time.time()
-    cached = INSTAGRAM_CUSTOMER_PROFILE_CACHE.get(cache_key)
-    if cached and (now - cached[0]) < INSTAGRAM_CUSTOMER_PROFILE_CACHE_TTL_SECONDS:
-        return cached[1] or {}
-
-    profile = {}
-    for base_url in (GRAPH_FACEBOOK, GRAPH_INSTAGRAM):
-        try:
-            res = requests.get(
-                f"{base_url}/{customer_id}",
-                params={"fields": "id,name,username,profile_pic", "access_token": access_token},
-                timeout=8,
-            )
-            body = safe_json(res)
-            if res.ok and isinstance(body, dict):
-                profile = {
-                    "id": normalize_id(body.get("id") or customer_id),
-                    "name": normalize_id(body.get("name")),
-                    "username": normalize_id(body.get("username")),
-                    "profile_pic": normalize_id(body.get("profile_pic")),
-                }
-                if profile.get("name") or profile.get("username"):
-                    break
-        except Exception:
-            continue
-
-    INSTAGRAM_CUSTOMER_PROFILE_CACHE[cache_key] = (now, profile)
-    if len(INSTAGRAM_CUSTOMER_PROFILE_CACHE) > 1000:
-        for key in sorted(INSTAGRAM_CUSTOMER_PROFILE_CACHE, key=lambda item: INSTAGRAM_CUSTOMER_PROFILE_CACHE[item][0])[:250]:
-            INSTAGRAM_CUSTOMER_PROFILE_CACHE.pop(key, None)
-    return profile
-
-
-def display_name_from_instagram_profile(profile: dict, fallback: str = "") -> str:
-    if not isinstance(profile, dict):
-        return fallback
-    username = normalize_id(profile.get("username"))
-    name = normalize_id(profile.get("name"))
-    if username:
-        return username
-    if name and not _looks_like_numeric_id(name):
-        return name
-    return fallback
-
-
-def backfill_instagram_customer_name(business_id: str, customer_id: str, profile_name: str):
-    profile_name = normalize_id(profile_name)
-    if not business_id or not customer_id or not profile_name:
-        return
-    try:
-        supabase.table("inbox_messages").update({"customer_name": profile_name}).eq("business_id", business_id).eq("platform", "instagram").eq("customer_id", str(customer_id)).execute()
-        clear_inbox_caches()
-    except Exception:
-        pass
-
-
-def transform_conversation_to_react(key: str, rows: list, business: dict = None, ai_lookup_enabled: bool = True) -> dict:
-    """Transform database rows to React conversation format"""
-    if not rows:
-        return None
-
-    latest_row = rows[-1]
-    parts = key.split("::")
-    if len(parts) != 4:
-        return None
-
-    platform, business_id, channel, customer_id = parts
-    comment_customer_id, comment_post_id = decode_comment_scope(customer_id) if (
-        platform == "instagram" and "comment" in normalize_id(channel).lower()
-    ) else (customer_id, "")
-    latest_chat_id = normalize_id(latest_row.get("chat_id"))
-    if platform == "telegram" and channel in ("telegram_bot_group", "telegram_chat"):
-        effective_scope = latest_chat_id
-    elif platform == "instagram" and "comment" in normalize_id(channel).lower():
-        effective_scope = comment_post_id or comment_customer_id
-    else:
-        effective_scope = comment_customer_id
-
-    customer_name, handle_value = resolve_customer_label(rows, platform, effective_scope)
-    if (
-        platform == "instagram"
-        and "comment" not in normalize_id(channel).lower()
-        and business
-        and _looks_like_generated_instagram_name(customer_name)
-    ):
-        profile = fetch_instagram_customer_profile(get_business_access_token(business), effective_scope)
-        profile_name = display_name_from_instagram_profile(profile)
-        if profile_name:
-            customer_name = profile_name
-            handle_value = normalize_id(profile.get("username")) or handle_value
-            backfill_instagram_customer_name(business_id, effective_scope, profile_name)
-    ai_scope = encode_comment_scope("", comment_post_id) if (platform == "instagram" and "comment" in normalize_id(channel).lower() and comment_post_id) else effective_scope
-    # Fast conversation list path should avoid per-conversation DB lookups.
-    ai_enabled = is_chat_ai_enabled(platform, channel, ai_scope, business_id) if ai_lookup_enabled else True
-
-    return {
-        'id': key,
-        'name': customer_name,
-        'handle': f'@{handle_value}',
-        'platform': platform,
-        'isCommentThread': platform == "instagram" and "comment" in normalize_id(channel).lower(),
-        'postId': comment_post_id or extract_instagram_comment_post_id(latest_row),
-        'postPermalink': (latest_row.get("raw_payload") or {}).get("post_permalink", ""),
-        'postImageUrl': (latest_row.get("raw_payload") or {}).get("post_image_url", ""),
-        'postMediaType': normalize_id((latest_row.get("raw_payload") or {}).get("post_media_type", "")).lower(),
-        'avatar': generate_avatar(customer_name),
-        'lang': business.get('language', 'uz') if business else 'uz',
-        'online': False,
-        'needsHuman': latest_row.get('needs_human', False),
-        'aiOn': ai_enabled,
-        'unread': sum(1 for r in rows if r.get('direction') == 'inbound' and not r.get('is_read', False)),
-        'lastTime': format_time(latest_row.get('created_at', '')),
-        'lastFromMe': latest_row.get('direction') == 'outbound',
-        'preview': latest_row.get('content', '')[:60],
-        'lastAt': extract_date(latest_row.get('created_at', '')),
-        'tags': ['Customer'],
-        'customerSince': extract_date(rows[0].get('created_at', '')),
-        'location': 'Unknown',
-        'summary': f"Total messages: {len(rows)}",
-        'kpis': {
-            'orders': 0,
-            'ltv': '0',
-            'last': '—',
-            'conv': '—'
-        },
-        'orders': [],
-        'suggestions': [
-            'Salom! Qanday yordam kerak?',
-            'Katalogni ko\'ring',
-            'Qanday mahsulot xohlaysiz?',
-        ],
-    }
-
-
-# ============================================================================
-# DATABASE
-# ============================================================================
-def get_all_businesses():
-    result = supabase.table("businesses").select("*").order("created_at", desc=True).execute()
-    return result.data or []
-
-
-def get_business_by_id(business_id: str):
-    business_id = normalize_id(business_id)
-    if not business_id:
-        return None
-    result = supabase.table("businesses").select("*").eq("id", business_id).limit(1).execute()
-    return result.data[0] if result.data else None
-
-
-def get_business_channel(platform: str, external_account_id: str = "", only_active: bool = True):
-    platform = normalize_id(platform).lower()
-    external_account_id = normalize_id(external_account_id)
-    if not platform or not external_account_id:
-        return None
-    try:
-        query = (
-            supabase.table("business_channels")
-            .select("*")
-            .eq("platform", platform)
-            .eq("external_account_id", external_account_id)
-        )
-        if only_active:
-            query = query.eq("is_active", True)
-        result = query.limit(1).execute()
-        return result.data[0] if result.data else None
-    except Exception:
-        return None
-
-
-def get_business(instagram_business_id: str):
-    instagram_business_id = normalize_id(instagram_business_id)
-    if not instagram_business_id:
-        return None
-    channel = get_business_channel("instagram", instagram_business_id)
-    if channel:
-        row = get_business_by_id(channel.get("business_id"))
-        if row:
-            return row
-    result = supabase.table("businesses").select("*").eq("instagram_business_id", instagram_business_id).limit(
-        1).execute()
-    return result.data[0] if result.data else None
-
-
-def get_business_by_page_id(page_id: str):
-    page_id = normalize_id(page_id)
-    if not page_id:
-        return None
-    channel = get_business_channel("instagram", page_id)
-    if channel:
-        row = get_business_by_id(channel.get("business_id"))
-        if row:
-            return row
-    result = supabase.table("businesses").select("*").eq("facebook_page_id", page_id).limit(1).execute()
-    return result.data[0] if result.data else None
-
-
-def get_business_by_whatsapp_phone_number_id(phone_number_id: str):
-    phone_number_id = normalize_id(phone_number_id)
-    if not phone_number_id:
-        return None
-    try:
-        channel = get_business_channel("whatsapp", phone_number_id)
-        if channel:
-            row = get_business_by_id(channel.get("business_id"))
-            if row:
-                return row
-        result = (
-            supabase.table("businesses")
-            .select("*")
-            .eq("whatsapp_phone_number_id", phone_number_id)
-            .limit(1)
-            .execute()
-        )
-        return result.data[0] if result.data else None
-    except Exception:
-        return None
-
-
-def get_active_instagram_direct_business():
-    try:
-        result = (
-            supabase.table("businesses")
-            .select("*")
-            .eq("oauth_provider", "instagram_direct")
-            .eq("bot_enabled", True)
-            .limit(1)
-            .execute()
-        )
-        return result.data[0] if result.data else None
-    except Exception:
-        return None
-
-
-def get_active_whatsapp_business():
-    try:
-        if WHATSAPP_PHONE_NUMBER_ID:
-            row = get_business_by_whatsapp_phone_number_id(WHATSAPP_PHONE_NUMBER_ID)
-            if row:
-                return row
-
-        result = (
-            supabase.table("businesses")
-            .select("*")
-            .eq("bot_enabled", True)
-            .limit(1)
-            .execute()
-        )
-        return result.data[0] if result.data else None
-    except Exception:
-        return None
-
-
-def find_business_for_webhook(entry_id: str, recipient_id: str = ""):
-    entry_id = normalize_id(entry_id)
-    recipient_id = normalize_id(recipient_id)
-
-    for lookup_id in [entry_id, recipient_id]:
-        channel = get_business_channel("instagram", lookup_id)
-        if channel:
-            business = get_business_by_id(channel.get("business_id"))
-            if business:
-                return business
-
-    for lookup_id in [entry_id, recipient_id]:
-        business = get_business(lookup_id)
-        if business:
-            return business
-
-    for lookup_id in [entry_id, recipient_id]:
-        business = get_business_by_page_id(lookup_id)
-        if business:
-            return business
-
-    return get_active_instagram_direct_business()
-
-
-def update_business(business_id, data):
-    return supabase.table("businesses").update(data).eq("id", business_id).execute()
-
-
-ALLOWED_BUSINESS_SETTINGS = {
-    "business_name",
-    "business_type",
-    "language",
-    "tone",
-    "bot_enabled",
-    "auto_reply_dms",
-    "auto_reply_comments",
-    "products",
-    "prices",
-    "delivery_info",
-    "working_hours",
-    "faq",
-    "catalog_link",
-    "sales_phone",
-    "knowledge",
-    "telegram_single",
-    "telegram_package",
-    "telegram_bag",
-    "whatsapp_business_account_id",
-    "whatsapp_phone_number_id",
-    "whatsapp_access_token",
-    "ai_model",
-    "ai_temperature",
-    "ai_max_tokens",
-    "ai_reply_rules",
-    "mistral_api_key",
-    "openai_api_key",
-    "gemini_api_key",
-    "anthropic_api_key",
-    "ai_provider",
-    "memory_enabled",
-    "memory_limit",
-    "dashboard_language",
-    "bot_language_mode",
-    "automation_mode",
-    "human_takeover_enabled",
-    "whatsapp_enabled",
-    "telegram_bot_enabled",
-    "telegram_chat_id",
-    "telegram_notes",
-    "analytics_enabled",
+const RAW_API_BASE = (
+  urlParams.get('api') ||
+  window.localStorage.getItem('instaagent_api_base') ||
+  ENV_API_BASE ||
+  window.INSTAAGENT_API_BASE ||
+  (IS_LOCALHOST ? 'http://localhost:8000' : '')
+);
+let API_BASE = sanitizeApiBase(RAW_API_BASE);
+if (!API_BASE) {
+  API_BASE = sanitizeApiBase(ENV_API_BASE) || sanitizeApiBase(window.INSTAAGENT_API_BASE) || '';
 }
 
-
-def clean_business_settings(settings: dict) -> dict:
-    cleaned = {}
-    for key, value in (settings or {}).items():
-        if key not in ALLOWED_BUSINESS_SETTINGS:
-            continue
-
-        if key == "ai_temperature":
-            try:
-                cleaned[key] = max(0.0, min(1.0, float(value)))
-            except Exception:
-                continue
-        elif key == "ai_max_tokens":
-            try:
-                cleaned[key] = max(50, min(1000, int(value)))
-            except Exception:
-                continue
-        elif key in {"bot_enabled", "auto_reply_dms", "auto_reply_comments"}:
-            cleaned[key] = bool(value)
-        elif key == "ai_provider":
-            provider = str(value or "").strip().lower()
-            if provider in {"mistral", "openai", "gemini", "anthropic"}:
-                cleaned[key] = provider
-        elif key.endswith("_api_key"):
-            cleaned[key] = str(value or "").strip()
-        else:
-            cleaned[key] = str(value or "").strip()
-
-    if "ai_model" in cleaned and "ai_provider" not in cleaned:
-        inferred_provider = infer_ai_provider_strict(cleaned.get("ai_model"))
-        if inferred_provider:
-            cleaned["ai_provider"] = inferred_provider
-
-    return cleaned
-
-
-def sanitize_business_row(row: dict):
-    if not row:
-        return None
-    clean = dict(row)
-    for key in [
-        "access_token",
-        "page_access_token",
-        "whatsapp_access_token",
-        "mistral_api_key",
-        "openai_api_key",
-        "gemini_api_key",
-        "anthropic_api_key",
-    ]:
-        if key in clean:
-            clean[key] = safe_token(clean.get(key, ""))
-    return clean
-
-
-def sanitize_channel_row(row: dict):
-    if not row:
-        return None
-    clean = dict(row)
-    cfg = dict(clean.get("config") or {})
-    for key in ("access_token", "page_access_token", "bot_token", "session_file_b64"):
-        if key in cfg:
-            cfg[key] = safe_token(cfg.get(key, ""))
-    clean["config"] = cfg
-    return clean
-
-
-def get_business_channel_rows(business_id: str, platform_aliases: list[str]):
-    business_id = normalize_id(business_id)
-    if not business_id:
-        return []
-    aliases = [normalize_id(x).lower() for x in (platform_aliases or []) if normalize_id(x)]
-    if not aliases:
-        return []
-    try:
-        result = (
-            supabase.table("business_channels")
-            .select("*")
-            .eq("business_id", business_id)
-            .in_("platform", aliases)
-            .eq("is_active", True)
-            .order("created_at", desc=True)
-            .execute()
-        )
-        return result.data or []
-    except Exception:
-        return []
-
-
-def get_business_channel_token(business: dict, platform_aliases: list[str], token_keys: list[str]):
-    business_id = normalize_id((business or {}).get("id"))
-    rows = get_business_channel_rows(business_id, platform_aliases) if business_id else []
-    for row in rows:
-        cfg = dict(row.get("config") or {})
-        for key in token_keys:
-            value = normalize_id(cfg.get(key) or row.get(key))
-            if value:
-                return value
-    return ""
-
-
-def is_chat_ai_enabled(platform, channel, customer_id, business_id=None):
-    try:
-        platform = normalize_id(platform).lower()
-        channel = standard_channel(platform, channel)
-        query = (
-            supabase.table("chat_ai_settings")
-            .select("ai_enabled")
-            .eq("platform", platform)
-            .eq("channel", channel or "")
-            .eq("customer_id", str(customer_id))
-        )
-        if business_id:
-            query = query.eq("business_id", business_id)
-
-        result = query.limit(1).execute()
-        rows = result.data or []
-        if not rows:
-            return True
-        return bool(rows[0].get("ai_enabled", True))
-    except Exception as e:
-        log("Could not check chat AI setting", str(e))
-        return True
-
-
-def set_chat_ai_enabled(business_id, platform, channel, customer_id, enabled):
-    platform = normalize_id(platform).lower()
-    channel = standard_channel(platform, channel)
-    data = {
-        "business_id": business_id,
-        "platform": platform,
-        "channel": channel or "",
-        "customer_id": str(customer_id),
-        "ai_enabled": bool(enabled),
-    }
-    return supabase.table("chat_ai_settings").upsert(
-        data,
-        on_conflict="business_id,platform,channel,customer_id",
-    ).execute()
-
-
-def mark_conversation_read_in_db(conversation_id: str):
-    parts = conversation_id.split("::")
-    if len(parts) != 4:
-        raise ValueError("Invalid conversation ID")
-
-    platform, business_id, channel, customer_id = parts
-    platform = normalize_id(platform).lower()
-    channel = standard_channel(platform, channel)
-
-    query = (
-        supabase.table("inbox_messages")
-        .update({"is_read": True})
-        .eq("platform", platform)
-        .eq("business_id", business_id)
-        .eq("customer_id", str(customer_id))
-        .eq("direction", "inbound")
-        .eq("is_read", False)
-    )
-
-    if channel:
-        query = query.eq("channel", channel)
-
-    return query.execute()
-
-
-def save_inbox_message(
-        business: dict,
-        platform: str,
-        sender_id: str,
-        recipient_id: str,
-        message_text: str,
-        direction: str,
-        platform_message_id: str = "",
-        raw_payload: dict = None,
-        customer_name: str = "",
-        is_read: bool = False,
-        media_type: Optional[str] = None,
-        media_url: Optional[str] = None,
-        channel: str = "",
-        file_name: Optional[str] = None,
-        mime_type: Optional[str] = None,
-        whatsapp_media_id: Optional[str] = None,
-        post_permalink: Optional[str] = None,
-        post_image_url: Optional[str] = None,
-        post_media_type: Optional[str] = None,
-):
-    try:
-        customer_id = sender_id if direction == "inbound" else recipient_id
-        payload = dict(raw_payload or {})
-        if post_permalink:
-            payload["post_permalink"] = post_permalink
-        if post_image_url:
-            payload["post_image_url"] = post_image_url
-        if post_media_type:
-            payload["post_media_type"] = post_media_type
-
-        data = {
-            "business_id": business.get("id") if business else None,
-            "instagram_business_id": business.get("instagram_business_id") if business else None,
-            "platform": platform,
-            "customer_id": normalize_id(customer_id),
-            "customer_name": customer_name or normalize_id(customer_id),
-            "channel": standard_channel(platform, channel),
-            "direction": direction,
-            "role": "user" if direction == "inbound" else "assistant",
-            "content": message_text or "",
-            "external_message_id": platform_message_id,
-            "raw_payload": payload,
-            "is_read": is_read if direction == "inbound" else True,
-            "media_type": media_type,
-            "media_url": media_url,
-            "file_name": file_name,
-            "mime_type": mime_type,
-            "whatsapp_media_id": whatsapp_media_id,
-            "post_permalink": post_permalink,
-            "post_image_url": post_image_url,
-            "post_media_type": post_media_type,
-            "created_at": datetime.utcnow().isoformat(),
-        }
-
-        try:
-            supabase.table("inbox_messages").insert(data).execute()
-        except Exception:
-            compatible_data = dict(data)
-            for optional_key in ["post_permalink", "post_image_url", "post_media_type"]:
-                compatible_data.pop(optional_key, None)
-            try:
-                supabase.table("inbox_messages").insert(compatible_data).execute()
-            except Exception:
-                for optional_key in ["customer_name", "is_read", "media_type", "media_url", "file_name", "mime_type",
-                                     "whatsapp_media_id"]:
-                    compatible_data.pop(optional_key, None)
-                supabase.table("inbox_messages").insert(compatible_data).execute()
-
-        # New data landed; keep dashboard reads fresh.
-        clear_inbox_caches()
-
-    except Exception as e:
-        log("Could not save inbox message", str(e))
-
-
-def load_inbox_message_by_external_id(
-    business_id: str,
-    platform: str,
-    customer_id: str,
-    external_message_id: str,
-    direction: str = "",
-) -> dict:
-    business_id = normalize_id(business_id)
-    platform = normalize_id(platform)
-    customer_id = normalize_id(customer_id)
-    external_message_id = normalize_id(external_message_id)
-    direction = normalize_id(direction)
-    if not business_id or not platform or not customer_id or not external_message_id:
-        return {}
-
-    try:
-        query = (
-            supabase.table("inbox_messages")
-            .select("id,created_at,external_message_id,direction,platform,customer_id")
-            .eq("business_id", business_id)
-            .eq("platform", platform)
-            .eq("customer_id", customer_id)
-            .eq("external_message_id", external_message_id)
-            .order("created_at", desc=True)
-            .limit(5)
-        )
-        if direction:
-            query = query.eq("direction", direction)
-        rows = query.execute().data or []
-        return rows[0] if rows and isinstance(rows[0], dict) else {}
-    except Exception as exc:
-        log("Could not load inbox message by external id", {"business_id": business_id, "platform": platform, "external_message_id": external_message_id, "error": str(exc)})
-        return {}
-
-
-def mark_customer_inbound_read(business_id: str, platform: str, customer_id: str, channel: str = ""):
-    business_id = normalize_id(business_id)
-    platform = normalize_id(platform).lower()
-    customer_id = normalize_id(customer_id)
-    channel = standard_channel(platform, channel)
-    if not business_id or not platform or not customer_id:
-        return
-    try:
-        query = (
-            supabase.table("inbox_messages")
-            .update({"is_read": True})
-            .eq("business_id", business_id)
-            .eq("platform", platform)
-            .eq("customer_id", customer_id)
-            .eq("direction", "inbound")
-            .eq("is_read", False)
-        )
-        if channel:
-            query = query.eq("channel", channel)
-        query.execute()
-        clear_inbox_caches()
-    except Exception as exc:
-        log("Could not mark customer inbound read", {"business_id": business_id, "platform": platform, "customer_id": customer_id, "error": str(exc)})
-
-
-def has_outbound_reply_after(
-    business_id: str,
-    platform: str,
-    customer_id: str,
-    inbound_created_at: str,
-    channel: str = "",
-) -> bool:
-    business_id = normalize_id(business_id)
-    platform = normalize_id(platform)
-    customer_id = normalize_id(customer_id)
-    inbound_created_at = normalize_id(inbound_created_at)
-    channel = normalize_id(channel)
-    if not business_id or not platform or not customer_id or not inbound_created_at:
-        return False
-
-    try:
-        query = (
-            supabase.table("inbox_messages")
-            .select("id,created_at,external_message_id")
-            .eq("business_id", business_id)
-            .eq("platform", platform)
-            .eq("customer_id", customer_id)
-            .eq("direction", "outbound")
-            .gt("created_at", inbound_created_at)
-            .order("created_at", desc=True)
-            .limit(1)
-        )
-        if channel:
-            query = query.eq("channel", channel)
-        rows = query.execute().data or []
-        return bool(rows and isinstance(rows[0], dict))
-    except Exception as exc:
-        log("Could not check outbound reply dedupe", {"business_id": business_id, "platform": platform, "customer_id": customer_id, "error": str(exc)})
-        return False
-
-
-def has_recent_outbound_text(
-    business_id: str,
-    platform: str,
-    customer_id: str,
-    message_text: str,
-    channel: str = "",
-    window_seconds: int = OUTBOUND_DUPLICATE_WINDOW_SECONDS,
-) -> bool:
-    business_id = normalize_id(business_id)
-    platform = normalize_id(platform)
-    customer_id = normalize_id(customer_id)
-    channel = normalize_id(channel)
-    message_text = normalize_id(message_text)
-    if not business_id or not platform or not customer_id or not message_text:
-        return False
-
-    try:
-        rows = (
-            supabase.table("inbox_messages")
-            .select("content,created_at")
-            .eq("business_id", business_id)
-            .eq("platform", platform)
-            .eq("customer_id", customer_id)
-            .eq("direction", "outbound")
-            .eq("channel", standard_channel(platform, channel))
-            .order("created_at", desc=True)
-            .limit(5)
-            .execute()
-            .data
-            or []
-        )
-        now = datetime.utcnow()
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            if normalize_id(row.get("content")) != message_text:
-                continue
-            created_at = normalize_id(row.get("created_at"))
-            if not created_at:
-                continue
-            try:
-                dt = datetime.fromisoformat(created_at.replace("Z", "+00:00")).replace(tzinfo=None)
-            except Exception:
-                continue
-            if (now - dt).total_seconds() <= window_seconds:
-                return True
-    except Exception as exc:
-        log("Could not check recent outbound text dedupe", {
-            "business_id": business_id,
-            "platform": platform,
-            "customer_id": customer_id,
-            "error": str(exc),
-        })
-    return False
-
-
-def get_message_count(platform=None, business_ids=None):
-    try:
-        q = supabase.table("inbox_messages").select("id", count="exact")
-        if platform:
-            q = q.eq("platform", platform)
-        if business_ids:
-            q = q.in_("business_id", business_ids)
-        result = q.execute()
-        return result.count or 0
-    except Exception:
-        return 0
-
-
-def get_workspace_state(business_id: str):
-    business_id = normalize_id(business_id)
-    if not business_id:
-        return {}
-    try:
-        rows = (
-            supabase.table("dashboard_workspace_state")
-            .select("state_key,state_value")
-            .eq("business_id", business_id)
-            .execute()
-            .data
-            or []
-        )
-        payload = {}
-        for row in rows:
-            key = normalize_id(row.get("state_key"))
-            if key:
-                payload[key] = row.get("state_value")
-        # Merge runtime fallback (used only if DB table is unavailable).
-        fallback = WORKSPACE_STATE_FALLBACK.get(business_id) or {}
-        if isinstance(fallback, dict):
-            payload = {**payload, **fallback}
-        return payload
-    except Exception as e:
-        log("Could not load workspace state", str(e))
-        fallback = WORKSPACE_STATE_FALLBACK.get(business_id) or {}
-        return fallback if isinstance(fallback, dict) else {}
-
-
-def upsert_workspace_state(business_id: str, state_key: str, state_value, updated_by: str = ""):
-    business_id = normalize_id(business_id)
-    state_key = normalize_id(state_key)
-    if not business_id or not state_key:
-        return
-    data = {
-        "business_id": business_id,
-        "state_key": state_key,
-        "state_value": state_value if isinstance(state_value, (dict, list, str, int, float, bool)) or state_value is None else {},
-        "updated_by": normalize_email(updated_by),
-    }
-    try:
-        supabase.table("dashboard_workspace_state").upsert(
-            data,
-            on_conflict="business_id,state_key",
-        ).execute()
-    except Exception as e:
-        # Temporary safety-net if DB migration wasn't applied yet.
-        log("Could not save workspace state", str(e))
-        if business_id not in WORKSPACE_STATE_FALLBACK:
-            WORKSPACE_STATE_FALLBACK[business_id] = {}
-        WORKSPACE_STATE_FALLBACK[business_id][state_key] = data.get("state_value")
-
-
-def _safe_state_dict(value) -> dict:
-    return value if isinstance(value, dict) else {}
-
-
-def _safe_state_items(value) -> list:
-    return value if isinstance(value, list) else []
-
-
-def normalize_manual_lead(item: dict) -> dict:
-    if not isinstance(item, dict):
-        return {}
-    lead_id = normalize_id(item.get("id")) or f"manual_lead_{secrets.token_hex(5)}"
-    return {
-        "id": lead_id,
-        "name": normalize_id(item.get("name")) or "Manual lead",
-        "platform": normalize_id(item.get("platform")).lower() or "manual",
-        "operator": normalize_id(item.get("operator") or item.get("owner")),
-        "note": normalize_id(item.get("note") or item.get("last_message")),
-        "price": normalize_id(item.get("price")),
-        "stage": normalize_id(item.get("stage")).lower(),
-        "created_at": normalize_id(item.get("created_at") or item.get("createdAt")),
-    }
-
-
-def load_business_conversation_lookup(business_id: str, limit: int = 2500) -> dict:
-    business_id = normalize_id(business_id)
-    if not business_id:
-        return {}
-
-    try:
-        rows = (
-            supabase.table("inbox_messages")
-            .select(
-                "business_id,platform,channel,customer_id,chat_id,customer_name,"
-                "content,created_at,direction,is_read,external_message_id,raw_payload"
-            )
-            .eq("business_id", business_id)
-            .order("created_at", desc=True)
-            .limit(limit)
-            .execute()
-            .data
-            or []
-        )
-    except Exception as exc:
-        log("Could not load conversation rows for report", {"business_id": business_id, "error": str(exc)})
-        rows = []
-
-    grouped = {}
-    for row in rows:
-        platform = normalize_id(row.get("platform", "instagram")).lower() or "instagram"
-        channel = standard_channel(platform, row.get("channel", ""))
-        customer_id = normalize_id(row.get("customer_id"))
-        chat_id = normalize_id(row.get("chat_id"))
-        scope = conversation_scope(platform, channel, customer_id, chat_id)
-        if platform == "instagram" and "comment" in channel:
-            post_id = extract_instagram_comment_post_id(row)
-            scope = encode_comment_scope(customer_id, post_id) if post_id else scope
-        if not scope:
-            continue
-        key = f"{platform}::{business_id}::{channel}::{scope}"
-        grouped.setdefault(key, []).append(row)
-
-    business = get_business_by_id(business_id) or {}
-    lookup = {}
-    for key, conv_rows in grouped.items():
-        conv = transform_conversation_to_react(
-            key,
-            sorted(conv_rows, key=lambda item: item.get("created_at", "")),
-            business=business,
-            ai_lookup_enabled=False,
-        )
-        if conv:
-            lookup[key] = conv
-    return lookup
-
-
-def build_operator_deal_report_data(business_id: str) -> dict:
-    business_id = normalize_id(business_id)
-    business = get_business_by_id(business_id) or {}
-    state = get_workspace_state(business_id)
-    lead_stages = _safe_state_dict(state.get("lead_stages"))
-    lead_prices = _safe_state_dict(state.get("lead_prices"))
-    client_owners = _safe_state_dict(state.get("client_owners"))
-    manual_clients_bucket = state.get("manual_clients") or {}
-    manual_clients = _safe_state_items(manual_clients_bucket.get("items") if isinstance(manual_clients_bucket, dict) else [])
-    manual_leads_bucket = state.get("manual_leads") or {}
-    manual_leads = [
-        lead for lead in (
-            normalize_manual_lead(item)
-            for item in _safe_state_items(manual_leads_bucket.get("items") if isinstance(manual_leads_bucket, dict) else [])
-        )
-        if lead.get("id")
-    ]
-    manual_lead_lookup = {lead["id"]: lead for lead in manual_leads}
-    legacy_operator_deals = _safe_state_dict(state.get("operator_deals"))
-    conversations = load_business_conversation_lookup(business_id)
-
-    conversation_ids = set(str(item) for item in manual_clients if item)
-    conversation_ids.update(manual_lead_lookup.keys())
-    conversation_ids.update(str(key) for key in client_owners.keys() if key)
-    conversation_ids.update(str(key) for key, stage in lead_stages.items() if normalize_id(stage).lower() == "won")
-    conversation_ids.update(str(key) for key in conversations.keys() if client_owners.get(key) or lead_stages.get(key) == "won")
-
-    rows = []
-    ranking = {}
-    for conversation_id in sorted(conversation_ids):
-        conv = conversations.get(conversation_id) or {}
-        manual_lead = manual_lead_lookup.get(conversation_id) or {}
-        owner = normalize_id(client_owners.get(conversation_id) or manual_lead.get("operator"))
-        stage = normalize_id(lead_stages.get(conversation_id) or manual_lead.get("stage")) or "new"
-        successful = stage.lower() == "won" and bool(owner)
-        if successful:
-            ranking.setdefault(owner, {"operator": owner, "picked_clients": 0, "successful_deals": 0, "clients": []})
-            ranking[owner]["successful_deals"] += 1
-            ranking[owner]["clients"].append(conv.get("name") or conversation_id)
-        if owner:
-            ranking.setdefault(owner, {"operator": owner, "picked_clients": 0, "successful_deals": 0, "clients": []})
-            ranking[owner]["picked_clients"] += 1
-
-        parts = conversation_id.split("::")
-        platform = conv.get("platform") or (parts[0] if len(parts) == 4 else "")
-        channel = parts[2] if len(parts) == 4 else ""
-        rows.append({
-            "conversation_id": conversation_id,
-            "client": manual_lead.get("name") or conv.get("name") or conv.get("handle") or (parts[3] if len(parts) == 4 else conversation_id),
-            "handle": conv.get("handle") or "",
-            "platform": manual_lead.get("platform") or platform,
-            "channel": channel or ("manual" if manual_lead else ""),
-            "operator": owner or "Unassigned",
-            "stage": stage,
-            "successful_deal": successful,
-            "price": normalize_id(lead_prices.get(conversation_id) or manual_lead.get("price")) or "-",
-            "last_message": normalize_id(manual_lead.get("note") or conv.get("preview")) or "-",
-            "last_at": normalize_id(conv.get("lastAt") or conv.get("lastTime") or manual_lead.get("created_at")) or "-",
-            "source": "Manual lead" if manual_lead else "Conversation",
-        })
-
-    for operator_id, count in legacy_operator_deals.items():
-        operator = normalize_id(operator_id)
-        if not operator:
-            continue
-        ranking.setdefault(operator, {"operator": operator, "picked_clients": 0, "successful_deals": 0, "clients": []})
-        if not ranking[operator]["successful_deals"]:
-            try:
-                ranking[operator]["successful_deals"] = int(count or 0)
-            except Exception:
-                pass
-
-    ranking_rows = sorted(
-        ranking.values(),
-        key=lambda item: (int(item.get("successful_deals") or 0), int(item.get("picked_clients") or 0), item.get("operator", "")),
-        reverse=True,
-    )
-    return {
-        "business": sanitize_business_row(business) or {"id": business_id},
-        "generated_at": datetime.utcnow().isoformat() + "Z",
-        "ranking": ranking_rows,
-        "clients": rows,
-        "summary": {
-            "total_clients": len(rows),
-            "manual_leads": len(manual_leads),
-            "picked_clients": sum(1 for row in rows if row.get("operator") and row.get("operator") != "Unassigned"),
-            "successful_deals": sum(1 for row in rows if row.get("successful_deal")),
-        },
-    }
-
-
-def _pdf_text(value) -> str:
-    text = re.sub(r"\s+", " ", normalize_id(value)).strip()
-    return text.encode("latin-1", "replace").decode("latin-1")
-
-
-def _pdf_escape(value) -> str:
-    return _pdf_text(value).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-
-
-def _wrap_pdf_line(text: str, width: int = 132) -> list[str]:
-    text = _pdf_text(text)
-    if len(text) <= width:
-        return [text]
-    words = text.split()
-    lines = []
-    current = ""
-    for word in words:
-        candidate = f"{current} {word}".strip()
-        if len(candidate) <= width:
-            current = candidate
-            continue
-        if current:
-            lines.append(current)
-        current = word[:width]
-    if current:
-        lines.append(current)
-    return lines or [""]
-
-
-def build_operator_deal_report_pdf(report: dict) -> bytes:
-    try:
-        return build_operator_deal_report_pdf_reportlab(report)
-    except Exception as exc:
-        log("ReportLab operator report failed, using fallback PDF", str(exc))
-
-    business = report.get("business") or {}
-    business_name = normalize_id(business.get("business_name")) or normalize_id(business.get("id")) or "Business"
-    lines = [
-        f"Operator deals report - {business_name}",
-        f"Generated: {report.get('generated_at')}",
-        "",
-        "Operator ranking",
-    ]
-    ranking = report.get("ranking") or []
-    if ranking:
-        for index, row in enumerate(ranking, start=1):
-            lines.append(
-                f"{index}. {row.get('operator')}: {row.get('successful_deals', 0)} successful deals, "
-                f"{row.get('picked_clients', 0)} picked clients"
-            )
-    else:
-        lines.append("No picked clients or successful deals yet.")
-
-    lines.extend(["", "Client details"])
-    clients = report.get("clients") or []
-    if clients:
-        for row in clients:
-            deal_status = "SUCCESS" if row.get("successful_deal") else "pending/not won"
-            lines.append(
-                f"- {row.get('client')} {row.get('handle')}: operator={row.get('operator')}; "
-                f"stage={row.get('stage')}; deal={deal_status}; price={row.get('price')}; "
-                f"channel={row.get('platform')}/{row.get('channel')}; last={row.get('last_message')}"
-            )
-    else:
-        lines.append("No client rows to report.")
-
-    wrapped_lines = []
-    for line in lines:
-        if not line:
-            wrapped_lines.append("")
-        else:
-            wrapped_lines.extend(_wrap_pdf_line(line))
-
-    page_width = 842
-    page_height = 595
-    margin_x = 36
-    start_y = 555
-    line_height = 12
-    lines_per_page = 42
-    pages = [wrapped_lines[i:i + lines_per_page] for i in range(0, len(wrapped_lines), lines_per_page)] or [[]]
-
-    objects = [
-        "<< /Type /Catalog /Pages 2 0 R >>",
-        "",
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-    ]
-    page_refs = []
-    for page_lines in pages:
-        content_parts = []
-        y = start_y
-        for line in page_lines:
-            font_size = 14 if y == start_y and page_lines is pages[0] else 9
-            content_parts.append(f"BT /F1 {font_size} Tf {margin_x} {y} Td ({_pdf_escape(line)}) Tj ET")
-            y -= line_height
-        stream = "\n".join(content_parts)
-        content_obj_num = len(objects) + 1
-        objects.append(f"<< /Length {len(stream.encode('latin-1'))} >>\nstream\n{stream}\nendstream")
-        page_obj_num = len(objects) + 1
-        page_refs.append(f"{page_obj_num} 0 R")
-        objects.append(
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {page_width} {page_height}] "
-            f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_obj_num} 0 R >>"
-        )
-    objects[1] = f"<< /Type /Pages /Kids [{' '.join(page_refs)}] /Count {len(page_refs)} >>"
-
-    pdf = bytearray(b"%PDF-1.4\n")
-    offsets = [0]
-    for index, obj in enumerate(objects, start=1):
-        offsets.append(len(pdf))
-        pdf.extend(f"{index} 0 obj\n{obj}\nendobj\n".encode("latin-1"))
-    xref_pos = len(pdf)
-    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode("latin-1"))
-    pdf.extend(b"0000000000 65535 f \n")
-    for offset in offsets[1:]:
-        pdf.extend(f"{offset:010d} 00000 n \n".encode("latin-1"))
-    pdf.extend(
-        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n".encode("latin-1")
-    )
-    return bytes(pdf)
-
-
-def build_operator_deal_report_pdf_reportlab(report: dict) -> bytes:
-    from reportlab.lib import colors
-    from reportlab.lib.enums import TA_RIGHT
-    from reportlab.lib.pagesizes import A4, landscape
-    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-    from reportlab.lib.units import mm
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-
-    def register_font() -> tuple[str, str]:
-        regular_candidates = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
-            "/Library/Fonts/Arial.ttf",
-        ]
-        bold_candidates = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-            "/Library/Fonts/Arial Bold.ttf",
-        ]
-        regular = next((path for path in regular_candidates if Path(path).exists()), "")
-        bold = next((path for path in bold_candidates if Path(path).exists()), "")
-        if regular:
-            pdfmetrics.registerFont(TTFont("InstaReport", regular))
-            if bold:
-                pdfmetrics.registerFont(TTFont("InstaReport-Bold", bold))
-                return "InstaReport", "InstaReport-Bold"
-            return "InstaReport", "InstaReport"
-        return "Helvetica", "Helvetica-Bold"
-
-    font_name, bold_font = register_font()
-    buffer = io.BytesIO()
-    page_size = landscape(A4)
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=page_size,
-        rightMargin=14 * mm,
-        leftMargin=14 * mm,
-        topMargin=14 * mm,
-        bottomMargin=13 * mm,
-        title="Operator Deals Report",
-    )
-
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "ReportTitle",
-        parent=styles["Title"],
-        fontName=bold_font,
-        fontSize=22,
-        leading=26,
-        textColor=colors.HexColor("#111827"),
-        spaceAfter=4,
-    )
-    subtitle_style = ParagraphStyle(
-        "ReportSubtitle",
-        parent=styles["Normal"],
-        fontName=font_name,
-        fontSize=9,
-        leading=12,
-        textColor=colors.HexColor("#6B7280"),
-        spaceAfter=10,
-    )
-    section_style = ParagraphStyle(
-        "ReportSection",
-        parent=styles["Heading2"],
-        fontName=bold_font,
-        fontSize=13,
-        leading=16,
-        textColor=colors.HexColor("#111827"),
-        spaceBefore=8,
-        spaceAfter=6,
-    )
-    body_style = ParagraphStyle(
-        "ReportBody",
-        parent=styles["Normal"],
-        fontName=font_name,
-        fontSize=8,
-        leading=10,
-        textColor=colors.HexColor("#111827"),
-    )
-    muted_style = ParagraphStyle(
-        "ReportMuted",
-        parent=body_style,
-        textColor=colors.HexColor("#6B7280"),
-    )
-    header_style = ParagraphStyle(
-        "ReportHeader",
-        parent=body_style,
-        fontName=bold_font,
-        textColor=colors.white,
-    )
-    right_style = ParagraphStyle("Right", parent=body_style, alignment=TA_RIGHT)
-
-    business = report.get("business") or {}
-    business_name = normalize_id(business.get("business_name")) or normalize_id(business.get("id")) or "Business"
-    generated_at = normalize_id(report.get("generated_at"))
-    summary = report.get("summary") or {}
-    ranking = report.get("ranking") or []
-    clients = report.get("clients") or []
-
-    story = [
-        Paragraph("Operator Performance Report", title_style),
-        Paragraph(f"{business_name} · Generated {generated_at}", subtitle_style),
-    ]
-
-    metrics = [
-        ["Successful deals", str(summary.get("successful_deals", 0))],
-        ["Picked clients", str(summary.get("picked_clients", 0))],
-        ["Manual leads", str(summary.get("manual_leads", 0))],
-        ["Total tracked clients", str(summary.get("total_clients", 0))],
-    ]
-    metrics_table = Table(
-        [[Paragraph(label, muted_style), Paragraph(value, ParagraphStyle(f"Metric{idx}", parent=right_style, fontName=bold_font, fontSize=16, leading=18))]
-         for idx, (label, value) in enumerate(metrics)],
-        colWidths=[45 * mm, 26 * mm],
-        hAlign="LEFT",
-    )
-    metrics_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F8FAFC")),
-        ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#D1D5DB")),
-        ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#E5E7EB")),
-        ("LEFTPADDING", (0, 0), (-1, -1), 8),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-        ("TOPPADDING", (0, 0), (-1, -1), 7),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-    ]))
-    story.extend([metrics_table, Spacer(1, 8)])
-
-    story.append(Paragraph("Operator Ranking", section_style))
-    ranking_data = [[
-        Paragraph("#", header_style),
-        Paragraph("Operator", header_style),
-        Paragraph("Picked", header_style),
-        Paragraph("Successful deals", header_style),
-        Paragraph("Conversion", header_style),
-    ]]
-    for idx, row in enumerate(ranking, start=1):
-        picked = int(row.get("picked_clients") or 0)
-        deals = int(row.get("successful_deals") or 0)
-        conversion = f"{round((deals / picked) * 100)}%" if picked else "0%"
-        ranking_data.append([
-            Paragraph(str(idx), body_style),
-            Paragraph(normalize_id(row.get("operator")) or "Unassigned", body_style),
-            Paragraph(str(picked), right_style),
-            Paragraph(str(deals), right_style),
-            Paragraph(conversion, right_style),
-        ])
-    if len(ranking_data) == 1:
-        ranking_data.append(["-", Paragraph("No operator activity yet.", body_style), "0", "0", "0%"])
-
-    ranking_table = Table(ranking_data, colWidths=[12 * mm, 78 * mm, 28 * mm, 38 * mm, 30 * mm], repeatRows=1)
-    ranking_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#111827")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), bold_font),
-        ("BACKGROUND", (0, 1), (-1, -1), colors.white),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F9FAFB")]),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E5E7EB")),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-    ]))
-    story.extend([ranking_table, Spacer(1, 8)])
-
-    story.append(Paragraph("Client And Deal Details", section_style))
-    client_data = [[
-        Paragraph("Client", header_style),
-        Paragraph("Platform", header_style),
-        Paragraph("Operator", header_style),
-        Paragraph("Stage", header_style),
-        Paragraph("Deal", header_style),
-        Paragraph("Value", header_style),
-        Paragraph("Last note / message", header_style),
-    ]]
-    stage_label = {"new": "New", "qualified": "Qualified", "negotiation": "Negotiation", "won": "Won", "lost": "Lost"}
-    for row in clients:
-        deal = "Won" if row.get("successful_deal") else "-"
-        client_data.append([
-            Paragraph(normalize_id(row.get("client")) or "-", body_style),
-            Paragraph(normalize_id(row.get("platform")) or "-", body_style),
-            Paragraph(normalize_id(row.get("operator")) or "Unassigned", body_style),
-            Paragraph(stage_label.get(normalize_id(row.get("stage")).lower(), normalize_id(row.get("stage")) or "-"), body_style),
-            Paragraph(deal, body_style),
-            Paragraph(normalize_id(row.get("price")) or "-", body_style),
-            Paragraph(normalize_id(row.get("last_message"))[:220] or "-", body_style),
-        ])
-    if len(client_data) == 1:
-        client_data.append(["-", "-", "-", "-", "-", "-", Paragraph("No clients to report.", body_style)])
-
-    client_table = Table(
-        client_data,
-        colWidths=[36 * mm, 24 * mm, 42 * mm, 27 * mm, 18 * mm, 24 * mm, 92 * mm],
-        repeatRows=1,
-    )
-    client_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#111827")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), bold_font),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F9FAFB")]),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#E5E7EB")),
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 5),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-        ("TOPPADDING", (0, 0), (-1, -1), 5),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-    ]))
-    story.append(client_table)
-
-    def decorate(canvas, doc_obj):
-        canvas.saveState()
-        canvas.setStrokeColor(colors.HexColor("#E5E7EB"))
-        canvas.line(14 * mm, 12 * mm, page_size[0] - 14 * mm, 12 * mm)
-        canvas.setFont(font_name, 8)
-        canvas.setFillColor(colors.HexColor("#6B7280"))
-        canvas.drawString(14 * mm, 7 * mm, "Instaagent operator performance report")
-        canvas.drawRightString(page_size[0] - 14 * mm, 7 * mm, f"Page {doc_obj.page}")
-        canvas.restoreState()
-
-    doc.build(story, onFirstPage=decorate, onLaterPages=decorate)
-    return buffer.getvalue()
-
-
-def instagram_processed_message_state_key(message_id: str) -> str:
-    message_id = normalize_id(message_id)
-    return f"instagram_processed_message:{message_id}" if message_id else ""
-
-
-def claim_instagram_message_processing(business_id: str, message_id: str, customer_id: str = "", channel: str = "dm") -> bool:
-    business_id = normalize_id(business_id)
-    state_key = instagram_processed_message_state_key(message_id)
-    if not business_id or not state_key:
-        return False
-    state_value = {
-        "message_id": normalize_id(message_id),
-        "customer_id": normalize_id(customer_id),
-        "channel": normalize_id(channel),
-        "status": "processing",
-        "claimed_at": datetime.utcnow().isoformat(),
-    }
-    try:
-        supabase.table("dashboard_workspace_state").insert({
-            "business_id": business_id,
-            "state_key": state_key,
-            "state_value": state_value,
-            "updated_by": "instagram_bot",
-        }).execute()
-        return True
-    except Exception as exc:
-        log("Could not claim Instagram message processing", {"business_id": business_id, "message_id": message_id, "error": str(exc)})
-
-    fallback = WORKSPACE_STATE_FALLBACK.get(business_id) or {}
-    if state_key in fallback:
-        return False
-    return False
-
-
-def mark_instagram_processed_message(business_id: str, message_id: str, customer_id: str = "", channel: str = "dm", status: str = "processed"):
-    business_id = normalize_id(business_id)
-    state_key = instagram_processed_message_state_key(message_id)
-    if not business_id or not state_key:
-        return
-    state_value = {
-        "message_id": normalize_id(message_id),
-        "customer_id": normalize_id(customer_id),
-        "channel": normalize_id(channel),
-        "status": normalize_id(status) or "processed",
-        "processed_at": datetime.utcnow().isoformat(),
-    }
-    try:
-        upsert_workspace_state(business_id, state_key, state_value)
-    except Exception as exc:
-        log("Could not mark Instagram processed message", {"business_id": business_id, "message_id": message_id, "error": str(exc)})
-
-
-def list_business_operator_ids(business_id: str) -> list[str]:
-    business_id = normalize_id(business_id)
-    if not business_id:
-        return []
-    try:
-        rows = (
-            supabase.table("business_users")
-            .select("user_email,role")
-            .eq("business_id", business_id)
-            .eq("role", "operator")
-            .execute()
-            .data
-            or []
-        )
-        return sorted({normalize_email(row.get("user_email")) for row in rows if normalize_email(row.get("user_email"))})
-    except Exception:
-        return []
-
-
-def append_operator_task(business_id: str, text: str, recipients: list[str], assign_mode: str, created_by: str) -> dict:
-    business_id = normalize_id(business_id)
-    clean_text = normalize_id(text)
-    if not business_id or not clean_text:
-        return {}
-
-    safe_assign_mode = normalize_id(assign_mode).lower() or "all"
-    allowed_modes = {"one", "group", "all"}
-    if safe_assign_mode not in allowed_modes:
-        safe_assign_mode = "all"
-
-    all_operator_ids = list_business_operator_ids(business_id)
-    normalized_recipients = [normalize_email(item) for item in (recipients or []) if normalize_email(item)]
-    normalized_recipients = list(dict.fromkeys(normalized_recipients))
-
-    if safe_assign_mode == "all" or "*" in normalized_recipients:
-        final_recipients = ["*"]
-    else:
-        final_recipients = [item for item in normalized_recipients if item in set(all_operator_ids)]
-        if not final_recipients and all_operator_ids:
-            final_recipients = [all_operator_ids[0]]
-
-    task = {
-        "id": f"task_{int(time.time() * 1000)}_{secrets.token_hex(3)}",
-        "text": clean_text,
-        "recipients": final_recipients or ["*"],
-        "assign_mode": safe_assign_mode,
-        "created_by": normalize_email(created_by),
-        "created_at": datetime.utcnow().isoformat() + "Z",
-    }
-
-    state = get_workspace_state(business_id)
-    existing = state.get("operator_tasks") or {}
-    items = existing.get("items") if isinstance(existing, dict) else []
-    if not isinstance(items, list):
-        items = []
-
-    next_items = [task] + items
-    next_items = next_items[:200]
-    payload = {"items": next_items}
-    upsert_workspace_state(business_id, "operator_tasks", payload, updated_by=created_by)
-
-    # Backward compatibility for dashboards still reading old key.
-    legacy = state.get("operator_admin_notes") or {}
-    legacy_items = legacy.get("items") if isinstance(legacy, dict) else []
-    if not isinstance(legacy_items, list):
-        legacy_items = []
-    merged_legacy = [task] + legacy_items
-    upsert_workspace_state(business_id, "operator_admin_notes", {"items": merged_legacy[:200]}, updated_by=created_by)
-
-    return task
-
-
-def merged_operator_task_items(state: dict) -> list[dict]:
-    if not isinstance(state, dict):
-        return []
-
-    items = []
-    for key in ("operator_tasks", "operator_admin_notes"):
-        bucket = state.get(key) or {}
-        bucket_items = bucket.get("items") if isinstance(bucket, dict) else []
-        if isinstance(bucket_items, list):
-            items.extend(bucket_items)
-
-    merged = []
-    seen = set()
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        item_id = normalize_id(item.get("id")) or f"{normalize_id(item.get('created_at') or item.get('createdAt'))}:{normalize_id(item.get('text'))}"
-        if item_id in seen:
-            continue
-        seen.add(item_id)
-        recipients = item.get("recipients") if isinstance(item.get("recipients"), list) else ["*"]
-        recipients = [normalize_email(x) if x != "*" else "*" for x in recipients if normalize_email(x) or x == "*"]
-        merged.append(
-            {
-                "id": item.get("id") or item_id,
-                "text": normalize_id(item.get("text")),
-                "recipients": recipients or ["*"],
-                "assign_mode": normalize_id(item.get("assign_mode") or item.get("mode") or "all") or "all",
-                "created_by": normalize_email(item.get("created_by") or item.get("createdBy")),
-                "created_at": item.get("created_at") or item.get("createdAt"),
-            }
-        )
-
-    merged.sort(key=lambda item: normalize_id(item.get("created_at")), reverse=True)
-    return merged
-
-
-def scope_operator_tasks_for_access(items: list[dict], access: dict) -> list[dict]:
-    role = normalize_id(access.get("role", "")).lower() if access else ""
-    is_admin = bool(access and access.get("is_admin")) or role in BUSINESS_ADMIN_ROLES
-    if is_admin:
-        return items
-
-    viewer = normalize_email(access.get("email", "")) if access else ""
-    viewer_username = viewer.split("@", 1)[0] if viewer else ""
-    scoped = []
-    for item in items:
-        recipients = item.get("recipients") if isinstance(item.get("recipients"), list) else ["*"]
-        normalized = [normalize_email(x) if x != "*" else "*" for x in recipients]
-        if "*" in normalized or viewer in normalized or (viewer_username and viewer_username in normalized):
-            scoped.append(item)
-    return scoped
-
-
-# ============================================================================
-# AI
-# ============================================================================
-def build_business_context(business: dict) -> str:
-    return f"""
-Business name:
-{business.get("business_name", "")}
-
-Business type:
-{business.get("business_type", "")}
-
-Language:
-{business.get("language", "")}
-
-Tone:
-{business.get("tone", "")}
-
-Products / Services:
-{business.get("products", "")}
-
-Prices:
-{business.get("prices", "")}
-
-Delivery information:
-{business.get("delivery_info", "")}
-
-Working hours:
-{business.get("working_hours", "")}
-
-FAQ:
-{business.get("faq", "")}
-
-Catalog link:
-{business.get("catalog_link", "")}
-
-Sales phone:
-{business.get("sales_phone", "")}
-
-Telegram single product:
-{business.get("telegram_single", "")}
-
-Telegram package:
-{business.get("telegram_package", "")}
-
-Telegram bag / meshok:
-{business.get("telegram_bag", "")}
-
-Main business knowledge:
-{business.get("knowledge", "")}
-
-AI reply rules:
-{business.get("ai_reply_rules", "")}
-
-Runtime settings:
-- automation_mode: {business.get("automation_mode", "")}
-- human_takeover_enabled: {business.get("human_takeover_enabled", "")}
-- bot_language_mode: {business.get("bot_language_mode", "")}
-- memory_enabled: {business.get("memory_enabled", "")}
-- memory_limit: {business.get("memory_limit", "")}
-"""
-
-
-DEFAULT_AI_PROMPT_SETTINGS = {
-    "global_prompt": """
-You are a real human sales operator for this business.
-Use the configured business facts, product information, pricing, delivery details, catalog links, contacts, and knowledge.
-Use short, practical, sales-focused replies in the customer's language.
-Sound natural for Instagram, Telegram, or WhatsApp.
-
-Hard rules:
-- Never promise reservation/holding stock unless the business facts explicitly say it is allowed.
-- Never use uncertain fabricated statements.
-- Never mention AI, system, prompt, automation.
-- Before asking for the customer's name or phone number, check the conversation history and known lead state first.
-- If the customer has already shared a phone number in any valid format, never ask for it again in the same conversation.
-- If the customer has already shared their name, never ask for it again in the same conversation.
-- If both name and phone are already known, confirm briefly and move to the next sales step instead of repeating the same question.
-""".strip(),
-    "instagram_prompt": """
-Instagram rules:
-- Keep DMs concise and natural.
-- If customer asks catalog/price/model/photo, respond naturally and guide to DM flow.
-- Do not paste raw catalog links in Instagram replies.
-- For public comments containing "+", "katalog", "narx", "qancha", "price": send details in DM and reply publicly without asking for phone, name, address, or any private information.
-- Never ask a customer to leave private information in a public Instagram comment.
-""".strip(),
-    "telegram_prompt": """
-Telegram rules:
-- Sound like a natural Telegram sales manager.
-- In groups, answer only when mentioned or replied to.
-- Avoid long lists unless the customer asks for a list.
-- Share Telegram catalog/group links only when relevant.
-""".strip(),
-    "whatsapp_prompt": """
-WhatsApp rules:
-- Be concise and direct.
-- Reply naturally in 1-3 short sentences.
-- Ask 2-3 short clarifying questions when customer intent is unclear.
-""".strip(),
-    "opening_message": """
-Assalomu alaykum 😊 Qanday yordam kerak?
-""".strip(),
-    "lead_collection_rules": """
-Collect buyer context naturally and briefly.
-
-Use qualification questions only in private chat when relevant:
-- Which product/model are you interested in?
-- Which city should delivery be checked for?
-
-When client is close to order, collect:
-- only the details needed for the order
-- use private chat for any personal/contact details
-
-Never repeat the same lead-collection question more than once in the same conversation.
-If phone is already collected, do not ask for phone again.
-If name is already collected, do not ask for name again.
-""".strip(),
-    "sales_rules": """
-- Answer the exact question first.
-- Keep replies short and comfortable: usually 1-3 short sentences.
-- Keep tone samimiy and complete, not robotic.
-
-Product/category defaults:
-- Use only the categories and product facts configured for this business.
-- Recommend products only when the business facts support the recommendation.
-- Mention limited availability only when configured or when availability must be confirmed.
-
-Pricing and order policy:
-- For price questions, use configured prices when available.
-- If exact price is missing, say it should be confirmed and ask one useful follow-up question.
-- Use minimum order and wholesale/retail rules only when configured.
-
-Location and delivery policy:
-- Use configured address, location, delivery, and working-hours facts only.
-
-Payment and warranty policy:
-- Use configured payment and warranty facts only.
-- If payment or warranty details are missing, ask for contact details or hand off to a manager.
-
-Objection handling:
-- If "qimmat": emphasize quality value briefly.
-- If "keyin olaman": ask polite follow-up about purchase timing.
-- If comparing other stores: stay respectful, no pressure.
-
-Forbidden phrases:
-- Do not reject a sales lead unless the business facts require it.
-""".strip(),
-    "handoff_rules": """
-Handoff immediately when:
-- customer says they want wholesale/optom
-- customer asks for final exact deal terms
-- customer is angry/frustrated
-- payment/contract specifics are requested
-
-Handoff closing line:
-- "Direktda yozing, menejerimiz yordam beradi."
-
-If the customer already sent a phone number, do not use the full name+phone request again.
-Ask only for the missing field.
-
-Do not invent information before handoff.
-""".strip(),
+const DASHBOARD_SECRET =
+  urlParams.get('secret') ||
+  (IS_LOCALHOST ? 'localdev' : '') ||
+  ENV_DASHBOARD_SECRET ||
+  window.sessionStorage.getItem('instaagent_dashboard_secret') ||
+  window.localStorage.getItem('instaagent_dashboard_secret') ||
+  window.INSTAAGENT_DASHBOARD_SECRET ||
+  '';
+
+if (urlParams.get('api') && API_BASE) window.localStorage.setItem('instaagent_api_base', API_BASE);
+if (!API_BASE) window.localStorage.removeItem('instaagent_api_base');
+if (urlParams.get('secret') && DASHBOARD_SECRET !== 'YOUR_DASHBOARD_SECRET') {
+  window.sessionStorage.setItem('instaagent_dashboard_secret', DASHBOARD_SECRET);
+}
+if (window.localStorage.getItem('instaagent_dashboard_secret') === 'YOUR_DASHBOARD_SECRET') {
+  window.localStorage.removeItem('instaagent_dashboard_secret');
+}
+if (window.sessionStorage.getItem('instaagent_dashboard_secret') === 'YOUR_DASHBOARD_SECRET') {
+  window.sessionStorage.removeItem('instaagent_dashboard_secret');
 }
 
+const OWNER_EMAIL_STORAGE_KEY = 'instaagent_owner_email';
+const OWNER_EMAIL_PARAM = 'owner_email';
+const DASHBOARD_AUTH_STORAGE_KEY = 'instaagent_dashboard_auth';
 
-AI_PROMPT_SETTING_FIELDS = set(DEFAULT_AI_PROMPT_SETTINGS.keys())
-
-
-GENERIC_RESPONSE_GUARDRAILS = """
-Business Q&A policy. Always enforce these rules even if saved prompt settings say otherwise.
-
-Business-only scope:
-- Only answer questions about this business, its products/services, catalog, prices, orders, delivery, payment, address, warranty, and manager handoff.
-- If the customer asks about unrelated topics, do not answer that topic.
-- For unrelated topics, reply briefly in the customer's language and offer catalog or manager help.
-
-Sales-agent rules:
-- Introduce the configured business naturally when needed.
-- Use only configured business strengths and facts.
-- Tone: samimiy, short, practical, complete enough to help the customer buy.
-- Ask qualification questions naturally: name, city, phone number.
-- In public comments, never ask for name, phone, address, Telegram, WhatsApp, passport, card, or other private details.
-- Never ask for a phone number again if the customer already sent one in the current conversation.
-- Never ask for a name again if the customer already sent one in the current conversation.
-- If both name and phone are already collected, confirm briefly and continue the sale.
-- Product availability should be confirmed, never invented.
-- Never say stock is reserved or will be reserved unless configured.
-- Never invent price, discount, stock, delivery time, payment terms, or availability.
-- Exact price should not be invented. If asked price and it is missing, say it should be confirmed.
-- Do not claim prices changed or will change unless configured.
-- Use wholesale/retail/minimum-order rules only when configured.
-- For qop/size questions, use the configured qop/size rule from Business facts. Do not invent size composition.
-- Use configured address and delivery process only.
-- Payment: move the customer to private chat or a manager; do not request private details in public comments.
-- When customer asks for photo/video/catalog, answer warmly with one light smile/emoji-style touch; do not over-explain.
-- Reply separately to each commenter; do not combine multiple customers into one response.
-- Sticker-only/simple reactions: answer with a simple friendly emoji/sticker-style short reply, not a sales paragraph.
-- If "qimmat": acknowledge and position value based on configured quality facts.
-- If "keyin olaman" or silent follow-up: ask when they plan to buy.
-- If comparing with another shop: be respectful; no pressure.
-- Buying signs: asks for card, cargo, exact order flow, or says wholesale/optom.
-- Handoff immediately for optom intent, angry/norozi customer, payment details, or exact final order terms.
-- Handoff line: "Direktda yozing, menejerimiz yordam beradi."
-- If bot made spelling/meaning mistake, apologize briefly and correct it.
-""".strip()
-
-
-def clean_ai_prompt_settings(settings: dict) -> dict:
-    return {
-        key: str(value or "").strip()
-        for key, value in (settings or {}).items()
-        if key in AI_PROMPT_SETTING_FIELDS
-    }
-
-
-def get_ai_prompt_settings(business_id: str) -> dict:
-    business_id = normalize_id(business_id)
-    settings = dict(DEFAULT_AI_PROMPT_SETTINGS)
-
-    if not business_id:
-        return settings
-
-    try:
-        rows = (
-            supabase.table("ai_prompt_settings")
-            .select("*")
-            .eq("business_id", business_id)
-            .limit(1)
-            .execute()
-            .data
-            or []
-        )
-        if rows:
-            for key in AI_PROMPT_SETTING_FIELDS:
-                if rows[0].get(key) not in (None, ""):
-                    settings[key] = rows[0].get(key)
-            settings["id"] = rows[0].get("id")
-            settings["business_id"] = business_id
-    except Exception as e:
-        log("Could not load AI prompt settings", str(e))
-
-    settings.setdefault("business_id", business_id)
-    return settings
-
-
-def upsert_ai_prompt_settings(business_id: str, settings: dict) -> dict:
-    business_id = normalize_id(business_id)
-    if not business_id:
-        raise ValueError("Missing business_id")
-
-    cleaned = clean_ai_prompt_settings(settings)
-    if not cleaned:
-        return get_ai_prompt_settings(business_id)
-
-    payload = {
-        "business_id": business_id,
-        **cleaned,
-        "updated_at": datetime.utcnow().isoformat(),
-    }
-    supabase.table("ai_prompt_settings").upsert(
-        payload,
-        on_conflict="business_id",
-    ).execute()
-    return get_ai_prompt_settings(business_id)
-
-
-PROMPT_FIELD_LABELS = {
-    "global_prompt": "global prompt",
-    "instagram_prompt": "Instagram rules",
-    "telegram_prompt": "Telegram rules",
-    "whatsapp_prompt": "WhatsApp rules",
-    "opening_message": "opening message",
-    "lead_collection_rules": "lead collection rules",
-    "sales_rules": "sales rules",
-    "handoff_rules": "human handoff rules",
+function normalizeOwnerEmail(value = '') {
+  return String(value || '').trim().toLowerCase();
 }
 
-
-def fallback_prompt_suggestion(field: str, current_prompt: str = "", goal: str = "") -> dict:
-    label = PROMPT_FIELD_LABELS.get(field, "prompt")
-    current_words = re.findall(r"[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼ']{4,}", current_prompt or "")
-    product_hint = current_words[0] if current_words else "customer request"
-
-    if field == "opening_message":
-        return {
-            "suggested_prompt": "Assalomu alaykum 😊 Qanday yordam kerak?",
-            "explanation": "Made the opening short and natural, without asking for phone or address too early.",
-        }
-
-    suggested_prompt = "\n".join([
-        f"{label.title()}:",
-        "- Reply shortly, warmly, and naturally in the customer's language.",
-        "- First answer the customer's question, then ask 2-3 short clarifying questions when needed.",
-        "- Do not ask for phone number or address at the beginning.",
-        "- Ask for phone/address only when the customer is clearly ready to order.",
-        f"- Do not repeat {product_hint!r} or any product name in every message.",
-        "- Never invent price, stock, delivery time, discounts, or availability.",
-        "- Avoid corporate phrases like 'manager will contact you' unless the customer asks for a human or is ready to order.",
-        "- If the customer is annoyed, reply calmly and briefly before continuing.",
-        f"- Main improvement goal: {goal}." if goal else "",
-    ]).strip()
-
-    return {
-        "suggested_prompt": suggested_prompt,
-        "explanation": "Made it shorter, clearer, safer for sales replies, and aligned with Instaagent standards.",
-    }
-
-
-def is_valid_prompt_suggestion(text: str) -> bool:
-    candidate = (text or "").strip()
-    if not candidate:
-        return False
-    if len(candidate) < 120:
-        return False
-    if candidate.count("\n") < 3:
-        return False
-
-    lower = candidate.lower()
-    required_markers = ["- reply", "- do not", "- ask"]
-    if not any(marker in lower for marker in required_markers):
-        return False
-
-    bad_starts = (
-        "xabaringiz qabul qilindi",
-        "assalomu alaykum",
-        "salom",
-        "hello",
-        "hi ",
-        "thanks",
-        "thank you",
-    )
-    if lower.startswith(bad_starts):
-        return False
-
-    return True
-
-
-def generate_ai_prompt_suggestion(business: dict, field: str, current_prompt: str, goal: str) -> dict:
-    field = normalize_id(field)
-    if field not in AI_PROMPT_SETTING_FIELDS:
-        raise ValueError("Invalid prompt field")
-
-    fallback = fallback_prompt_suggestion(field, current_prompt, goal)
-    business_for_generation = {
-        **business,
-        "ai_temperature": 0.35,
-        "ai_max_tokens": max(450, int(business.get("ai_max_tokens", 130) or 130)),
-    }
-
-    base_messages = [
-        {
-            "role": "system",
-            "content": """
-You are Instaagent's prompt generator for non-technical business agents.
-Rewrite weak sales-bot instructions into a professional prompt section.
-
-Always follow Instaagent standards:
-- short natural replies
-- same language as customer
-- one question at a time
-- no repeated product names
-- no phone/address at beginning
-- no invented price, stock, delivery, discount, address, or availability
-- no corporate language like "manager will contact you" unless truly needed
-- handle angry customers calmly
-- good for Instagram, Telegram, and WhatsApp
-
-Hard requirements:
-- Output 8-12 concise bullet rules.
-- Do not greet, acknowledge, or chat with the user.
-- Do not output a sample reply to a customer.
-- Return only the improved prompt text.
-- Do not include markdown fences or explanations.
-""".strip(),
-        },
-        {
-            "role": "user",
-            "content": f"""
-Business name: {business.get("business_name", "")}
-Prompt field: {PROMPT_FIELD_LABELS.get(field, field)}
-Agent goal: {goal}
-
-Current prompt:
-{current_prompt or "(empty)"}
-
-Write a better prompt section that a sales assistant bot can follow.
-""".strip(),
-        },
-    ]
-
-    reply = ""
-    try:
-        first_try = clean_sales_reply(
-            call_ai_chat(base_messages, business_for_generation, "AI prompt generator"),
-            "",
-        )
-        if is_valid_prompt_suggestion(first_try):
-            reply = first_try
-    except Exception as exc:
-        log("Prompt generator first pass failed", str(exc))
-
-    if not reply:
-        retry_messages = base_messages + [
-            {
-                "role": "user",
-                "content": """
-Your last output was not a valid prompt block.
-Regenerate now as strict rules only:
-- 8-12 bullets
-- each bullet starts with '-'
-- no greeting
-- no acknowledgement
-- no conversation text
-""".strip(),
-            }
-        ]
-        try:
-            second_try = clean_sales_reply(
-                call_ai_chat(retry_messages, business_for_generation, "AI prompt generator retry"),
-                "",
-            )
-            if is_valid_prompt_suggestion(second_try):
-                reply = second_try
-        except Exception as exc:
-            log("Prompt generator retry failed", str(exc))
-
-    if not reply:
-        return {
-            **fallback,
-            "explanation": f"{fallback.get('explanation', '')} Used safe fallback because AI output was not a valid prompt block.".strip(),
-        }
-
-    return {
-        "suggested_prompt": reply,
-        "explanation": "Made it shorter, clearer, and safer for natural sales replies.",
-    }
-
-
-def build_prompt_business_knowledge(business: dict) -> str:
-    return f"""
-Business facts:
-
-Business identity:
-- Name: {business.get("business_name", "")}
-- Type: {business.get("business_type", "")}
-- Language: {business.get("language", "")}
-- Tone: {business.get("tone", "")}
-
-Products:
-{business.get("products", "")}
-
-Prices:
-{business.get("prices", "")}
-
-Delivery:
-{business.get("delivery_info", "")}
-
-Working hours:
-{business.get("working_hours", "")}
-
-FAQ:
-{business.get("faq", "")}
-
-Contacts:
-{business.get("sales_phone", "")}
-
-Catalog links:
-{business.get("catalog_link", "")}
-
-Telegram groups:
-- Single product: {business.get("telegram_single", "")}
-- Package: {business.get("telegram_package", "")}
-- Bag / meshok: {business.get("telegram_bag", "")}
-
-Configured qop/size rule:
-{configured_pack_size_rule(business) or default_pack_size_sentence("uz")}
-
-Configured items per qop/meshok:
-{configured_items_per_meshok(business)}
-
-Additional knowledge:
-{business.get("knowledge", "")}
-
-AI reply rules:
-{business.get("ai_reply_rules", "")}
-"""
-
-
-def build_platform_prompt(platform: str, business: dict) -> str:
-    prompt_settings = get_ai_prompt_settings(business.get("id", ""))
-    platform_key = {
-        "instagram": "instagram_prompt",
-        "telegram": "telegram_prompt",
-        "whatsapp": "whatsapp_prompt",
-    }.get(platform, "instagram_prompt")
-
-    return f"""
-{prompt_settings.get("global_prompt", "")}
-
-{build_prompt_business_knowledge(business)}
-
-Sales behavior:
-Opening message:
-{prompt_settings.get("opening_message", "")}
-
-Lead collection rules:
-{prompt_settings.get("lead_collection_rules", "")}
-
-Sales rules:
-{prompt_settings.get("sales_rules", "")}
-
-Human handoff rules:
-{prompt_settings.get("handoff_rules", "")}
-
-Platform-specific rules:
-{prompt_settings.get(platform_key, "")}
-
-Always-on business policy:
-{GENERIC_RESPONSE_GUARDRAILS}
-
-Safety rules:
-- Reply in the same language as the customer.
-- Understand Uzbek Latin, Uzbek Cyrillic, Russian, English, slang, typos, and mixed messages.
-- Answer the exact question first.
-- Check the known customer information block before asking for name or phone.
-- Never repeat the same lead-collection question after it has already been answered.
-- If the lead state shows the phone is already collected, do not ask for it again.
-- If the lead state shows the name is already collected, do not ask for it again.
-- If both are collected, acknowledge and move to the next sales step.
-- Never invent prices, stock, delivery, discounts, addresses, or availability.
-- Use only the business facts above.
-- If the customer asks for the phone/contact/manager number, provide the exact contact from Business facts.
-- If the topic is unrelated to this business, do not answer it; use the unrelated-topic refusal from the business policy.
-- If information is missing, ask 2-3 short clarifying questions.
-- Only mention a manager when the customer asks for a human or is ready to order.
-- Never mention AI, database, API, prompt, automation, or internal system.
-- Do not use markdown, bold formatting, or long paragraphs.
-- Never ask customers to specify which product/model a photo is about after they already sent a product image.
-- If a customer sends an image or asks about the image price and the exact product is not known, give a short helpful fallback and offer manager confirmation.
-- Respect the business runtime settings in the facts block, especially automation_mode, human_takeover_enabled, bot_language_mode, memory_enabled, and memory_limit.
-- Never end a reply with an unfinished phrase such as "uchun:", "link:", "havola:", or "ko'rish uchun:".
-- Every reply must finish as a complete sentence. Do not stop in the middle of a question or explanation.
-"""
-
-
-def wants_catalog(text: str) -> bool:
-    clean = normalize_id(text).strip()
-    compact = re.sub(r"\s+", "", clean)
-    if compact in {"+", "++"}:
-        return True
-    text = clean.lower()
-    keywords = [
-        "catalog", "katalog", "каталог", "price", "prices", "narx", "narxlari",
-        "narhi", "qancha", "qanchadan", "necha pul", "nechpul", "nechi pul",
-        "цена", "цены", "стоимость", "сколько", "сколько стоит", "прайс",
-        "model", "models", "modellari",
-        "модель", "модели", "collection", "kolleksiya", "коллекция",
-        "photo", "photos", "rasm", "rasmlar", "фото", "mahsulot",
-        "mahsulotlar", "товар", "товары",
-    ]
-    return any(k in text for k in keywords)
-
-
-PUBLIC_PRIVATE_INFO_REQUEST_MARKERS = (
-    "telefon raqamingiz",
-    "telefon nomeringiz",
-    "raqamingizni",
-    "nomeringizni",
-    "nomer qoldiring",
-    "raqam qoldiring",
-    "yozib qoldiring",
-    "ismingizni",
-    "ismingiz va telefon",
-    "phone number",
-    "leave your name",
-    "leave your phone",
-    "your number",
-    "contact number",
-    "номер телефона",
-    "оставьте номер",
-    "оставьте имя",
-    "ваше имя",
-    "телефон нөмір",
-    "атыңыз",
-)
-
-
-def is_public_private_info_request(text: str) -> bool:
-    lower = normalize_id(text).lower()
-    if not lower:
-        return False
-    return any(marker in lower for marker in PUBLIC_PRIVATE_INFO_REQUEST_MARKERS)
-
-
-def reaction_only_reply_text(text: str) -> str:
-    clean = normalize_id(text).strip()
-    if not clean:
-        return ""
-    compact = re.sub(r"\s+", "", clean)
-    if compact in {"+", "++"}:
-        return ""
-    emoji_only_re = re.compile(r"^[\u2600-\u27BF\U0001F300-\U0001FAFF\U0001F1E6-\U0001F1FF\u200d\ufe0f]+$")
-    return compact if emoji_only_re.fullmatch(compact) else ""
-
-
-def safe_public_comment_reply(text: str, business: dict = None) -> str:
-    reaction_reply = reaction_only_reply_text(text)
-    if reaction_reply:
-        return reaction_reply
-
-    reply = complete_sentence_reply(remove_urls(text), limit=1000)
-    if reply and not is_public_private_info_request(reply):
-        return reply
-
-    business_name = normalize_id((business or {}).get("business_name"))
-    if business_name:
-        return "Ma'lumotni direktga yubordik. Xabaringiz uchun rahmat."
-    return "Ma'lumotni direktga yubordik. Xabaringiz uchun rahmat."
-
-
-def is_conversation_finished_message(text: str) -> bool:
-    s = normalize_id(text).lower()
-    if not s:
-        return False
-    compact = re.sub(r"[\s.!?。！？,;:()\\-]+", "", s)
-    exact_markers = {
-        "ok", "okay", "okey", "kk",
-        "hop", "хоп", "xo'p", "xop", "хорошо",
-        "rahmat", "raxmat", "спасибо", "thanks", "thankyou",
-        "tushunarli", "понятно", "ясно",
-        "boldi", "bo'ldi", "bo‘ldi", "всё", "все",
-        "kerakmas", "kerakemas", "не надо", "nenado",
-        "stop", "bas", "хватит",
-    }
-    if compact in {re.sub(r"[\s.!?。！？,;:()\\-]+", "", item) for item in exact_markers}:
-        return True
-    finish_phrases = [
-        "boshqa savol yo'q",
-        "boshqa savolim yo'q",
-        "kerak emas rahmat",
-        "hozircha kerak emas",
-        "that's all",
-        "no more questions",
-        "don't message me",
-        "do not message me",
-        "не пишите",
-        "больше не нужно",
-        "вопросов нет",
-    ]
-    return any(phrase in s for phrase in finish_phrases)
-
-
-def is_price_question(text: str) -> bool:
-    text = normalize_id(text).lower()
-    if not text:
-        return False
-    return any(k in text for k in [
-        "narx", "narxi", "nechpul", "necha pul", "qancha", "kancha",
-        "цена", "сколько", "сколько стоит", "price", "how much", "cost",
-        "баға", "бағасы", "қанша",
-    ])
-
-
-def mentions_catalog(text: str) -> bool:
-    text = (text or "").lower()
-    markers = [
-        "catalog", "katalog", "каталог", "katalo", "катало",
-        "mahsulot", "товар", "products", "product",
-    ]
-    return any(m in text for m in markers)
-
-
-def is_greeting_only(text: str) -> bool:
-    s = normalize_id(text).lower()
-    s = re.sub(r"[^\w\s'’`-]+", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    if not s:
-        return False
-    greetings = {
-        "hi", "hello", "hey",
-        "salom", "assalomu alaykum", "assalomu", "alaykum",
-        "привет", "здравствуйте", "сәлем", "салем",
-    }
-    return s in greetings or (len(s.split()) <= 2 and s in {"salom", "hello", "hi", "hey", "привет", "сәлем"})
-
-
-def is_low_signal_message(text: str, raw_payload: dict = None) -> bool:
-    s = normalize_id(text)
-    if not s:
-        return False
-
-    compact = re.sub(r"\s+", "", s)
-    emoji_only_re = re.compile(r"^[\u2600-\u27BF\U0001F300-\U0001FAFF\U0001F1E6-\U0001F1FF\u200d\ufe0f]+$")
-    if compact and emoji_only_re.fullmatch(compact):
-        return True
-
-    # Common lightweight reactions we should not auto-reply to.
-    if compact in {"+", "++", "ok", "okk", "👍", "❤️", "🔥", "👏", "😂"}:
-        return True
-
-    payload = raw_payload or {}
-    message = payload.get("message") if isinstance(payload, dict) else {}
-    if isinstance(message, dict):
-        # Story reaction/quick reaction style payloads often carry explicit markers.
-        if message.get("is_story_reply") or message.get("story"):
-            return True
-        if message.get("reaction") and not (message.get("text") or "").strip():
-            return True
-
-    return False
-
-
-def is_auto_media_placeholder_message(text: str) -> bool:
-    s = normalize_id(text).strip().lower()
-    return s in {
-        "📸 photo",
-        "🎥 video",
-        "🎤 audio",
-        "📎 file",
-        "📎 attachment",
-        "🔁 forwarded post",
-        "🔁 forwarded reel",
-    }
-
-
-def is_forwarded_instagram_share_placeholder(text: str) -> bool:
-    return normalize_id(text).strip().lower() in {
-        "🔁 forwarded post",
-        "🔁 forwarded reel",
-    }
-
-
-def contains_forbidden_product_photo_question(text: str) -> bool:
-    s = normalize_id(text).lower()
-    if not s:
-        return False
-    s = (
-        s.replace("‘", "'")
-        .replace("’", "'")
-        .replace("`", "'")
-        .replace("o'", "o'")
-    )
-    compact = re.sub(r"\s+", " ", s).strip()
-    blocked_phrases = [
-        "siz qaysi mahsulot yoki model haqida foto so'rayapsiz",
-        "siz qaysi mahsulot yoki model haqida rasm so'rayapsiz",
-        "qaysi mahsulot yoki model haqida foto so'rayapsiz",
-        "qaysi mahsulot yoki model haqida rasm so'rayapsiz",
-        "qaysi mahsulot yoki model haqida",
-    ]
-    if any(phrase in compact for phrase in blocked_phrases):
-        return True
-    return bool(re.search(r"qaysi\s+mahsulot\s+yoki\s+model.*(foto|rasm|so'?ray)", compact))
-
-
-def generic_price_fallback_reply(user_text: str, business: dict = None) -> str:
-    lang = detect_customer_language(user_text)
-    if lang == "en":
-        return "Which model do you need? I will tell you the price."
-    if lang == "ru":
-        return "Какая модель вам нужна? Я скажу цену."
-    if lang == "kk":
-        return "Қай модель керек? Бағасын айтып беремін."
-    return "Qaysi model kerak? Narxini aytaman."
-
-
-def is_wholesale_inquiry(text: str) -> bool:
-    s = normalize_id(text).lower()
-    if not s:
-        return False
-    markers = [
-        "optom", "оптом", "опт", "wholesale", "ulgurji", "ulguji",
-        "цены оптом", "оптов", "оптовый", "оптовая",
-        "ulgurji narx", "optom narx", "wholesale price",
-    ]
-    return any(marker in s for marker in markers)
-
-
-def is_generic_media_wholesale_inquiry(
-    user_text: str,
-    media_type: str = "",
-    post_permalink: str = "",
-    post_media_type: str = "",
-) -> bool:
-    if not is_wholesale_inquiry(user_text):
-        return False
-    media_type = normalize_id(media_type).lower()
-    post_media_type = normalize_id(post_media_type).lower()
-    permalink = normalize_id(post_permalink).lower()
-    return (
-        media_type in {"video", "file"}
-        or "video" in post_media_type
-        or "reel" in post_media_type
-        or "/reel/" in permalink
-    )
-
-
-def build_generic_wholesale_intro_reply(user_text: str, business: dict = None) -> str:
-    has_catalog = bool(get_catalog_link(business or {}))
-    lang = detect_customer_language(user_text)
-    if lang == "en":
-        base = (
-            "Hello! We sell wholesale in USD. Minimum order is from 1 qop/meshok per model. "
-            "Send a photo, screenshot, or model code, and I will tell you the exact price."
-        )
-        return base + (" If you want, I can also send the catalog." if has_catalog else "")
-    if lang == "ru":
-        base = (
-            "Здравствуйте! Мы продаём оптом в USD. Минимальный заказ — от 1 qop/мешка на модель. "
-            "Отправьте фото, стоп-кадр или код модели, и я сразу скажу точную цену."
-        )
-        return base + (" Если хотите, могу сразу отправить каталог." if has_catalog else "")
-    if lang == "kk":
-        base = (
-            "Сәлеметсіз бе! Біз USD бойынша көтерме сатамыз. Ең аз тапсырыс — бір модельден 1 qop/мешок. "
-            "Фото, стоп-кадр немесе модель кодын жіберіңіз, нақты бағасын бірден айтамын."
-        )
-        return base + (" Қаласаңыз, каталогты да жіберемін." if has_catalog else "")
-    base = (
-        "Assalomu alaykum! Biz USDda ulgurji sotamiz. Minimal buyurtma — 1 modeldan 1 qop/meshok. "
-        "Foto, stop-kadr yoki model kodini yuboring, aniq narxini darrov aytaman."
-    )
-    return base + (" Xohlasangiz, katalogni ham yuboraman." if has_catalog else "")
-
-
-def product_media_price_fallback_reply(user_text: str, business: dict = None) -> str:
-    lang = detect_customer_language(user_text)
-    if lang == "en":
-        return "Thanks. Send a clearer photo or the model code, and I will tell you the price."
-    if lang == "ru":
-        return "Спасибо. Отправьте фото чётче или код модели, и я скажу цену."
-    if lang == "kk":
-        return "Рахмет. Анығырақ фото не модель кодын жіберіңіз, бағасын айтамын."
-    return "Rahmat. Aniqroq rasm yoki model kodini yuboring, narxini aytaman."
-
-
-def business_products_summary(business: dict = None, limit: int = 4) -> str:
-    business = business or {}
-    raw = normalize_id(business.get("products"))
-    if not raw:
-        return ""
-
-    parts = []
-    for chunk in re.split(r"[,;\n/]+", raw):
-        clean = re.sub(r"\s+", " ", normalize_id(chunk)).strip(" .:-")
-        if clean and clean.lower() not in {item.lower() for item in parts}:
-            parts.append(clean)
-        if len(parts) >= limit:
-            break
-    return ", ".join(parts)
-
-
-def replacement_for_forbidden_product_photo_question(user_text: str = "", business: dict = None) -> str:
-    lang = detect_customer_language(user_text)
-    if lang == "en":
-        if is_price_question(user_text):
-            return "Thanks. Send a clearer photo or the model code, and I will tell you the price."
-        return "Thanks. Which model are you interested in?"
-    if lang == "ru":
-        if is_price_question(user_text):
-            return "Спасибо. Отправьте фото чётче или код модели, и я скажу цену."
-        return "Спасибо. Какая модель вас интересует?"
-    if lang == "kk":
-        if is_price_question(user_text):
-            return "Рахмет. Анығырақ фото не модель кодын жіберіңіз, бағасын айтамын."
-        return "Рахмет. Қай модель қызықтырады?"
-    if is_price_question(user_text):
-        return "Rahmat. Aniqroq rasm yoki model kodini yuboring, narxini aytaman."
-    return "Rahmat. Qaysi model kerak?"
-
-
-def get_sales_phone(business: dict) -> str:
-    return normalize_id(
-        (business or {}).get("sales_phone")
-        or os.getenv("SALES_PHONE", "")
-        or os.getenv("CONTACT_PHONE", "")
-        or os.getenv("BUSINESS_PHONE", "")
-        or os.getenv("MILANA_SALES_PHONE", "")
-    )
-
-
-def wants_business_phone_number(text: str) -> bool:
-    s = normalize_id(text).lower()
-    if not s:
-        return False
-
-    # If the customer is leaving their own phone number, do not answer with ours.
-    if re.search(r"\b(?:\+?998)?\s*\d{2}[\s-]?\d{3}[\s-]?\d{2}[\s-]?\d{2}\b", s):
-        return False
-
-    phone_markers = [
-        "telefon", "tel", "phone", "phone number", "contact", "kontakt",
-        "nomer", "номер", "телефон", "контакт", "raqam", "рақам",
-    ]
-    owner_markers = [
-        "sizni", "sizning", "raqamingiz", "nomeringiz", "telefoningiz",
-        "menejer", "menedjer", "manager", "admin", "админ", "менеджер",
-        "operator", "sales", "sotuvchi",
-    ]
-    request_markers = [
-        "bering", "yuboring", "jo'nating", "jonating", "bormi", "bor mi",
-        "kerak", "ayting", "yozing", "бер", "дайте", "номер есть",
-        "send", "give", "share", "can i call", "call you",
-    ]
-
-    has_phone_word = any(marker in s for marker in phone_markers)
-    has_owner_word = any(marker in s for marker in owner_markers)
-    has_request_word = any(marker in s for marker in request_markers)
-
-    direct_patterns = [
-        r"\b(menejer|menedjer|manager|admin|operator)\s+(raqam|nomer|telefon)",
-        r"\b(raqam|nomer|telefon)\w*\s+(ber|yubor|jo'?nat|bor|bormi)",
-        r"\b(phone|contact)\s+(number|details)?\s*(please|send|give|share)?",
-        r"(номер|телефон|контакт).*(дайте|есть|можно|менеджер)",
-    ]
-    return (has_phone_word and (has_owner_word or has_request_word)) or any(
-        re.search(pattern, s) for pattern in direct_patterns
-    )
-
-
-def sales_phone_reply(user_text: str, business: dict) -> str:
-    phone = get_sales_phone(business)
-    if not phone:
-        return ""
-
-    lang = detect_customer_language(user_text)
-    if lang == "en":
-        return f"You can contact our manager at this number: {phone}."
-    if lang == "ru":
-        return f"С менеджером можно связаться по этому номеру: {phone}."
-    if lang == "kk":
-        return f"Менеджермен осы нөмір арқылы байланыса аласыз: {phone}."
-    return f"Menejerimiz bilan shu raqam orqali bog'lanishingiz mumkin: {phone}."
-
-
-def wants_deal_handoff(text: str) -> bool:
-    s = normalize_id(text).lower()
-    if not s:
-        return False
-    markers = [
-        "payment", "pay", "prepayment", "invoice", "contract", "agreement", "manager",
-        "оплата", "оплатить", "счет", "инвойс", "договор", "менеджер",
-        "to'lov", "tolov", "oplata", "shartnoma", "hisob-faktura", "invoice", "menejer",
-        "төлем", "шарт", "келісімшарт", "менеджер",
-    ]
-    return any(m in s for m in markers)
-
-
-def detect_customer_language(text: str) -> str:
-    text = normalize_id(text)
-    lower = text.lower()
-    if not lower:
-        return ""
-
-    english_words = {
-        "hi", "hello", "hey", "can", "could", "would", "make", "purchase", "buy", "order",
-        "price", "how", "much", "where", "shipping", "delivery", "catalog", "available",
-        "need", "want", "please", "thanks", "thank", "size", "color", "model",
-    }
-    uzbek_latin_markers = {
-        "salom", "assalomu", "alaykum", "narx", "qancha", "qayer", "kerak", "olmoq",
-        "sotib", "mahsulot", "katalog", "manzil", "rahmat", "bormi", "necha",
-        "nechpul", "nechi", "pul", "shu", "bo'lad", "bolad", "qop",
-    }
-    kazakh_markers = {
-        "сәлем", "салем", "қалай", "баға", "бағасы", "қанша", "қажет", "жеткізу",
-        "тапсырыс", "каталог", "тауар", "бар", "мен", "сіз", "үшін",
-    }
-    russian_words = {
-        "здравствуйте", "привет", "цена", "сколько", "купить", "заказ", "доставка",
-        "каталог", "размер", "цвет", "модель", "есть", "можно",
-    }
-
-    words = set(re.findall(r"[a-zA-Z']+|[А-Яа-яЁё]+", lower))
-    if any(m in lower for m in kazakh_markers):
-        return "kk"
-    if words & russian_words:
-        return "ru"
-    if words & english_words and not (words & uzbek_latin_markers):
-        return "en"
-    if re.search(r"[А-Яа-яЁё]", lower):
-        return "ru"
-    if words & uzbek_latin_markers:
-        return "uz"
-    return ""
-
-
-def language_instruction_for(text: str) -> str:
-    lang = detect_customer_language(text)
-    if lang == "en":
-        return "The latest customer message is in English. Reply only in English. Do not use Uzbek, Russian, or Kazakh words."
-    if lang == "ru":
-        return "Последнее сообщение клиента на русском. Отвечай только на русском языке."
-    if lang == "kk":
-        return "Клиенттің соңғы хабары қазақ тілінде. Тек қазақ тілінде жауап бер."
-    if lang == "uz":
-        return "Mijozning oxirgi xabari o'zbek tilida. Faqat o'zbek tilida javob ber."
-    return ""
-
-
-def media_matcher_language(text: str) -> str:
-    lang = detect_customer_language(text)
-    if lang in {"uz", "ru", "en"}:
-        return lang
-    return "uz"
-
-
-def business_scope_terms(business: dict = None) -> set[str]:
-    business = business or {}
-    terms = set()
-    for field in (
-        "business_name",
-        "business_type",
-        "products",
-        "prices",
-        "delivery_info",
-        "faq",
-        "catalog_link",
-        "sales_phone",
-        "knowledge",
-    ):
-        value = normalize_id(business.get(field))
-        for word in re.findall(r"[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ0-9']{3,}", value.lower()):
-            terms.add(word)
-    return terms
-
-
-def has_strong_business_sales_context(text: str, business: dict = None) -> bool:
-    s = normalize_id(text).lower()
-    if not s:
-        return False
-    if mentions_catalog(s):
-        return True
-    business_terms = business_scope_terms(business)
-    if business_terms and any(term in s for term in business_terms):
-        return True
-    markers = [
-        "product", "products", "service", "services", "mahsulot", "mahsulotlar", "товар", "товары",
-        "model", "модель", "rang", "color", "цвет", "size", "razmer", "размер",
-        "sifat", "quality", "качество", "pack", "bag", "qop", "meshok", "quti",
-        "optom", "optima", "ulgurji", "wholesale", "оптом", "опт",
-        "dostavka", "delivery", "yetkaz", "yetqaz", "доставка", "pochta", "почта",
-        "cargo", "kargo", "карго", "manzil", "address", "адрес", "qayerdasiz",
-        "where are you", "where located", "location", "lokatsiya", "локация",
-        "telefon", "phone number", "nomer", "raqam", "номер", "связаться",
-        "menejer", "manager", "менеджер", "admin", "админ",
-        "brak", "defect", "warranty", "garantiya", "гарантия", "qaytar",
-        "narx", "narxi", "nechpul", "necha pul", "qancha", "kancha", "price",
-        "qimmat", "arzon", "expensive", "cheap", "дорого", "дешево",
-        "bor", "bormi", "mavjud", "available", "есть", "в наличии",
-        "hamkorlik", "partnership", "сотрудничество", "ish vaqti", "working hours",
-    ]
-    return any(marker in s for marker in markers)
-
-
-def has_business_sales_context(text: str, business: dict = None) -> bool:
-    s = normalize_id(text).lower()
-    if not s:
-        return False
-    if has_strong_business_sales_context(s, business) or wants_catalog(s) or wants_deal_handoff(s):
-        return True
-    generic_sales_markers = [
-        "kerak", "need", "want", "хочу", "interested", "qiziq", "интерес",
-        "tanlash", "choose", "выбрать", "ko'rsat", "korsat", "show me", "покажите",
-    ]
-    return any(marker in s for marker in generic_sales_markers)
-
-
-def is_obviously_unrelated_topic(text: str, business: dict = None) -> bool:
-    s = normalize_id(text).lower()
-    if not s:
-        return False
-    if is_greeting_only(s) or is_low_signal_message(s):
-        return False
-    if has_strong_business_sales_context(s, business):
-        return False
-
-    unrelated_markers = [
-        "ob havo", "ob-havo", "weather", "погода", "ауа райы",
-        "hazil", "anekdot", "joke", "tell me a joke", "шутка", "анекдот", "kuldir",
-        "python", "javascript", "react", "frontend", "backend", "html", "css",
-        "write code", "kod yoz", "code yoz", "dastur tuz", "программ", "написать код",
-        "prezident", "president", "siyosat", "politics", "saylov", "election",
-        "президент", "политика", "выборы", "правительство",
-        "uy vazifa", "uyga vazifa", "homework", "essay", "referat", "matematika",
-        "math", "tarix", "history", "solve", "реши", "сочинение", "реферат",
-        "doctor", "medicine", "dori", "shifokor", "kasal", "врач", "лекарство", "болезн",
-        "lawyer", "legal", "law", "advokat", "yurist", "qonun", "юрист", "адвокат", "закон",
-        "namoz", "quron", "qur'on", "hadis", "religion", "дин", "намаз", "коран",
-        "sevgi", "relationship", "boyfriend", "girlfriend", "oilaviy muammo",
-        "news", "новости", "futbol", "football", "kurs valyuta", "dollar kursi", "курс доллара",
-        "bitcoin", "crypto", "btc", "iphone", "samsung", "pizza", "restaurant",
-        "translate", "tarjima qil", "переведи", "who is", "what is", "tell me about",
-    ]
-    if any(marker in s for marker in unrelated_markers):
-        return True
-
-    if re.search(r"\b\d+\s*[\+\-\*/]\s*\d+\b", s):
-        return True
-
-    if has_business_sales_context(s, business):
-        return False
-
-    return False
-
-
-def unrelated_topic_reply(text: str, business: dict = None) -> str:
-    if not is_obviously_unrelated_topic(text, business):
-        return ""
-    lang = detect_customer_language(text)
-    business_name = normalize_id((business or {}).get("business_name")) or "this business"
-    if lang == "en":
-        return f"Sorry, I can only help with {business_name} products/services, catalog, prices, and orders. Do you need the catalog or should I connect you with a manager?"
-    if lang == "ru":
-        return f"Извините, я могу помочь только с товарами/услугами {business_name}, каталогом, ценами и заказом. Нужен каталог или связать вас с менеджером?"
-    if lang == "kk":
-        return f"Кешіріңіз, мен тек {business_name} тауарлары/қызметтері, каталог, баға және тапсырыс бойынша көмектесе аламын. Каталог керек пе әлде менеджермен байланыстырайын ба?"
-    return f"Kechirasiz, men faqat {business_name} mahsulotlari/xizmatlari, katalog, narx va buyurtma bo'yicha yordam bera olaman. Katalog kerakmi yoki menejer bilan bog'laymi?"
-
-
-def get_catalog_link(business: dict) -> str:
-    link = business.get("catalog_link") or business.get("catalog") or business.get("website") or ""
-    link = str(link).strip()
-    if link and not link.startswith(("http://", "https://")):
-        link = "https://" + link
-    return link
-
-
-def remove_urls(text: str) -> str:
-    text = re.sub(r"https?://\S+", "", text or "").strip()
-    text = re.sub(r"\s+", " ", text).strip()
-    return strip_incomplete_reply(text)
-
-
-def strip_incomplete_reply(text: str) -> str:
-    text = normalize_id(text)
-    if not text:
-        return ""
-
-    trailing_patterns = [
-        r"\s*(?:joylashuv xaritasini\s*)?(?:ko['‘’`]?rish|ochish)\s+uchun\s*[:：]?\s*$",
-        r"\s*(?:xarita|lokatsiya|location|map|manzil linki|ссылка|карта)[^.!?]{0,100}\s*[:：]\s*$",
-        r"\s*(?:link|havola|ссылка)\s*[:：]\s*$",
-    ]
-    for pattern in trailing_patterns:
-        text = re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
-
-    # If URL removal leaves a final unfinished clause after a complete sentence, drop it.
-    if re.search(r"[:：]\s*$", text):
-        last_stop = max(text.rfind("."), text.rfind("!"), text.rfind("?"))
-        if last_stop >= 0:
-            fragment = text[last_stop + 1:].strip().lower()
-            if any(word in fragment for word in ["uchun", "link", "havola", "xarita", "map", "ссылка", "карта"]):
-                text = text[:last_stop + 1].strip()
-
-    return text.rstrip(" :：,;-").strip()
-
-
-def complete_sentence_reply(text: str, limit: int = 1000) -> str:
-    text = strip_incomplete_reply(text)
-    if not text:
-        return ""
-
-    if len(text) > limit:
-        text = text[:limit].rsplit(" ", 1)[0].strip()
-        text = strip_incomplete_reply(text)
-
-    sentence_end = ".!?。！？"
-    soft_endings = ("😊", "👍", "🙌", "✅")
-    if text.endswith(tuple(sentence_end)) or text.endswith(soft_endings):
-        return text
-
-    last_stop = max(text.rfind("."), text.rfind("!"), text.rfind("?"), text.rfind("。"), text.rfind("！"), text.rfind("？"))
-    if last_stop >= 40:
-        return strip_incomplete_reply(text[:last_stop + 1])
-
-    return text.rstrip(" :：,;-").strip() + "."
-
-
-LEAD_PHONE_ASK_MARKERS = (
-    "telefon raqamingizni",
-    "telefon raqamingiz",
-    "telefon nomeringizni",
-    "raqamingizni yozib qoldiring",
-    "nomer qoldiring",
-    "phone number",
-    "leave your name and phone number",
-    "please leave your name and phone number",
-    "номер телефона",
-    "оставьте, пожалуйста, ваше имя и номер телефона",
-)
-
-
-LEAD_NAME_ASK_MARKERS = (
-    "ismingizni",
-    "ismingiz nima",
-    "ismingiz va telefon raqamingizni",
-    "your name",
-    "what is your name",
-    "ваше имя",
-    "как вас зовут",
-    "атыңызды",
-)
-
-
-def _reply_mentions_phone_request(text: str) -> bool:
-    lower = normalize_id(text).lower()
-    return any(marker in lower for marker in LEAD_PHONE_ASK_MARKERS)
-
-
-def _reply_mentions_name_request(text: str) -> bool:
-    lower = normalize_id(text).lower()
-    return any(marker in lower for marker in LEAD_NAME_ASK_MARKERS)
-
-
-def lead_followup_reply(user_text: str, business: dict = None, lead_state: dict = None) -> str:
-    lang = detect_customer_language(user_text)
-    state = normalize_lead_state(lead_state)
-    has_phone = bool(state.get("phone_collected"))
-    has_name = bool(state.get("name_collected"))
-
-    if has_phone and has_name:
-        if lang == "en":
-            return "Thanks, we have your details. Our manager will contact you."
-        if lang == "ru":
-            return "Спасибо, мы получили ваши данные. Наш менеджер свяжется с вами."
-        if lang == "kk":
-            return "Рақмет, мәліметтеріңізді алдық. Менеджеріміз сізбен байланысады."
-        return "Rahmat, ma'lumotlaringizni oldik. Menejerimiz siz bilan bog'lanadi."
-
-    if has_phone and not has_name:
-        if lang == "en":
-            return "Thanks, we got your phone number. Please leave your name too, and our manager will contact you."
-        if lang == "ru":
-            return "Спасибо, ваш номер мы получили. Пожалуйста, оставьте еще имя, и наш менеджер свяжется с вами."
-        if lang == "kk":
-            return "Рақмет, телефон нөміріңізді алдық. Атыңызды да жазып жіберсеңіз, менеджеріміз хабарласады."
-        return "Rahmat, telefon raqamingizni oldik. Ismingizni ham yozib qoldirsangiz, menejerimiz siz bilan bog'lanadi."
-
-    if has_name and not has_phone:
-        if lang == "en":
-            return "Thanks, we got your name. Please leave your phone number too, and our manager will contact you."
-        if lang == "ru":
-            return "Спасибо, ваше имя мы получили. Пожалуйста, оставьте еще номер телефона, и наш менеджер свяжется с вами."
-        if lang == "kk":
-            return "Рақмет, атыңызды алдық. Телефон нөміріңізді де жіберсеңіз, менеджеріміз хабарласады."
-        return "Rahmat, ismingizni oldik. Telefon raqamingizni ham yozib qoldirsangiz, menejerimiz siz bilan bog'lanadi."
-
-    return ""
-
-
-def enforce_lead_reply_guardrails(reply_text: str, user_text: str, business: dict = None, lead_state: dict = None) -> str:
-    reply = normalize_id(reply_text)
-    if not reply:
-        return ""
-
-    state = normalize_lead_state(lead_state)
-    user_has_phone = bool(extract_phone_candidates(user_text))
-    user_has_name = bool(extract_customer_name_candidate(user_text))
-    phone_collected = bool(state.get("phone_collected") or user_has_phone)
-    name_collected = bool(state.get("name_collected") or user_has_name)
-
-    phone_request = _reply_mentions_phone_request(reply)
-    name_request = _reply_mentions_name_request(reply)
-
-    if phone_collected and phone_request:
-        fallback = lead_followup_reply(user_text, business, {**state, "phone_collected": True, "name_collected": name_collected})
-        if fallback:
-            return fallback
-
-    if name_collected and name_request and phone_collected:
-        fallback = lead_followup_reply(user_text, business, {**state, "phone_collected": True, "name_collected": True})
-        if fallback:
-            return fallback
-
-    if phone_collected and name_collected and (phone_request or name_request):
-        fallback = lead_followup_reply(user_text, business, {**state, "phone_collected": True, "name_collected": True})
-        if fallback:
-            return fallback
-
-    if phone_collected and not name_collected and phone_request and not name_request:
-        fallback = lead_followup_reply(user_text, business, {**state, "phone_collected": True, "name_collected": False})
-        if fallback:
-            return fallback
-
-    if name_collected and not phone_collected and name_request and not phone_request:
-        fallback = lead_followup_reply(user_text, business, {**state, "phone_collected": False, "name_collected": True})
-        if fallback:
-            return fallback
-
-    return reply
-
-
-def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
-    catalog_link = get_catalog_link(business)
-    if catalog_link and catalog_link in (reply_text or ""):
-        reply_text = reply_text.replace(catalog_link, "")
-
-    reply_text = remove_urls(reply_text)
-
-    for phrase in ["Katalogni ko'rishni xohlaysizmi?", "Katalogni ko'ring:", "Catalog:", "Catalogue:"]:
-        reply_text = reply_text.replace(phrase, "")
-
-    reply_text = reply_text.strip()
-    if not reply_text:
-        reply_text = "Albatta 😊 Katalogni quyidagi tugma orqali ko'rishingiz mumkin."
-    return complete_sentence_reply(reply_text, limit=1000)
-
-
-def catalog_card_subtitle(business: dict) -> str:
-    business_name = normalize_id((business or {}).get("business_name"))
-    if len(business_name) <= 22:
-        return f"{business_name} katalogi tayyor." if business_name else "Katalog tayyor."
-    return "Katalog tayyor. Tugmani bosing."
-
-
-def catalog_template_payload(recipient: dict, business: dict, text: str = "") -> dict:
-    catalog_link = get_catalog_link(business)
-    business_name = normalize_id((business or {}).get("business_name")) or "Bizning katalog"
-    text = clean_ai_reply_for_catalog(text, business)
-    if not text:
-        text = f"{business_name} katalogi shu yerda. Qaysi mahsulotlar sizni qiziqtirmoqda?"
-
-    return {
-        "recipient": recipient,
-        "message": {
-            "attachment": {
-                "type": "template",
-                "payload": {
-                    "template_type": "generic",
-                    "elements": [
-                        {
-                            "title": "Katalogni ko'rish",
-                            "subtitle": catalog_card_subtitle(business),
-                            "default_action": {
-                                "type": "web_url",
-                                "url": catalog_link,
-                            },
-                            "buttons": [
-                                {
-                                    "type": "web_url",
-                                    "url": catalog_link,
-                                    "title": "Katalogni ko'rish",
-                                }
-                            ],
-                        }
-                    ],
-                },
-            }
-        },
-    }
-
-
-AI_DEFAULT_MODELS = {
-    "mistral": "mistral-small-latest",
-    "openai": "gpt-4o-mini",
-    "gemini": "gemini-1.5-flash",
-    "anthropic": "claude-3-5-haiku-latest",
+function ownerEmailFromUrl() {
+  return normalizeOwnerEmail(
+    urlParams.get(OWNER_EMAIL_PARAM) ||
+    urlParams.get('owner') ||
+    urlParams.get('email') ||
+    ''
+  );
 }
 
+function ownerEmailFromStorage() {
+  return normalizeOwnerEmail(window.localStorage.getItem(OWNER_EMAIL_STORAGE_KEY) || '');
+}
 
-def infer_ai_provider(model: str) -> str:
-    model = str(model or "").lower()
-    if model.startswith(("gpt-", "o1", "o3", "o4")):
-        return "openai"
-    if model.startswith("gemini"):
-        return "gemini"
-    if model.startswith("claude"):
-        return "anthropic"
-    if model.startswith("mistral"):
-        return "mistral"
-    return "openai"
+function resolvedOwnerEmail() {
+  return ownerEmailFromUrl() || ownerEmailFromStorage() || normalizeOwnerEmail(window.INSTAAGENT_OWNER_EMAIL || '');
+}
 
+if (ownerEmailFromUrl()) {
+  window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, ownerEmailFromUrl());
+}
 
-def infer_ai_provider_strict(model: str) -> str:
-    model = str(model or "").lower()
-    if model.startswith(("gpt-", "o1", "o3", "o4")):
-        return "openai"
-    if model.startswith("gemini"):
-        return "gemini"
-    if model.startswith("claude"):
-        return "anthropic"
-    if model.startswith("mistral"):
-        return "mistral"
-    return ""
+function readAuthSession() {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(DASHBOARD_AUTH_STORAGE_KEY) || '{}');
+    if (!parsed || typeof parsed !== 'object') return null;
+    const ownerEmail = normalizeOwnerEmail(parsed.ownerEmail);
+    const token = String(parsed.token || '').trim();
+    if (!ownerEmail || !token) return null;
+    return {
+      ownerEmail,
+      token,
+      isAdmin: parsed.isAdmin === true,
+      role: parsed.role || '',
+      at: parsed.at || '',
+    };
+  } catch {
+    return null;
+  }
+}
 
+function saveAuthSession(ownerEmail, session = {}) {
+  const clean = normalizeOwnerEmail(ownerEmail);
+  if (!clean) return;
+  window.localStorage.setItem(DASHBOARD_AUTH_STORAGE_KEY, JSON.stringify({
+    ownerEmail: clean,
+    token: session.token || '',
+    isAdmin: session.isAdmin === true,
+    role: session.role || '',
+    at: new Date().toISOString(),
+  }));
+  window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, clean);
+}
 
-def get_ai_provider(business: dict) -> str:
-    provider = str(business.get("ai_provider") or "").strip().lower()
-    inferred = infer_ai_provider_strict(business.get("ai_model"))
-    if inferred and inferred != provider:
-        return inferred
-    if provider in AI_DEFAULT_MODELS:
-        return provider
-    return infer_ai_provider(business.get("ai_model"))
+function clearAuthSession() {
+  window.localStorage.removeItem(DASHBOARD_AUTH_STORAGE_KEY);
+  window.localStorage.removeItem(OWNER_EMAIL_STORAGE_KEY);
+  window.localStorage.removeItem('instaagent_dashboard_secret');
+  window.sessionStorage.removeItem('instaagent_dashboard_secret');
+}
 
+function localDevDashboardSession() {
+  if (dashboardSecret() !== 'localdev') return null;
+  const ownerEmail = ownerEmailFromUrl() || ownerEmailFromStorage() || 'milanapremium2025@gmail.com';
+  return {
+    ownerEmail: normalizeOwnerEmail(ownerEmail),
+    token: 'localdev-demo-token',
+    isAdmin: true,
+    role: 'super_admin',
+    at: new Date().toISOString(),
+  };
+}
 
-def get_ai_api_key(business: dict, provider: str) -> str:
-    if provider == "openai":
-        return business.get("openai_api_key") or OPENAI_API_KEY
-    if provider == "gemini":
-        return business.get("gemini_api_key") or GEMINI_API_KEY
-    if provider == "anthropic":
-        return business.get("anthropic_api_key") or ANTHROPIC_API_KEY
-    return business.get("mistral_api_key") or MISTRAL_API_KEY or ""
+function isLocalDevDashboardMode() {
+  return dashboardSecret() === 'localdev';
+}
 
+function resolveRoleScope(currentUser = {}, businesses = []) {
+  const rawRole = String(currentUser?.role || '').trim().toLowerCase();
+  const adminRoles = new Set(['owner', 'admin', 'super_admin']);
+  if (adminRoles.has(rawRole)) return { role: rawRole, isOperator: false };
+  if (rawRole === 'operator') return { role: 'operator', isOperator: true };
+  if (currentUser?.isAdmin === true) return { role: 'admin', isOperator: false };
 
-def build_sales_system_prompt(business: dict, platform: str = "instagram") -> str:
-    return build_platform_prompt(platform, business)
+  const email = normalizeOwnerEmail(currentUser?.ownerEmail || currentUser?.email || '');
+  if (email) {
+    const ownsBusiness = (businesses || []).some((row) => normalizeOwnerEmail(row?.owner_email || '') === email);
+    if (ownsBusiness) return { role: 'owner', isOperator: false };
+  }
+  return { role: rawRole || 'operator', isOperator: true };
+}
 
+function scopedPath(path) {
+  const ownerEmail = resolvedOwnerEmail();
+  if (!ownerEmail) return path;
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}${OWNER_EMAIL_PARAM}=${encodeURIComponent(ownerEmail)}`;
+}
 
-def call_ai_chat(messages: list, business: dict, log_label: str) -> str:
-    provider = get_ai_provider(business)
-    model = business.get("ai_model") or AI_DEFAULT_MODELS[provider]
-    api_key = get_ai_api_key(business, provider)
-    temperature = float(business.get("ai_temperature", 0.5) or 0.5)
-    max_tokens = max(500, int(business.get("ai_max_tokens", 500) or 500))
+const API = {
+  isAbortError(err) {
+    const message = String(err?.message || err || '').toLowerCase();
+    return message.includes('aborted') || message.includes('aborterror') || message.includes('signal is aborted');
+  },
+  async fetchWithTimeout(url, options = {}, timeoutMs = 35000) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } catch (err) {
+      if (API.isAbortError(err)) {
+        throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s. Please retry.`);
+      }
+      throw err;
+    } finally {
+      window.clearTimeout(timer);
+    }
+  },
+  async get(path, { timeoutMs = 35000 } = {}) {
+    const res = await API.fetchWithTimeout(`${API_BASE}${scopedPath(path)}`, { headers: apiHeaders() }, timeoutMs);
+    const data = await res.json();
+    if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
+    return data;
+  },
+  async post(path, params = {}, { timeoutMs = 35000 } = {}) {
+    const qs = new URLSearchParams(params);
+    const endpoint = `${scopedPath(path)}${qs.toString() ? `${scopedPath(path).includes('?') ? '&' : '?'}${qs.toString()}` : ''}`;
+    const res = await API.fetchWithTimeout(`${API_BASE}${endpoint}`, {
+      method: 'POST',
+      headers: apiHeaders(),
+    }, timeoutMs);
+    const data = await res.json();
+    if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
+    return data;
+  },
+  async postJson(path, body = {}, { timeoutMs = 35000 } = {}) {
+    const res = await API.fetchWithTimeout(`${API_BASE}${scopedPath(path)}`, {
+      method: 'POST',
+      headers: { ...apiHeaders(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, owner_email: body?.owner_email || resolvedOwnerEmail() || undefined }),
+    }, timeoutMs);
+    const data = await res.json();
+    if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
+    return data;
+  },
+  async delete(path, { timeoutMs = 35000 } = {}) {
+    const res = await API.fetchWithTimeout(`${API_BASE}${scopedPath(path)}`, {
+      method: 'DELETE',
+      headers: apiHeaders(),
+    }, timeoutMs);
+    const data = await res.json();
+    if (!res.ok || data.status === 'error' || data.error) throw new Error(apiErrorMessage(data, res.status));
+    return data;
+  },
+};
 
-    if not api_key:
-        log("Missing AI API key", {"provider": provider, "model": model})
-        return ""
+const THREAD_POLL_MS = 1200;
+const INBOX_POLL_MS = 2000;
+const STATS_POLL_MS = 20000;
+const THREAD_WARMUP_CONCURRENCY = 6;
+const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
+const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
+const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
+const LEAD_PRICES_STORAGE_KEY = 'instaagent_lead_prices';
+const CLIENT_OWNERS_STORAGE_KEY = 'instaagent_client_owners';
+const MANUAL_CLIENTS_STORAGE_KEY = 'instaagent_manual_clients';
+const MANUAL_LEADS_STORAGE_KEY = 'instaagent_manual_leads';
+const OPERATOR_DEALS_STORAGE_KEY = 'instaagent_operator_deals';
+const OPERATOR_ADMIN_NOTES_STORAGE_KEY = 'instaagent_operator_admin_notes';
+const USER_PROFILE_STORAGE_KEY = 'instaagent_user_profiles';
+const CACHED_CONVERSATIONS_STORAGE_KEY = 'instaagent_cached_conversations_v1';
+const CACHED_THREADS_STORAGE_KEY = 'instaagent_cached_threads_v1';
+const DASHBOARD_HASH = '#dashboard';
+const UI_LANG_STORAGE_KEY = 'instaagent_ui_lang';
 
-    if provider in {"mistral", "openai"}:
-        url = "https://api.mistral.ai/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        if provider == "openai":
-            url = "https://api.openai.com/v1/chat/completions"
+const LANDING_PREVIEWS = [
+  ['inbox', '/screenshots/inbox.png'],
+  ['knowledge', '/screenshots/inbox-4.png'],
+  ['prompts', '/screenshots/inbox-7.png'],
+  ['insights', '/screenshots/inbox-8.png'],
+  ['details', '/screenshots/02-with-wa.png'],
+];
 
-        res = requests.post(
-            url,
-            headers=headers,
-            json={
-                "model": model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            },
-            timeout=30,
-        )
-        log(log_label, {"provider": provider, "model": model, "status": res.status_code, "body": res.text[:1000]})
-        if not res.ok:
-            return ""
+const LANDING_TEXT = {
+  en: {
+    appName: 'Instaagent',
+    navFeatures: 'Features',
+    navDashboard: 'Dashboard',
+    navAiControl: 'AI Control',
+    navFaq: 'FAQ',
+    openDashboard: 'Open Dashboard',
+    eyebrow: 'Instaagent for Milana Premium and modern sales teams',
+    heroTitle: 'AI Sales Assistant for Instagram, Telegram, and WhatsApp',
+    heroCopy: 'Manage all customer chats in one dashboard, let AI reply naturally, and help your sales team close more orders.',
+    getStarted: 'Get Started',
+    bookDemo: 'Book Demo',
+    featureKicker: 'Product features',
+    featureTitle: 'Everything your sales team needs to reply faster',
+    features: [
+      ['Unified Inbox', 'Instagram, Telegram, and WhatsApp chats in one place.'],
+      ['AI Auto Replies', 'Natural short replies based on business knowledge.'],
+      ['Human Takeover', 'Turn AI off for any chat and reply manually.'],
+      ['AI Prompt Settings', 'Control how the assistant speaks and sells.'],
+      ['Prompt Generator', 'Improve weak prompts automatically with Accept / Decline controls.'],
+      ['Knowledge Base', 'Add product info, prices, delivery, FAQ, and company rules.'],
+      ['Insights Dashboard', 'Track messages, platforms, customers, AI activity, and sales signals.'],
+      ['Media Support', 'Receive and send images, videos, and voice messages.'],
+      ['Catalog Sharing', 'Send product/catalog links quickly from chat.'],
+      ['Multi-language Support', 'Uzbek, Russian, and English customer conversations.'],
+    ],
+    previewKicker: 'Dashboard preview',
+    previewTitle: 'See the product before your team uses it',
+    previewLabels: { inbox: 'Inbox', knowledge: 'Knowledge page', prompts: 'AI Prompt Settings', insights: 'Insights dashboard', details: 'Chat details panel' },
+    howKicker: 'How it works',
+    howTitle: 'Launch the assistant in three steps',
+    steps: [
+      ['Connect your channels', 'Instagram, Telegram, and WhatsApp.'],
+      ['Add business knowledge', 'Products, prices, delivery, FAQ, tone, and sales rules.'],
+      ['Let AI assist your team', 'AI replies naturally while your agents stay in control.'],
+    ],
+    aiKicker: 'AI control',
+    aiTitle: 'You are always in control',
+    aiCopy: 'Instaagent is built for real sales operations where agents need speed without losing judgment.',
+    aiItems: ['Turn AI on/off per chat', 'Edit prompts anytime', 'Accept or decline AI prompt improvements', 'Delete or archive conversations', 'Human agents can take over instantly'],
+    faqTitle: 'Common questions',
+    faq: [
+      ['Does it support Instagram?', 'Yes. Instaagent is designed for Instagram DMs and sales conversations.'],
+      ['Does it support Telegram?', 'Yes. It supports Telegram user/private flows and bot private chats.'],
+      ['Does it support WhatsApp?', 'Yes. WhatsApp conversations can be managed from the same inbox.'],
+      ['Can I turn AI off?', 'Yes. Agents can pause AI per chat and take over instantly.'],
+      ['Can I edit the AI prompt?', 'Yes. Prompt settings and business knowledge can be edited anytime.'],
+    ],
+  },
+  uz: {
+    appName: 'Instaagent',
+    navFeatures: 'Imkoniyatlar',
+    navDashboard: 'Dashboard',
+    navAiControl: 'AI nazorati',
+    navFaq: 'FAQ',
+    openDashboard: 'Dashboardni ochish',
+    eyebrow: 'Milana Premium va zamonaviy savdo jamoalari uchun Instaagent',
+    heroTitle: 'Instagram, Telegram va WhatsApp uchun AI savdo yordamchisi',
+    heroCopy: 'Barcha mijoz suhbatlarini bitta dashboardda boshqaring, AI tabiiy javob bersin va jamoangiz ko‘proq buyurtma yopsin.',
+    getStarted: 'Boshlash',
+    bookDemo: 'Demo bron qilish',
+    featureKicker: 'Mahsulot imkoniyatlari',
+    featureTitle: 'Savdo jamoangizga tezroq javob berish uchun hammasi bir joyda',
+    features: [
+      ['Yagona Inbox', 'Instagram, Telegram va WhatsApp chatlari bitta joyda.'],
+      ['AI avtomatik javoblar', 'Biznes bilimlari asosida qisqa va tabiiy javoblar.'],
+      ['Human takeover', 'Istalgan chatda AI ni o‘chirib, qo‘lda javob bering.'],
+      ['AI Prompt sozlamalari', 'AI qanday gapirishini va sotishini boshqaring.'],
+      ['Prompt generator', 'Kuchsiz promptlarni Accept/Decline bilan yaxshilang.'],
+      ['Bilimlar bazasi', 'Mahsulot, narx, yetkazib berish va FAQ ni kiriting.'],
+      ['Insights dashboard', 'Xabarlar, platformalar, mijozlar va AI faolligini kuzating.'],
+      ['Media qo‘llab-quvvatlash', 'Rasm, video va ovozli xabarlarni yuboring/qabul qiling.'],
+      ['Katalog ulashish', 'Chatdan katalog havolalarini tez yuboring.'],
+      ['Ko‘p til', 'Uzbek, Rus va English suhbatlar uchun mos.'],
+    ],
+    previewKicker: 'Dashboard preview',
+    previewTitle: 'Jamoa ishga tushirishdan oldin mahsulotni ko‘ring',
+    previewLabels: { inbox: 'Inbox', knowledge: 'Bilim sahifasi', prompts: 'AI Prompt sozlamalari', insights: 'Insights dashboard', details: 'Chat tafsilotlari paneli' },
+    howKicker: 'Qanday ishlaydi',
+    howTitle: 'Yordamchini 3 bosqichda ishga tushiring',
+    steps: [
+      ['Kanallarni ulang', 'Instagram, Telegram va WhatsApp.'],
+      ['Biznes bilimini kiriting', 'Mahsulot, narx, yetkazib berish, FAQ va qoidalar.'],
+      ['AI ni jamoaga yordam bering', 'AI tabiiy javob beradi, nazorat esa sizda qoladi.'],
+    ],
+    aiKicker: 'AI nazorat',
+    aiTitle: 'Nazorat har doim sizda',
+    aiCopy: 'Instaagent tezlik kerak bo‘lgan real savdo jarayonlari uchun yaratilgan.',
+    aiItems: ['Har chatda AI ni yoqish/o‘chirish', 'Promptlarni istalgan payt tahrirlash', 'AI prompt yaxshilanishini qabul/rad etish', 'Suhbatni o‘chirish yoki arxivlash', 'Operator darhol takeover qilishi mumkin'],
+    faqTitle: 'Ko‘p so‘raladigan savollar',
+    faq: [
+      ['Instagram qo‘llaydimi?', 'Ha. Instaagent Instagram DM savdolariga mos.'],
+      ['Telegram qo‘llaydimi?', 'Ha. Telegram private va bot chatlarini qo‘llaydi.'],
+      ['WhatsApp qo‘llaydimi?', 'Ha. WhatsApp chatlari ham shu inboxda boshqariladi.'],
+      ['AI ni o‘chirish mumkinmi?', 'Ha. Har chat bo‘yicha AI ni pauzaga qo‘yish mumkin.'],
+      ['AI promptni tahrirlash mumkinmi?', 'Ha. Prompt va bilim bazasini xohlagan vaqtda yangilash mumkin.'],
+    ],
+  },
+  ru: {
+    appName: 'Instaagent',
+    navFeatures: 'Функции',
+    navDashboard: 'Дашборд',
+    navAiControl: 'Контроль AI',
+    navFaq: 'FAQ',
+    openDashboard: 'Открыть дашборд',
+    eyebrow: 'Instaagent для Milana Premium и современных отделов продаж',
+    heroTitle: 'AI-ассистент продаж для Instagram, Telegram и WhatsApp',
+    heroCopy: 'Управляйте чатами клиентов в одном дашборде, дайте AI отвечать естественно и помогайте команде закрывать больше заказов.',
+    getStarted: 'Начать',
+    bookDemo: 'Запросить демо',
+    featureKicker: 'Возможности',
+    featureTitle: 'Все, что нужно вашей команде продаж',
+    features: [
+      ['Единый Inbox', 'Instagram, Telegram и WhatsApp в одном месте.'],
+      ['AI-ответы', 'Короткие и естественные ответы по базе знаний.'],
+      ['Human takeover', 'Отключайте AI в любом чате и отвечайте вручную.'],
+      ['Настройки AI Prompt', 'Управляйте стилем общения и продаж AI.'],
+      ['Prompt generator', 'Улучшайте слабые prompt с Accept/Decline.'],
+      ['База знаний', 'Добавьте товары, цены, доставку и FAQ.'],
+      ['Insights dashboard', 'Отслеживайте сообщения, платформы и активность AI.'],
+      ['Поддержка медиа', 'Изображения, видео и голосовые сообщения.'],
+      ['Отправка каталога', 'Быстро отправляйте ссылки из чата.'],
+      ['Мультиязык', 'Поддержка узбекского, русского и английского.'],
+    ],
+    previewKicker: 'Превью дашборда',
+    previewTitle: 'Посмотрите продукт до запуска для команды',
+    previewLabels: { inbox: 'Inbox', knowledge: 'Страница знаний', prompts: 'Настройки AI Prompt', insights: 'Insights dashboard', details: 'Панель деталей чата' },
+    howKicker: 'Как это работает',
+    howTitle: 'Запуск в 3 шага',
+    steps: [
+      ['Подключите каналы', 'Instagram, Telegram и WhatsApp.'],
+      ['Добавьте знания бизнеса', 'Товары, цены, доставка, FAQ и правила продаж.'],
+      ['AI помогает команде', 'AI отвечает естественно, а контроль остается у вас.'],
+    ],
+    aiKicker: 'Контроль AI',
+    aiTitle: 'Контроль всегда у вас',
+    aiCopy: 'Instaagent создан для реальных процессов продаж, где важны скорость и управляемость.',
+    aiItems: ['Включать/выключать AI в каждом чате', 'Редактировать prompt в любое время', 'Принимать или отклонять улучшения prompt', 'Удалять или архивировать диалоги', 'Оператор может моментально перехватить чат'],
+    faqTitle: 'Частые вопросы',
+    faq: [
+      ['Поддерживает Instagram?', 'Да. Instaagent подходит для продаж в Instagram DM.'],
+      ['Поддерживает Telegram?', 'Да. Поддерживаются private/user и bot-чаты.'],
+      ['Поддерживает WhatsApp?', 'Да. WhatsApp чаты доступны в том же inbox.'],
+      ['Можно отключить AI?', 'Да. AI можно ставить на паузу по каждому чату.'],
+      ['Можно редактировать AI prompt?', 'Да. Prompt и база знаний редактируются в любое время.'],
+    ],
+  },
+};
+
+function readStoredObject(key) {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(key) || '{}');
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredObject(key, value) {
+  window.localStorage.setItem(key, JSON.stringify(value || {}));
+}
+
+function loadCachedConversations() {
+  const payload = readStoredObject(CACHED_CONVERSATIONS_STORAGE_KEY);
+  const items = Array.isArray(payload.items) ? payload.items : [];
+  const selectedId = String(payload.selectedId || '');
+  return { items, selectedId };
+}
+
+function loadCachedThreads() {
+  const payload = readStoredObject(CACHED_THREADS_STORAGE_KEY);
+  const items = payload.items && typeof payload.items === 'object' ? payload.items : {};
+  return items;
+}
+
+function trimThreadCache(items = {}) {
+  const entries = Object.entries(items || {});
+  if (!entries.length) return {};
+  const sorted = entries.sort((a, b) => Number(b[1]?.updatedAt || 0) - Number(a[1]?.updatedAt || 0));
+  const next = {};
+  sorted.slice(0, 120).forEach(([id, row]) => {
+    const messages = Array.isArray(row?.messages) ? row.messages.slice(-80) : [];
+    next[id] = {
+      updatedAt: Number(row?.updatedAt || Date.now()),
+      messages,
+    };
+  });
+  return next;
+}
+
+function getThreadMessages(entry) {
+  if (!entry) return [];
+  if (Array.isArray(entry)) return entry;
+  if (Array.isArray(entry.messages)) return entry.messages;
+  return [];
+}
+
+function userIdentity(currentUser = {}) {
+  return normalizeOwnerEmail(
+    currentUser?.ownerEmail ||
+    currentUser?.email ||
+    ''
+  );
+}
+
+function readUserProfile(currentUser = {}) {
+  const key = userIdentity(currentUser);
+  const all = readStoredObject(USER_PROFILE_STORAGE_KEY);
+  const row = key ? (all[key] || {}) : {};
+  const fallbackName = key ? key.split('@')[0] : 'User';
+  return {
+    name: String(row.name || fallbackName),
+    photo: String(row.photo || ''),
+  };
+}
+
+function saveUserProfile(currentUser = {}, patch = {}) {
+  const key = userIdentity(currentUser);
+  if (!key) return readUserProfile(currentUser);
+  const all = readStoredObject(USER_PROFILE_STORAGE_KEY);
+  const prev = all[key] || {};
+  const next = {
+    ...prev,
+    ...patch,
+    name: String((patch.name ?? prev.name ?? key.split('@')[0]) || key.split('@')[0]).trim(),
+    photo: String((patch.photo ?? prev.photo ?? '') || ''),
+  };
+  all[key] = next;
+  writeStoredObject(USER_PROFILE_STORAGE_KEY, all);
+  return next;
+}
+
+const AI_PROVIDERS = [
+  {
+    id: 'mistral',
+    label: 'Mistral',
+    keyField: 'mistral_api_key',
+    defaultModel: 'mistral-small-latest',
+    models: ['mistral-small-latest', 'mistral-large-latest'],
+  },
+  {
+    id: 'openai',
+    label: 'OpenAI',
+    keyField: 'openai_api_key',
+    defaultModel: 'gpt-4o-mini',
+    models: ['gpt-4o-mini', 'gpt-4o'],
+  },
+  {
+    id: 'gemini',
+    label: 'Gemini',
+    keyField: 'gemini_api_key',
+    defaultModel: 'gemini-1.5-flash',
+    models: ['gemini-1.5-flash', 'gemini-1.5-pro'],
+  },
+  {
+    id: 'anthropic',
+    label: 'Anthropic',
+    keyField: 'anthropic_api_key',
+    defaultModel: 'claude-3-5-haiku-latest',
+    models: ['claude-3-5-haiku-latest', 'claude-3-5-sonnet-latest'],
+  },
+];
+
+function aiProviderForModel(model = '') {
+  const value = String(model || '').toLowerCase();
+  if (value.startsWith('gpt-') || value.startsWith('o1') || value.startsWith('o3') || value.startsWith('o4')) return 'openai';
+  if (value.startsWith('gemini')) return 'gemini';
+  if (value.startsWith('claude')) return 'anthropic';
+  return 'mistral';
+}
+
+function aiProviderForBusiness(business = {}) {
+  const stored = String(business.ai_provider || '').toLowerCase();
+  return AI_PROVIDERS.some(provider => provider.id === stored)
+    ? stored
+    : aiProviderForModel(business.ai_model);
+}
+
+function apiErrorMessage(data, status) {
+  const metaError = data?.meta?.error || data?.details?.error || data?.data?.error;
+  const description = data?.meta?.description || data?.details?.description || metaError?.message;
+  const errorCode = data?.meta?.error_code || data?.details?.error_code || metaError?.code;
+  const errorSubcode = data?.meta?.error_subcode || data?.details?.error_subcode || metaError?.error_subcode || metaError?.subcode;
+  if (Number(errorCode) === 10 && Number(errorSubcode) === 2534022) {
+    return 'Instagram reply window is closed. Ask the customer to send a new DM first.';
+  }
+  if (/human agent/i.test(String(description || '')) && /review/i.test(String(description || ''))) {
+    return 'Instagram Human Agent is not approved for this Meta app. Ask the customer to send a new DM first.';
+  }
+  if (description) return errorCode ? `${description} (${errorCode})` : description;
+
+  const message =
+    data?.message ||
+    data?.error ||
+    metaError ||
+    data?.details?.error ||
+    data?.meta?.error ||
+    data?.meta?.text;
+
+  if (typeof message === 'string') return message;
+  if (message) return JSON.stringify(message);
+  return `Request failed: ${status}`;
+}
+
+function apiHeaders() {
+  const headers = { Accept: 'application/json' };
+  const savedSecret = dashboardSecret();
+  if (savedSecret && savedSecret !== 'YOUR_DASHBOARD_SECRET') headers['x-dashboard-secret'] = savedSecret;
+  const auth = readAuthSession();
+  if (auth?.token) headers.Authorization = `Bearer ${auth.token}`;
+  const ownerEmail = resolvedOwnerEmail();
+  if (ownerEmail) headers['x-owner-email'] = ownerEmail;
+  return headers;
+}
+
+function dashboardSecret() {
+  const savedSecret =
+    window.sessionStorage.getItem('instaagent_dashboard_secret') ||
+    window.localStorage.getItem('instaagent_dashboard_secret') ||
+    DASHBOARD_SECRET;
+  return savedSecret && savedSecret !== 'YOUR_DASHBOARD_SECRET' ? savedSecret : '';
+}
+
+function telegramUserMediaUrl(row) {
+  if (row.media_url) return row.media_url;
+  if (
+    row.platform !== 'telegram' ||
+    row.channel !== 'telegram_user_private' ||
+    !row.media_type ||
+    !row.external_message_id ||
+    !row.customer_id
+  ) {
+    return '';
+  }
+
+  const qs = new URLSearchParams();
+  const secret = dashboardSecret();
+  if (secret) qs.set('token', secret);
+
+  return `${API_BASE}/api/telegram-user-media/${encodeURIComponent(row.customer_id)}/${encodeURIComponent(row.external_message_id)}${qs.toString() ? `?${qs.toString()}` : ''}`;
+}
+
+function mediaUrlWithSecret(path) {
+  const clean = String(path || '').trim();
+  if (!clean) return '';
+  const qs = new URLSearchParams();
+  const secret = dashboardSecret();
+  if (secret) qs.set('token', secret);
+  return `${API_BASE}${clean}${qs.toString() ? `?${qs.toString()}` : ''}`;
+}
+
+function telegramBotMediaUrl(row) {
+  const fileId = String(row.media_file_id || row.mediaFileId || '').trim();
+  if (!fileId || String(row.platform || '').toLowerCase() !== 'telegram') return '';
+  return mediaUrlWithSecret(`/api/telegram-bot-media/${encodeURIComponent(fileId)}`);
+}
+
+function whatsappMediaUrl(row) {
+  const mediaId = getWhatsAppMediaId(row);
+  if (!mediaId || String(row.platform || '').toLowerCase() !== 'whatsapp') return '';
+  return mediaUrlWithSecret(`/api/whatsapp/media/${encodeURIComponent(mediaId)}`);
+}
+
+function resolveMediaUrl(row = {}) {
+  const direct = row.media_url || row.mediaUrl;
+  if (direct) return withMediaToken(direct);
+  return telegramUserMediaUrl(row) || telegramBotMediaUrl(row) || whatsappMediaUrl(row);
+}
+
+function withMediaToken(url) {
+  if (!url) return '';
+  const secret = dashboardSecret();
+  const needsToken = [
+    '/api/whatsapp/media/',
+    '/api/telegram-user-media/',
+    '/api/telegram-bot-media/',
+  ].some(path => String(url).includes(path));
+  if (!secret || !needsToken) return url;
+
+  try {
+    const parsed = new URL(url, window.location.href);
+    if (!parsed.searchParams.has('token')) parsed.searchParams.set('token', secret);
+    return parsed.toString();
+  } catch (e) {
+    return url;
+  }
+}
+
+function unwrapMetaRedirectUrl(url) {
+  const value = String(url || '').trim();
+  if (!value) return '';
+  try {
+    const parsed = new URL(value, window.location.origin);
+    const host = String(parsed.hostname || '').toLowerCase();
+    if (host.endsWith('instagram.com') || host.endsWith('facebook.com')) {
+      const target = parsed.searchParams.get('u');
+      if (target && /^https?:\/\//i.test(target)) return decodeURIComponent(target);
+    }
+  } catch (e) {
+    return value;
+  }
+  return value;
+}
+
+function isInstagramPostLink(url) {
+  const value = String(url || '').toLowerCase();
+  return /^https?:\/\//.test(value) && value.includes('instagram.com/') && (
+    value.includes('/p/') ||
+    value.includes('/reel/') ||
+    value.includes('/tv/') ||
+    value.includes('/share/')
+  );
+}
+
+function isPlayableVideoUrl(url) {
+  const value = String(url || '').toLowerCase();
+  return /^https?:\/\//.test(value) && !isInstagramPostLink(value) && (
+    /\.(mp4|mov|m4v|webm)(\?|$)/i.test(value) ||
+    value.includes('cdninstagram.com') ||
+    value.includes('fbcdn.net') ||
+    value.includes('lookaside.fbsbx.com')
+  );
+}
+
+function isRenderableImageUrl(url) {
+  const value = String(url || '').toLowerCase();
+  return /^https?:\/\//.test(value) && !isInstagramPostLink(value) && /\.(png|jpe?g|webp|gif)(\?|$)/i.test(value);
+}
+
+function resolveForwardedPostLink(row = {}) {
+  const payload = row.raw_payload || {};
+  const msg = payload.message || {};
+  const shares = Array.isArray(msg.shares) ? msg.shares : [];
+  const attachments = Array.isArray(msg.attachments) ? msg.attachments : [];
+
+  const candidates = [
+    row.post_permalink,
+    row.postPermalink,
+    payload.post_permalink,
+    payload.postPermalink,
+    msg.permalink,
+    msg.link,
+    row.media_url,
+    row.mediaUrl,
+  ];
+
+  shares.forEach((share) => {
+    if (!share || typeof share !== 'object') return;
+    candidates.push(share.link, share.url, share.permalink);
+  });
+
+  attachments.forEach((att) => {
+    if (!att || typeof att !== 'object') return;
+    const p = att.payload || {};
+    candidates.push(p.url, p.link, p.permalink, p.external_url);
+  });
+
+  let fallback = '';
+  for (const raw of candidates) {
+    const url = String(raw || '').trim();
+    if (!/^https?:\/\//i.test(url)) continue;
+    const unwrapped = unwrapMetaRedirectUrl(url);
+    if (!fallback) fallback = unwrapped || url;
+    if (isInstagramPostLink(unwrapped) || isInstagramPostLink(url)) return unwrapped || url;
+  }
+  return fallback;
+}
+
+function businessOwnerEmail(business = {}) {
+  return normalizeOwnerEmail(
+    business.owner_email ||
+    business.business_owner_email ||
+    business.user_email ||
+    business.email ||
+    ''
+  );
+}
+
+function conversationOwnerEmail(row = {}) {
+  return normalizeOwnerEmail(
+    row.owner_email ||
+    row.business_owner_email ||
+    row.user_email ||
+    row.email ||
+    ''
+  );
+}
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error('Could not read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function waitForVideoEvent(video, eventName) {
+  return new Promise((resolve, reject) => {
+    const onEvent = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error('Could not read video metadata'));
+    };
+    const cleanup = () => {
+      video.removeEventListener(eventName, onEvent);
+      video.removeEventListener('error', onError);
+    };
+    video.addEventListener(eventName, onEvent, { once: true });
+    video.addEventListener('error', onError, { once: true });
+  });
+}
+
+async function captureVideoFramesFromFile(file, frameCount = 4) {
+  if (!file || !file.type?.startsWith('video/')) return { frames: [], duration: 0 };
+  const url = URL.createObjectURL(file);
+  const video = document.createElement('video');
+  video.src = url;
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = 'metadata';
+
+  try {
+    await waitForVideoEvent(video, 'loadedmetadata');
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    const canvas = document.createElement('canvas');
+    const width = Math.min(720, video.videoWidth || 720);
+    const height = Math.round(width * ((video.videoHeight || 1280) / (video.videoWidth || 720)));
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    const frames = [];
+    const usableDuration = Math.max(0.1, duration || 1);
+    const count = Math.max(1, Math.min(frameCount, 4));
+
+    for (let index = 0; index < count; index += 1) {
+      const time = Math.min(usableDuration - 0.05, usableDuration * ((index + 1) / (count + 1)));
+      video.currentTime = Math.max(0, time);
+      await waitForVideoEvent(video, 'seeked');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      frames.push(canvas.toDataURL('image/jpeg', 0.74));
+    }
+    return { frames, duration: Math.round(duration || 0) };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+function recordingMimeType() {
+  if (!window.MediaRecorder) return '';
+  const types = [
+    'audio/ogg;codecs=opus',
+    'audio/ogg',
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+  ];
+  return types.find(type => window.MediaRecorder.isTypeSupported?.(type)) || '';
+}
+
+function extensionForMime(mimeType) {
+  if (mimeType.includes('ogg')) return 'ogg';
+  if (mimeType.includes('mp4')) return 'm4a';
+  if (mimeType.includes('mpeg')) return 'mp3';
+  return 'webm';
+}
+
+function formatRecordTime(totalSeconds) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = String(totalSeconds % 60).padStart(2, '0');
+  return `${minutes}:${seconds}`;
+}
+
+const EMOJI_SETS = [
+  { label: 'Smileys', items: '😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🥳 😏 😒 😞 😔 😟 😕 🙁 ☹️ 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 🤯 😳 🥵 🥶 😱 😨 😰 😥 😓 🤗 🤔 🤭 🤫 🤥 😶 😐 😑 😬 🙄 😯 😦 😧 😮 😲 🥱 😴 🤤 😪 😵 🤐 🥴 🤢 🤮 🤧 😷 🤒 🤕'.split(' ') },
+  { label: 'Hands', items: '👋 🤚 🖐️ ✋ 🖖 👌 🤌 🤏 ✌️ 🤞 🫰 🤟 🤘 🤙 👈 👉 👆 🖕 👇 ☝️ 👍 👎 ✊ 👊 🤛 🤜 👏 🙌 👐 🤲 🤝 🙏 ✍️ 💅 🤳 💪 🦾'.split(' ') },
+  { label: 'Hearts', items: '❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💟 💌 💋 💯 ✨ ⭐ 🌟 💫 🔥 🎉 🎊 🎁 🏆'.split(' ') },
+  { label: 'People', items: '👶 🧒 👦 👧 🧑 👨 👩 🧔 👴 👵 🙍 🙎 🙅 🙆 💁 🙋 🧏 🙇 🤦 🤷 👮 🕵️ 💂 👷 🤴 👸 👳 👲 🧕 🤵 👰 🤰 🤱 🧑‍💼 🧑‍💻 🧑‍🔧 🧑‍🎨 🧑‍🚀'.split(' ') },
+  { label: 'Objects', items: '📦 🛍️ 👜 👗 👚 👕 👖 🧥 👟 👠 👢 👑 💍 💄 🧴 🧵 🪡 📱 💻 ⌚ 📷 🎥 🎤 🎧 📞 💳 💵 🧾 📝 📌 📍 🔐 🔑'.split(' ') },
+  { label: 'Symbols', items: '✅ ❌ ❗ ❓ ⁉️ ⚠️ 🚫 🔴 🟠 🟡 🟢 🔵 🟣 ⚫ ⚪ 🟤 ⬆️ ⬇️ ⬅️ ➡️ 🔁 🔄 🆕 🆗 🆒 🆘 💲 #️⃣ *️⃣ 0️⃣ 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣ 8️⃣ 9️⃣'.split(' ') },
+];
+
+function LandingPage({ onOpenDashboard, lang, setLang }) {
+  const l = LANDING_TEXT[lang] || LANDING_TEXT.en;
+  return (
+    <main className="landing-page">
+      <nav className="landing-nav">
+        <a className="landing-brand" href="#top">
+          <span>{l.appName}</span>
+        </a>
+        <div className="landing-links">
+          <a href="#features">{l.navFeatures}</a>
+          <a href="#preview">{l.navDashboard}</a>
+          <a href="#control">{l.navAiControl}</a>
+          <a href="#faq">{l.navFaq}</a>
+        </div>
+        <div className="lang">
+          {['en', 'uz', 'ru'].map(code => (
+            <button key={code} className={lang === code ? 'on' : ''} onClick={() => setLang(code)}>{code}</button>
+          ))}
+        </div>
+        <button onClick={onOpenDashboard}>{l.openDashboard}</button>
+      </nav>
+
+      <section id="top" className="landing-hero">
+        <div className="landing-hero-inner">
+          <p className="eyebrow">{l.eyebrow}</p>
+          <h1>{l.heroTitle}</h1>
+          <p className="hero-copy">{l.heroCopy}</p>
+          <div className="hero-actions">
+            <button onClick={onOpenDashboard}>{l.getStarted}</button>
+            <button className="secondary" onClick={onOpenDashboard}>{l.openDashboard}</button>
+            <a href="mailto:hello@instaagent.ai?subject=Book%20Instaagent%20Demo">{l.bookDemo}</a>
+          </div>
+        </div>
+      </section>
+
+      <section id="features" className="landing-section">
+        <div className="section-kicker">{l.featureKicker}</div>
+        <h2>{l.featureTitle}</h2>
+        <div className="feature-grid">
+          {l.features.map(([title, text]) => (
+            <article className="feature-card" key={title}>
+              <h3>{title}</h3>
+              <p>{text}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section id="preview" className="landing-section preview-section">
+        <div className="section-kicker">{l.previewKicker}</div>
+        <h2>{l.previewTitle}</h2>
+        <div className="preview-grid">
+          {LANDING_PREVIEWS.map(([key, src], index) => (
+            <figure className={`preview-card ${index === 0 ? 'wide' : ''}`} key={key}>
+              <img src={src} alt={`${l.previewLabels[key]} dashboard preview`} />
+              <figcaption>{l.previewLabels[key]}</figcaption>
+            </figure>
+          ))}
+        </div>
+      </section>
+
+      <section className="landing-section how-section">
+        <div className="section-kicker">{l.howKicker}</div>
+        <h2>{l.howTitle}</h2>
+        <div className="steps-grid">
+          {l.steps.map((item, idx) => (
+            <article key={item[0]}><b>{idx + 1}</b><h3>{item[0]}</h3><p>{item[1]}</p></article>
+          ))}
+        </div>
+      </section>
+
+      <section id="control" className="landing-split">
+        <div>
+          <div className="section-kicker">{l.aiKicker}</div>
+          <h2>{l.aiTitle}</h2>
+          <p>{l.aiCopy}</p>
+        </div>
+        <ul>
+          {l.aiItems.map(item => <li key={item}>{item}</li>)}
+        </ul>
+      </section>
+
+      <section className="landing-section usecase-section">
+        <div className="usecase-panel problem">
+          <div className="section-kicker">Problem</div>
+          <h2>Customers message from many platforms. Replies are slow, repeated, and hard to track.</h2>
+        </div>
+        <div className="usecase-panel solution">
+          <div className="section-kicker">Solution</div>
+          <h2>Instaagent organizes every message and helps your team respond faster with natural AI replies.</h2>
+        </div>
+      </section>
+
+      <section className="landing-section">
+        <div className="section-kicker">Business use cases</div>
+        <h2>Built for textile sales, boutiques, wholesale, and export teams</h2>
+        <p className="landing-lead">Perfect for:</p>
+        <div className="usecase-grid">
+          {['Textile shops', 'Instagram boutiques', 'Wholesale sellers', 'Online stores', 'Export businesses', 'Sales teams'].map(item => <span key={item}>{item}</span>)}
+        </div>
+        <div className="textile-list">
+          {['Catalog requests', 'Wholesale questions', 'Product availability', 'Delivery questions', 'Price inquiries', 'Customer follow-up'].map(item => <span key={item}>{item}</span>)}
+        </div>
+      </section>
+
+      <section className="landing-section insights-preview">
+        <div className="section-kicker">Insights preview</div>
+        <h2>Know what is happening across every channel</h2>
+        <div className="insight-pill-grid">
+          {['Total conversations', 'New leads', 'AI handled chats', 'Human takeover chats', 'Messages by platform', 'Most requested products', 'Average response time', 'Unread messages'].map(item => <span key={item}>{item}</span>)}
+        </div>
+      </section>
+
+      <section className="landing-split safety-section">
+        <div>
+          <div className="section-kicker">Trust and safety</div>
+          <h2>Safe for business use</h2>
+          <p>AI follows the facts your company provides and leaves final control with your team.</p>
+        </div>
+        <ul>
+          <li>AI does not invent prices</li>
+          <li>AI follows your business knowledge</li>
+          <li>Agents can disable AI anytime</li>
+          <li>Human review is always possible</li>
+          <li>Customer data stays in your dashboard</li>
+        </ul>
+      </section>
+
+      <section id="faq" className="landing-section faq-section">
+        <div className="section-kicker">{l.navFaq}</div>
+        <h2>{l.faqTitle}</h2>
+        <div className="faq-grid">
+          {l.faq.map(([question, answer]) => (
+            <details key={question}>
+              <summary>{question}</summary>
+              <p>{answer}</p>
+            </details>
+          ))}
+        </div>
+      </section>
+
+      <footer className="landing-footer">
+        <div>
+          <strong>Instaagent</strong>
+          <p>AI sales assistant for Instagram, Telegram, and WhatsApp.</p>
+        </div>
+        <nav>
+          <a href="#features">Product links</a>
+          <a href="mailto:hello@instaagent.ai">Contact</a>
+          <a href="#privacy">Privacy Policy</a>
+          <a href="#terms">Terms of Service</a>
+          <a href="#data-deletion">Data Deletion Instructions</a>
+          <button onClick={onOpenDashboard}>Dashboard link</button>
+        </nav>
+      </footer>
+    </main>
+  );
+}
+
+function SignInPage({ lang, onSignedIn, onBack }) {
+  const l = LANDING_TEXT[lang] || LANDING_TEXT.en;
+  const [mode, setMode] = useState('signin');
+  const [email, setEmail] = useState(resolvedOwnerEmail());
+  const [secret, setSecret] = useState(dashboardSecret());
+  const [signUpRole, setSignUpRole] = useState('operator');
+  const [businessId, setBusinessId] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const submitSignIn = async (e) => {
+    e.preventDefault();
+    const ownerEmail = normalizeOwnerEmail(email);
+    const cleanSecret = String(secret || '').trim();
+    if (!ownerEmail) {
+      setError('Email is required.');
+      return;
+    }
+    if (!cleanSecret) {
+      setError('Access key is required.');
+      return;
+    }
+    setLoading(true);
+    setError('');
+    try {
+      const login = await API.postJson('/api/v2/auth/login', {
+        email: ownerEmail,
+        password: cleanSecret,
+      });
+      const payload = login.data || {};
+      if (!payload.token) throw new Error('Missing auth token.');
+      window.localStorage.removeItem('instaagent_dashboard_secret');
+      window.sessionStorage.removeItem('instaagent_dashboard_secret');
+      window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, ownerEmail);
+      saveAuthSession(ownerEmail, {
+        token: payload.token,
+        isAdmin: payload.user?.is_admin === true,
+        role: payload.user?.role || '',
+      });
+      onSignedIn({
+        ownerEmail,
+        token: payload.token,
+        isAdmin: payload.user?.is_admin === true,
+        role: payload.user?.role || '',
+      });
+    } catch (err) {
+      setError(err.message || 'Sign in failed.');
+      clearAuthSession();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const submitSignUp = async (e) => {
+    e.preventDefault();
+    const cleanEmail = normalizeOwnerEmail(email);
+    const cleanSecret = String(secret || '').trim();
+    const cleanBusiness = String(businessId || '').trim();
+    if (!cleanEmail) {
+      setError('ID/Email is required.');
+      return;
+    }
+    if (!cleanSecret || cleanSecret.length < 6) {
+      setError('Password must be at least 6 characters.');
+      return;
+    }
+    if (signUpRole === 'operator' && !cleanBusiness) {
+      setError('Business ID is required for operator sign-up.');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+    try {
+      const signup = await API.postJson('/api/v2/auth/signup', {
+        email: cleanEmail,
+        password: cleanSecret,
+        role: signUpRole,
+        business_id: signUpRole === 'operator' ? cleanBusiness : '',
+      });
+      const payload = signup.data || {};
+      window.localStorage.removeItem('instaagent_dashboard_secret');
+      window.sessionStorage.removeItem('instaagent_dashboard_secret');
+      window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, cleanEmail);
+      saveAuthSession(cleanEmail, {
+        token: payload.token || '',
+        isAdmin: payload.user?.is_admin === true,
+        role: payload.user?.role || signUpRole,
+      });
+      onSignedIn({
+        ownerEmail: cleanEmail,
+        token: payload.token || '',
+        isAdmin: payload.user?.is_admin === true,
+        role: payload.user?.role || signUpRole,
+      });
+    } catch (err) {
+      setError(err.message || 'Sign up failed.');
+      clearAuthSession();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <main className="signin-shell">
+      <section className="signin-card">
+        <h1>{l.appName} Access</h1>
+        <p>{mode === 'signin' ? 'Sign in with your assigned account.' : 'Create a separate admin or operator account.'}</p>
+        <div className="operators-mode-switch" style={{ marginBottom: 12 }}>
+          <button type="button" className={mode === 'signin' ? 'active' : ''} onClick={() => { setMode('signin'); setError(''); }}>Sign In</button>
+          <button type="button" className={mode === 'signup' ? 'active' : ''} onClick={() => { setMode('signup'); setError(''); }}>Sign Up</button>
+        </div>
+        <form onSubmit={mode === 'signin' ? submitSignIn : submitSignUp}>
+          <label>
+            <span>ID / Email</span>
+            <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="operator@company.com" autoComplete="username" />
+          </label>
+          <label>
+            <span>Password</span>
+            <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="Minimum 6 characters" autoComplete="current-password" />
+          </label>
+          {mode === 'signup' && (
+            <label>
+              <span>Account type</span>
+              <select value={signUpRole} onChange={(e) => setSignUpRole(e.target.value)}>
+                <option value="operator">Operator</option>
+                <option value="admin">Admin</option>
+              </select>
+            </label>
+          )}
+          {mode === 'signup' && signUpRole === 'operator' && (
+            <label>
+              <span>Business ID</span>
+              <input value={businessId} onChange={(e) => setBusinessId(e.target.value)} placeholder="87963381-aa63-47f1-a55e-858dc821b52f" />
+            </label>
+          )}
+          {error && <div className="signin-error">{error}</div>}
+          <div className="signin-actions">
+            <button type="submit" disabled={loading}>{loading ? (mode === 'signin' ? 'Signing in...' : 'Signing up...') : (mode === 'signin' ? 'Sign In' : 'Sign Up')}</button>
+            <button type="button" className="ghost" onClick={onBack}>Back</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+function hashHue(value) {
+  let hash = 0;
+  for (const ch of String(value || 'client')) hash = ((hash << 5) - hash) + ch.charCodeAt(0);
+  return Math.abs(hash) % 360;
+}
+
+function initialsFromName(name = '') {
+  const clean = String(name || '').trim();
+  if (!clean) return 'U';
+  const parts = clean.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return parts[0].slice(0, 1).toUpperCase();
+  return `${parts[0][0] || ''}${parts[1][0] || ''}`.toUpperCase();
+}
+
+function initials(name) {
+  const parts = String(name || 'Client').trim().split(/\s+/).filter(Boolean);
+  return (parts[0]?.[0] || 'C') + (parts[1]?.[0] || parts[0]?.[1] || '');
+}
+
+function avatarFor(name, id) {
+  const hue = hashHue(`${name}:${id}`);
+  return {
+    initials: initials(name).toUpperCase(),
+    color: `linear-gradient(135deg, oklch(72% 0.11 ${hue}), oklch(48% 0.13 ${(hue + 34) % 360}))`,
+  };
+}
+
+function formatPhone(value) {
+  const raw = String(value || '').replace(/[^\d+]/g, '');
+  if (!raw) return '';
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length === 12 && digits.startsWith('998')) {
+    return `+998 ${digits.slice(3, 5)} ${digits.slice(5, 8)} ${digits.slice(8, 10)} ${digits.slice(10)}`;
+  }
+  return raw.startsWith('+') ? raw : `+${raw}`;
+}
+
+function platformHandle(row) {
+  if (row.platform === 'whatsapp') return formatPhone(row.customer_id || row.chat_id);
+  if (row.platform === 'telegram') {
+    const username = String(row.customer_name || '').match(/\(@([^)]+)\)/)?.[1];
+    if (username) return `@${username}`;
+    return row.customer_name?.startsWith('@') ? row.customer_name : `@${row.customer_name || row.customer_id}`;
+  }
+  return row.customer_name?.startsWith('@') ? row.customer_name : `@${row.customer_id || row.customer_name || 'instagram'}`;
+}
+
+function channelLabel(platform, channel) {
+  if (platform === 'telegram') {
+    if (channel === 'telegram_user_private') return 'User account';
+    if (channel === 'telegram_bot_group') return 'Bot group';
+    if (channel === 'telegram_bot_private' || channel === 'private') return 'Bot DM';
+    return channel || 'Telegram';
+  }
+  if (platform === 'instagram') return channel === 'dm' || !channel ? 'Instagram DM' : channel;
+  if (platform === 'whatsapp') return channel === 'whatsapp' || channel === 'whatsapp_cloud' || !channel ? 'WhatsApp' : channel;
+  return channel || 'Inbox';
+}
+
+function sendRouteFor(conv) {
+  if (conv.platform === 'instagram') return 'Instagram DM API';
+  if (conv.platform === 'whatsapp') return 'WhatsApp Cloud API';
+  if (conv.platform === 'telegram' && conv.channel === 'telegram_user_private') return 'Telegram user client';
+  if (conv.platform === 'telegram') return 'Telegram bot API';
+  return 'Backend API';
+}
+
+function formatRelative(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const diff = Date.now() - date.getTime();
+  const minute = 60 * 1000;
+  const hour = 60 * minute;
+  const day = 24 * hour;
+  if (diff < minute) return 'now';
+  if (diff < hour) return `${Math.max(1, Math.floor(diff / minute))} min`;
+  if (diff < day) return `${Math.floor(diff / hour)} hr`;
+  if (diff < 2 * day) return 'yesterday';
+  return `${Math.floor(diff / day)} days`;
+}
+
+function formatClock(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function formatDay(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === today.toDateString()) return 'Today';
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function getWhatsAppMediaId(row) {
+  const raw = row.raw_payload || {};
+  const kind = row.media_type;
+  if (kind === 'photo') return raw.image?.id || '';
+  if (kind === 'video') return raw.video?.id || '';
+  if (kind === 'voice') return raw.audio?.id || '';
+  if (kind === 'file') return raw.document?.id || '';
+  return '';
+}
+
+function getMediaLabel(row) {
+  const media = row.media_type || 'attachment';
+  const source = row.platform === 'whatsapp' ? getWhatsAppMediaId(row) : row.media_file_id;
+  if (resolveMediaUrl(row)) return `${media} · open media`;
+  if (source) return `${media} · id ${String(source).slice(0, 10)}...`;
+  return `${media} · no preview`;
+}
+
+function normalizeConversation(row) {
+  const parts = String(row.id || '').split('::');
+  const parsedPlatform = parts[0] || '';
+  const parsedBusinessId = parts[1] || '';
+  const parsedChannel = parts[2] || '';
+  const parsedCustomerId = parts[3] || '';
+  const platform = row.platform || 'instagram';
+  const customerId = row.customer_id || parsedCustomerId;
+  const chatId = row.chat_id || customerId;
+  const rawName = String(row.customer_name || row.name || '').trim();
+  const generatedInstagramName = /^instagram\s+(user|client|ig user)\s+\d{2,}$/i.test(rawName);
+  const numericName = /^\d{6,}$/.test(rawName);
+  const name = rawName && !generatedInstagramName && !numericName
+    ? rawName
+    : (platform === 'instagram' && customerId ? `@${customerId}` : `Client ${String(customerId || '').slice(-4)}`);
+  const unread = Number(row.unread_count ?? row.unread ?? 0);
+  const total = Number(row.total_messages ?? row.kpis?.orders ?? 0);
+  const channel = row.channel || parsedChannel || '';
+  const channelName = row.channelName || channelLabel(platform || parsedPlatform, channel);
+  const isCommentThread = Boolean(row.isCommentThread || (platform === 'instagram' && String(channel).toLowerCase().includes('comment')));
+  const lastAt = row.last_message_at || row.created_at || row.lastAt || '';
+  return {
+    id: row.id,
+    apiId: row.id,
+    businessId: row.business_id || row.businessId || parsedBusinessId,
+    customerId,
+    chatId,
+    channel,
+    channelName,
+    isCommentThread,
+    postId: row.postId || row.post_id || '',
+    postPermalink: row.postPermalink || row.post_permalink || '',
+    postImageUrl: row.postImageUrl || row.post_image_url || '',
+    postMediaType: (row.postMediaType || row.post_media_type || '').toLowerCase(),
+    name,
+    handle: row.handle || platformHandle({ ...row, customer_id: customerId, chat_id: chatId }),
+    platform: platform || parsedPlatform,
+    avatar: avatarFor(name, customerId),
+    online: false,
+    needsHuman: row.needsHuman ?? (unread > 0),
+    aiOn: row.aiOn ?? (unread === 0),
+    unread,
+    lastTime: row.lastTime || formatRelative(lastAt),
+    lastFromMe: false,
+    preview: row.last_message || row.preview || 'No message preview',
+    tags: [platform, channelName].filter(Boolean),
+    customerSince: row.customerSince || 'first message',
+    location: row.location || channelName,
+    summary: row.summary || `${total || 1} saved message${total === 1 ? '' : 's'} in this ${channelName} conversation. Replies send through ${sendRouteFor({ platform, channel })}.`,
+    kpis: row.kpis || { orders: total, ltv: String(unread), last: formatRelative(lastAt) || '—', conv: unread ? `${unread} unread` : 'read' },
+    orders: row.orders || [],
+    suggestions: row.suggestions || [],
+  };
+}
+
+function clearConversationUnread(conv) {
+  return {
+    ...conv,
+    unread: 0,
+    needsHuman: false,
+    kpis: {
+      ...(conv.kpis || {}),
+      ltv: '0',
+      conv: 'read',
+    },
+  };
+}
+
+function normalizeMessage(row, index) {
+  const inbound = row.direction === 'inbound' || row.role === 'user' || row.side === 'in' || row.side === 'inbound';
+  const media = row.media_type || row.mediaKind || (row.type === 'media' ? row.label : '');
+  const text = row.content || row.text || row.mediaCaption || '';
+  let type = 'text';
+  if (row.type === 'voice' || media === 'voice' || media === 'audio') type = 'voice';
+  else if (row.type === 'media' || media) type = 'media';
+  else if (text.includes('[Catalog button sent]')) type = 'catalog';
+
+  const message = {
+    id: row.id || row.external_message_id || `api-${index}`,
+    day: row.day || formatDay(row.created_at),
+    side: inbound ? 'inbound' : 'outbound',
+    from: row.role === 'assistant' ? 'ai' : '',
+    type,
+    time: row.time || formatClock(row.created_at),
+    text,
+    mediaKind: media || '',
+    mediaUrl: resolveMediaUrl(row),
+    forwardLink: resolveForwardedPostLink(row),
+    mediaFileId: row.media_file_id || getWhatsAppMediaId(row),
+    commentId: String(row.external_message_id || row.comment_id || row.raw_payload?.id || '').trim(),
+    raw: row,
+  };
+
+  if (type === 'catalog') {
+    message.catalogText = text.replace('[Catalog button sent]', '').trim() || 'Catalog sent.';
+    message.catalogLabel = 'Open catalog';
+  }
+
+  if (type === 'media') {
+    message.label = getMediaLabel(row);
+    message.mediaCaption = text;
+  }
+
+  if (type === 'voice') {
+    message.duration = text.match(/\((\d+)s\)/)?.[1] ? `0:${text.match(/\((\d+)s\)/)[1].padStart(2, '0')}` : '';
+  }
+
+  return message;
+}
+
+const LOCAL_OUTBOUND_TTL_MS = 5 * 60 * 1000;
+
+function mergeLocalOutboundMessages(serverMessages = [], currentMessages = [], rememberedMessages = []) {
+  const localById = new Map();
+  for (const message of [...(currentMessages || []), ...(rememberedMessages || [])]) {
+    if (!message?.id) continue;
+    localById.set(String(message.id), message);
+  }
+  const localOutbound = Array.from(localById.values()).filter(message => (
+    message?.side === 'outbound' &&
+    (message.local || message.pending || message.failed || String(message.id || '').startsWith('optimistic-'))
+  ));
+  const usedLocal = new Set();
+
+  const merged = serverMessages.map(serverMessage => {
+    if (serverMessage.side !== 'outbound') return serverMessage;
+    const serverText = String(serverMessage.text || '').trim();
+    const localIndex = localOutbound.findIndex((message, index) => (
+      !usedLocal.has(index) &&
+      serverText &&
+      String(message.text || '').trim() === serverText
+    ));
+    if (localIndex < 0) return serverMessage;
+
+    usedLocal.add(localIndex);
+    const localMessage = localOutbound[localIndex];
+    return {
+      ...serverMessage,
+      ...localMessage,
+      day: serverMessage.day || localMessage.day,
+      time: localMessage.time || serverMessage.time,
+      raw: serverMessage.raw,
+      serverId: serverMessage.id,
+      pending: false,
+      failed: false,
+      error: '',
+    };
+  });
+
+  for (let index = 0; index < localOutbound.length; index += 1) {
+    if (!usedLocal.has(index)) {
+      merged.push(localOutbound[index]);
+    }
+  }
+
+  return merged;
+}
+
+function resolveCommentPostPreview(conv, messages = []) {
+  const base = {
+    postId: conv?.postId || '',
+    postPermalink: conv?.postPermalink || '',
+    postImageUrl: conv?.postImageUrl || '',
+    postMediaType: (conv?.postMediaType || '').toLowerCase(),
+  };
+
+  if (base.postImageUrl && (base.postPermalink || base.postId)) return base;
+
+  for (const m of messages || []) {
+    const raw = m?.raw || {};
+    const payload = raw.raw_payload || {};
+    const media = payload.media || {};
+    const postImageUrl = raw.post_image_url || raw.postImageUrl || payload.post_image_url || '';
+    const postPermalink = raw.post_permalink || raw.postPermalink || payload.post_permalink || '';
+    const postMediaType = String(raw.post_media_type || raw.postMediaType || payload.post_media_type || '').toLowerCase();
+    const postId = raw.post_id || raw.postId || payload.post_id || payload.media_id || media.id || '';
+    if (postImageUrl || postPermalink || postId || postMediaType) {
+      return { postId, postPermalink, postImageUrl, postMediaType };
+    }
+  }
+
+  return base;
+}
+
+function isVideoPostPreview(post = {}) {
+  const type = String(post?.postMediaType || '').toLowerCase();
+  if (type.includes('video') || type.includes('reel')) return true;
+  const url = String(post?.postImageUrl || '').toLowerCase();
+  return /\.(mp4|mov|m4v|webm)(\?|$)/i.test(url);
+}
+
+// ---------- Small helpers ----------
+function Avatar({ data, size = 38, platform, online }) {
+  const style = { width: size, height: size, background: data.color, fontSize: size * 0.36 };
+  return (
+    <div className="avatar" style={style}>
+      <span>{data.initials}</span>
+      {platform === 'instagram' && (
+        <span className="plat ig"><I.Inst /></span>
+      )}
+      {platform === 'telegram' && (
+        <span className="plat tg"><I.Tg /></span>
+      )}
+      {platform === 'whatsapp' && (
+        <span className="plat wa"><I.Wa /></span>
+      )}
+    </div>
+  );
+}
+
+function PlatformDot({ p }) {
+  if (p === 'instagram') return <span className="pdot ig" />;
+  if (p === 'telegram') return <span className="pdot tg" />;
+  if (p === 'whatsapp') return <span className="pdot wa" />;
+  return null;
+}
+
+function PlatformIcon({ p }) {
+  if (p === 'instagram') return <I.Inst />;
+  if (p === 'telegram') return <I.Tg />;
+  if (p === 'whatsapp') return <I.Wa />;
+  return null;
+}
+
+function Toast({ message }) {
+  if (!message) return null;
+  return <div className="toast">{message}</div>;
+}
+
+function ToggleRow({ label, hint, checked, onChange, w = WORKSPACE_TEXT.en }) {
+  return (
+    <div className="toggle-row">
+      <div>
+        <strong>{label}</strong>
+        {hint && <span>{hint}</span>}
+      </div>
+      <button className={`ai-toggle ${checked ? 'on' : ''}`} onClick={() => onChange(!checked)}>
+        <span className="switch" />
+        <span className="label-i">{checked ? (w.on || 'On') : (w.off || 'Off')}</span>
+      </button>
+    </div>
+  );
+}
+
+function SecretField({ business, provider, onBusinessSetting, w = WORKSPACE_TEXT.en }) {
+  const [value, setValue] = useState('');
+  const savedPreview = String(business[provider.keyField] || '').trim();
+
+  useEffect(() => {
+    setValue('');
+  }, [business.id, provider.keyField]);
+
+  const save = () => {
+    const clean = value.trim();
+    if (!clean || !business.id) return;
+    onBusinessSetting(business.id, { [provider.keyField]: clean }, true);
+    setValue('');
+  };
+
+  const clear = () => {
+    if (!business.id) return;
+    setValue('');
+    onBusinessSetting(business.id, { [provider.keyField]: '' }, true);
+  };
+
+  return (
+    <div className="secret-row">
+      <label className="field-row">
+        <span>{provider.label} {w.key}</span>
+        <input
+          type="password"
+          value={value}
+          placeholder={savedPreview ? `${w.saved} (${savedPreview})` : w.pasteApiKey}
+          onChange={(e) => setValue(e.target.value)}
+          onBlur={save}
+          autoComplete="off"
+        />
+      </label>
+      <button type="button" className="panel-btn subtle" disabled={!savedPreview} onClick={clear}>{w.clear}</button>
+    </div>
+  );
+}
+
+function PromptField({ label, value, rows = 5, onChange }) {
+  return (
+    <label className="field-row prompt-row">
+      <span>{label}</span>
+      <textarea value={value || ''} onChange={(event) => onChange(event.target.value)} rows={rows} />
+    </label>
+  );
+}
+
+const PROMPT_FIELD_LABELS = {
+  global_prompt: 'Global prompt',
+  instagram_prompt: 'Instagram rules',
+  telegram_prompt: 'Telegram rules',
+  whatsapp_prompt: 'WhatsApp rules',
+  opening_message: 'Opening message',
+  lead_collection_rules: 'Lead collection rules',
+  sales_rules: 'Follow-up style',
+  handoff_rules: 'Human handoff rules',
+};
+
+const WORKSPACE_TEXT = {
+  en: {
+    workspace: 'Workspace', leadsTitle: 'Leads Pipeline', promptsTitle: 'AI Prompt Settings', profile: 'Profile', refresh: 'Refresh', liveWorkspace: 'Live backend workspace',
+    totalConversations: 'Total conversations', activeThreads: 'Active inbox threads', newLeads: 'New leads', recentProspects: 'Recent or unread prospects',
+    aiHandledChats: 'AI handled chats', coveredByAi: 'Currently covered by AI', humanTakeoverChats: 'Human takeover chats', manualAttention: 'Needs manual attention',
+    unreadMessages: 'Unread messages', waitingMessages: 'Customer messages waiting', responseRate: 'Response rate', estimatedInbox: 'Estimated from inbox state',
+    avgResponseTime: 'Avg response time', liveEstimate: 'Live estimate', platformMessages: 'Platform messages', allPlatforms: 'Instagram + Telegram + WhatsApp',
+    inbound: 'Inbound', outbound: 'Outbound', aiReplies: 'AI replies', humanReplies: 'Human replies', messagesByDay: 'Messages by day',
+    messagesByPlatform: 'Messages by platform', inboundVsOutbound: 'Inbound vs outbound', aiVsHuman: 'AI replies vs human replies',
+    topCustomers: 'Top active customers', noCustomers: 'No customers yet', peakHours: 'Peak messaging hours', mostProducts: 'Most mentioned products',
+    productIntent: 'Catalog/product intent', priceQuestions: 'Customers asking for price', priceHint: 'Pricing questions',
+    deliveryQuestions: 'Customers asking for delivery', deliveryHint: 'Delivery questions', readyToOrder: 'Customers ready to order',
+    buyingIntent: 'Buying intent', followUp: 'Needs human follow-up', aiPaused: 'Takeover or AI paused',
+    globalPrompt: 'Global Prompt', usedBy: 'Used by Instagram + Telegram + WhatsApp', platformOverrides: 'Platform Overrides',
+    instagramRules: 'Instagram rules', telegramRules: 'Telegram rules', whatsappRules: 'WhatsApp rules', businessKnowledge: 'Business Knowledge',
+    knowledgeHint: 'Products, prices, delivery, FAQ, contacts, and catalog links are managed in the Knowledge page and injected into the final prompt automatically.',
+    products: 'Products', prices: 'Prices', delivery: 'Delivery', faq: 'FAQ', contacts: 'Contacts', catalogLinks: 'Catalog links', telegram_bag: 'Qop size rule',
+    salesBehavior: 'Sales Behavior', openingMessage: 'Opening message', leadCollectionRules: 'Lead collection rules',
+    followUpStyle: 'Follow-up style', humanHandoffRules: 'Human handoff rules', improvePrompt: 'Improve Prompt', improving: 'Improving...',
+    regenerate: 'Regenerate', generatedSuggestion: 'Generated suggestion', suggestionFallback: 'Made it clearer, safer, and easier for agents to maintain.',
+    acceptSuggestion: 'Accept suggestion', decline: 'Decline', savePromptSettings: 'Save AI prompt settings', saving: 'Saving...',
+    promptFormula: 'Prompt formula', noBusinesses: 'No businesses returned from the backend.', connectInstagram: 'Connect Instagram', connectFacebook: 'Connect Facebook',
+    unnamedBusiness: 'Unnamed business', active: 'active', paused: 'paused', botEnabled: 'Bot enabled', botEnabledHint: 'Controls automatic replies for this business.',
+    instagramDms: 'Instagram DMs', instagramDmsHint: 'Automatic Instagram direct-message replies.', instagramComments: 'Instagram comments',
+    instagramCommentsHint: 'Automatic comment replies.', language: 'Language', tone: 'Tone', aiModel: 'AI model', provider: 'Provider', model: 'Model',
+    customModel: 'Custom model', temperature: 'Temperature', maxTokens: 'Max tokens', apiKeys: 'API keys', key: 'key', saved: 'Saved', pasteApiKey: 'Paste API key',
+    clear: 'Clear', promptReady: 'Prompt suggestion ready', promptLocal: 'Prompt suggestion generated locally', noBusinessLocal: 'Generated locally because no live business is selected.',
+    backendUnavailableLocal: 'Generated locally because the backend endpoint is not available yet.',
+    leadNew: 'New', leadQualified: 'Qualified', leadNegotiation: 'Negotiation', leadWon: 'Won', leadLost: 'Lost',
+    leadAmount: 'Potential value', leadSource: 'Source', leadUpdated: 'Updated', leadEmpty: 'No leads in this stage yet.',
+    leadOpen: 'Open chat', leadPrice: 'Price', leadPricePlaceholder: 'Add price', leadPriceClear: 'Clear price',
+    clientsTitle: 'Clients table', clientsSubtitle: 'All customers with status, channel, price, and last message.', clientsEmpty: 'No clients yet.',
+    client: 'Client', lastMessage: 'Last message', status: 'Status', channel: 'Channel', ownerAssigned: 'Owner', pickClient: 'Pick me', unpickClient: 'Unpick',
+    manualLeadName: 'Lead name', manualLeadSource: 'Source', manualLeadOwner: 'Operator', manualLeadNote: 'Note', addManualLead: 'Add manual lead',
+    operatorsTitle: 'Operators panel', operatorsSubtitle: 'Operator workspace for tasks, client messages, and leads.',
+    textToOperators: 'Text to operators', textToOperatorsPlaceholder: 'Write task for operators...', saveAdminNote: 'Send task',
+    adminNotes: 'Tasks history', noAdminNotes: 'No tasks yet.', messagesFromClients: 'Messages from clients',
+    tasksFromAdmin: 'Tasks from admin', noTasksForYou: 'No tasks assigned to you.',
+    assignOne: 'Assign one', assignGroup: 'Assign group', assignAll: 'All operators',
+    operatorRanking: 'Operators ranking', successfulDeals: 'Successful deals', downloadOperatorReport: 'Download PDF', operatorPanel: 'Operator panel', adminPanel: 'Admin panel',
+    operatorAccounts: 'Operator accounts', operatorAccountsHint: 'Create operator logins for this business.', operatorId: 'Operator ID', operatorPassword: 'Password',
+    addOperator: 'Add operator', noOperators: 'No operators yet.',
+    igGrowthTitle: 'Instagram Growth Analyzer',
+    igGrowthSubtitle: 'AI recommendations for content quality, engagement, and conversion.',
+    igGrowthScore: 'Account score',
+    igGrowthProduct: 'Product to promote this week',
+    igGrowthProblems: 'Main problems',
+    igGrowthNextContent: 'Recommended next content',
+    igGrowthWeeklyPlan: 'Weekly content plan',
+    igGrowthMonthlyPlan: 'Monthly focus',
+    igGrowthTasks: 'Account improvement tasks',
+    igGrowthQuestions: 'Common customer questions',
+    igGrowthScope: 'Analysis scope',
+    igGrowthLoading: 'Analyzing Instagram activity...',
+    igGrowthEmpty: 'No analysis yet. Connect live data and refresh.',
+    igGrowthRefresh: 'Refresh analysis',
+    igGrowthRetry: 'Retry',
+    postsTitle: 'Posts',
+    postsSubtitle: 'Import Instagram posts/reels and add post-specific info for bot replies.',
+    importPosts: 'Import posts',
+    refreshPosts: 'Refresh posts',
+    postsLoading: 'Loading posts...',
+    postsEmpty: 'No posts imported yet.',
+    postExtraInfo: 'Post extra info for bot replies',
+    savePostInfo: 'Save post info',
+    postSaved: 'Post info saved',
+    videoAnalyzerTitle: 'Video Analyzer',
+    videoAnalyzerSubtitle: 'Analyze Reels, TikToks, and Shorts with Gemini.',
+    videoAnalyzerUpload: 'Upload Reel, TikTok, or Shorts',
+    videoAnalyzerNiche: 'Niche',
+    videoAnalyzerDescription: 'Current caption',
+    videoAnalyzerDetails: 'Video details',
+    videoAnalyzerRun: 'Analyze',
+    videoAnalyzerLoading: 'Analyzing...',
+    videoAnalyzerPreview: 'Video preview',
+    videoAnalyzerReport: 'AI report',
+    videoAnalyzerMeta: 'Gemini analysis',
+    videoAnalyzerEmpty: 'Upload a video or add text details, then run analysis.',
+    copy: 'Copy',
+    copied: 'Copied',
+  },
+  uz: {
+    workspace: 'Ish maydoni', leadsTitle: 'Lidlar pipeline', promptsTitle: 'AI Prompt sozlamalari', profile: 'Profil', refresh: 'Yangilash', liveWorkspace: 'Live backend ish maydoni',
+    totalConversations: 'Jami suhbatlar', activeThreads: 'Faol inbox suhbatlari', newLeads: 'Yangi leadlar', recentProspects: 'Yangi yoki o‘qilmagan mijozlar',
+    aiHandledChats: 'AI yuritgan chatlar', coveredByAi: 'AI nazoratida', humanTakeoverChats: 'Operatorga o‘tgan chatlar', manualAttention: 'Qo‘lda ko‘rish kerak',
+    unreadMessages: 'O‘qilmagan xabarlar', waitingMessages: 'Javob kutayotgan xabarlar', responseRate: 'Javob darajasi', estimatedInbox: 'Inbox holatidan taxmin',
+    avgResponseTime: 'O‘rtacha javob vaqti', liveEstimate: 'Live taxmin', platformMessages: 'Platforma xabarlari', allPlatforms: 'Instagram + Telegram + WhatsApp',
+    inbound: 'Kiruvchi', outbound: 'Chiquvchi', aiReplies: 'AI javoblari', humanReplies: 'Operator javoblari', messagesByDay: 'Kunlar bo‘yicha xabarlar',
+    messagesByPlatform: 'Platformalar bo‘yicha xabarlar', inboundVsOutbound: 'Kiruvchi va chiquvchi', aiVsHuman: 'AI va operator javoblari',
+    topCustomers: 'Eng faol mijozlar', noCustomers: 'Hali mijoz yo‘q', peakHours: 'Eng faol soatlar', mostProducts: 'Eng ko‘p tilga olingan mahsulotlar',
+    productIntent: 'Katalog/mahsulot qiziqishi', priceQuestions: 'Narx so‘ragan mijozlar', priceHint: 'Narx savollari',
+    deliveryQuestions: 'Yetkazib berishni so‘raganlar', deliveryHint: 'Yetkazib berish savollari', readyToOrder: 'Buyurtmaga tayyor mijozlar',
+    buyingIntent: 'Sotib olish niyati', followUp: 'Operator kuzatuvi kerak', aiPaused: 'Takeover yoki AI pauzada',
+    globalPrompt: 'Umumiy prompt', usedBy: 'Instagram + Telegram + WhatsApp uchun', platformOverrides: 'Platforma qoidalari',
+    instagramRules: 'Instagram qoidalari', telegramRules: 'Telegram qoidalari', whatsappRules: 'WhatsApp qoidalari', businessKnowledge: 'Biznes bilimlari',
+    knowledgeHint: 'Mahsulot, narx, yetkazib berish, FAQ, kontakt va katalog linklari Bilim sahifasida boshqariladi va promptga qo‘shiladi.',
+    products: 'Mahsulotlar', prices: 'Narxlar', delivery: 'Yetkazib berish', faq: 'FAQ', contacts: 'Kontaktlar', catalogLinks: 'Katalog linklari', telegram_bag: 'Qop razmer qoidasi',
+    salesBehavior: 'Sotuv uslubi', openingMessage: 'Boshlang‘ich xabar', leadCollectionRules: 'Lead yig‘ish qoidalari',
+    followUpStyle: 'Follow-up uslubi', humanHandoffRules: 'Operatorga o‘tkazish qoidalari', improvePrompt: 'Promptni yaxshilash', improving: 'Yaxshilanmoqda...',
+    regenerate: 'Qayta yaratish', generatedSuggestion: 'Tavsiya qilingan prompt', suggestionFallback: 'Agentlarga osonroq, xavfsizroq va aniqroq qilindi.',
+    acceptSuggestion: 'Tavsiyani qabul qilish', decline: 'Rad etish', savePromptSettings: 'AI prompt sozlamalarini saqlash', saving: 'Saqlanmoqda...',
+    promptFormula: 'Prompt formulasi', noBusinesses: 'Backenddan bizneslar kelmadi.', connectInstagram: 'Instagram ulash', connectFacebook: 'Facebook ulash',
+    unnamedBusiness: 'Nomsiz biznes', active: 'faol', paused: 'pauza', botEnabled: 'Bot yoqilgan', botEnabledHint: 'Bu biznes uchun avtomatik javoblarni boshqaradi.',
+    instagramDms: 'Instagram DM', instagramDmsHint: 'Instagram DM avtomatik javoblari.', instagramComments: 'Instagram kommentlar',
+    instagramCommentsHint: 'Kommentlarga avtomatik javoblar.', language: 'Til', tone: 'Ohang', aiModel: 'AI model', provider: 'Provider', model: 'Model',
+    customModel: 'Custom model', temperature: 'Temperature', maxTokens: 'Max token', apiKeys: 'API kalitlar', key: 'kalit', saved: 'Saqlangan', pasteApiKey: 'API kalitni kiriting',
+    clear: 'Tozalash', promptReady: 'Prompt tavsiyasi tayyor', promptLocal: 'Prompt tavsiyasi lokal yaratildi', noBusinessLocal: 'Live biznes tanlanmagani uchun lokal yaratildi.',
+    backendUnavailableLocal: 'Backend endpoint hali ishlamagani uchun lokal yaratildi.',
+    leadNew: 'Yangi', leadQualified: 'Saralangan', leadNegotiation: 'Muzokara', leadWon: 'Yutilgan', leadLost: 'Yo‘qotilgan',
+    leadAmount: 'Potensial qiymat', leadSource: 'Manba', leadUpdated: 'Yangilangan', leadEmpty: 'Bu bosqichda lid yo‘q.',
+    leadOpen: 'Chatni ochish', leadPrice: 'Narx', leadPricePlaceholder: 'Narx kiriting', leadPriceClear: 'Narxni o‘chirish',
+    clientsTitle: 'Mijozlar jadvali', clientsSubtitle: 'Barcha mijozlar: status, kanal, narx va oxirgi xabar.', clientsEmpty: 'Hali mijoz yo‘q.',
+    client: 'Mijoz', lastMessage: 'Oxirgi xabar', status: 'Status', channel: 'Kanal', ownerAssigned: 'Egası', pickClient: 'O‘zim olish', unpickClient: 'Bo‘shatish',
+    manualLeadName: 'Lead ismi', manualLeadSource: 'Manba', manualLeadOwner: 'Operator', manualLeadNote: 'Izoh', addManualLead: 'Manual lead qo‘shish',
+    operatorsTitle: 'Operator paneli', operatorsSubtitle: 'Vazifalar, mijoz xabarlari va lidlar uchun operator ish maydoni.',
+    textToOperators: 'Operatorlarga topshiriq', textToOperatorsPlaceholder: 'Operatorlar uchun vazifa yozing...', saveAdminNote: 'Vazifani yuborish',
+    adminNotes: 'Vazifalar tarixi', noAdminNotes: 'Hali vazifa yo‘q.', messagesFromClients: 'Mijozlardan xabarlar',
+    tasksFromAdmin: 'Admindan vazifalar', noTasksForYou: 'Sizga tayinlangan vazifa yo‘q.',
+    assignOne: 'Bitta operator', assignGroup: 'Guruhga', assignAll: 'Barcha operatorlar',
+    operatorRanking: 'Operatorlar reytingi', successfulDeals: 'Muvaffaqiyatli bitimlar', downloadOperatorReport: 'PDF yuklab olish', operatorPanel: 'Operator panel', adminPanel: 'Admin panel',
+    operatorAccounts: 'Operator akkauntlari', operatorAccountsHint: 'Bu biznes uchun operator loginlarini yarating.', operatorId: 'Operator ID', operatorPassword: 'Parol',
+    addOperator: 'Operator qo‘shish', noOperators: 'Hali operator yo‘q.',
+    igGrowthTitle: 'Instagram Growth Analyzer',
+    igGrowthSubtitle: 'Kontent sifati, engagement va konversiya bo‘yicha AI tavsiyalar.',
+    igGrowthScore: 'Akkaunt skori',
+    igGrowthProduct: 'Bu hafta targ‘ib qilinadigan mahsulot',
+    igGrowthProblems: 'Asosiy muammolar',
+    igGrowthNextContent: 'Keyingi tavsiya etilgan kontent',
+    igGrowthWeeklyPlan: 'Haftalik kontent reja',
+    igGrowthMonthlyPlan: 'Oylik fokus',
+    igGrowthTasks: 'Akkauntni yaxshilash vazifalari',
+    igGrowthQuestions: 'Mijozlarning ko‘p beradigan savollari',
+    igGrowthScope: 'Tahlil qamrovi',
+    igGrowthLoading: 'Instagram faolligi tahlil qilinmoqda...',
+    igGrowthEmpty: 'Hali tahlil yo‘q. Live data ulang va yangilang.',
+    igGrowthRefresh: 'Tahlilni yangilash',
+    igGrowthRetry: 'Qayta urinish',
+    postsTitle: 'Postlar',
+    postsSubtitle: 'Instagram post/reellarni import qiling va bot javobi uchun postga xos maʼlumot yozing.',
+    importPosts: 'Postlarni import qilish',
+    refreshPosts: 'Postlarni yangilash',
+    postsLoading: 'Postlar yuklanmoqda...',
+    postsEmpty: 'Hali post import qilinmagan.',
+    postExtraInfo: 'Bot javobi uchun postga xos qo‘shimcha maʼlumot',
+    savePostInfo: 'Post maʼlumotini saqlash',
+    postSaved: 'Post maʼlumoti saqlandi',
+    videoAnalyzerTitle: 'Video Analyzer',
+    videoAnalyzerSubtitle: 'Reels, TikTok va Shorts videolarini Gemini bilan tahlil qiling.',
+    videoAnalyzerUpload: 'Reel, TikTok yoki Shorts yuklash',
+    videoAnalyzerNiche: 'Nisha',
+    videoAnalyzerDescription: 'Hozirgi caption',
+    videoAnalyzerDetails: 'Video detallari',
+    videoAnalyzerRun: 'Tahlil qilish',
+    videoAnalyzerLoading: 'Tahlil qilinmoqda...',
+    videoAnalyzerPreview: 'Video preview',
+    videoAnalyzerReport: 'AI hisobot',
+    videoAnalyzerMeta: 'Gemini tahlili',
+    videoAnalyzerEmpty: 'Video yuklang yoki matnli detallar qo‘shing, keyin tahlilni boshlang.',
+    copy: 'Copy',
+    copied: 'Copied',
+  },
+  ru: {
+    workspace: 'Рабочая область', leadsTitle: 'Воронка лидов', promptsTitle: 'Настройки AI Prompt', profile: 'Профиль', refresh: 'Обновить', liveWorkspace: 'Рабочая область backend',
+    totalConversations: 'Всего диалогов', activeThreads: 'Активные диалоги inbox', newLeads: 'Новые лиды', recentProspects: 'Новые или непрочитанные клиенты',
+    aiHandledChats: 'Чаты обработаны ИИ', coveredByAi: 'Сейчас ведет ИИ', humanTakeoverChats: 'Передано оператору', manualAttention: 'Нужно внимание человека',
+    unreadMessages: 'Непрочитанные', waitingMessages: 'Сообщения ждут ответа', responseRate: 'Доля ответов', estimatedInbox: 'Оценка по inbox',
+    avgResponseTime: 'Среднее время ответа', liveEstimate: 'Живая оценка', platformMessages: 'Сообщения платформ', allPlatforms: 'Instagram + Telegram + WhatsApp',
+    inbound: 'Входящие', outbound: 'Исходящие', aiReplies: 'Ответы ИИ', humanReplies: 'Ответы оператора', messagesByDay: 'Сообщения по дням',
+    messagesByPlatform: 'Сообщения по платформам', inboundVsOutbound: 'Входящие и исходящие', aiVsHuman: 'ИИ и оператор',
+    topCustomers: 'Самые активные клиенты', noCustomers: 'Клиентов пока нет', peakHours: 'Пиковые часы', mostProducts: 'Часто упоминаемые товары',
+    productIntent: 'Интерес к каталогу/товару', priceQuestions: 'Спрашивают цену', priceHint: 'Вопросы о цене',
+    deliveryQuestions: 'Спрашивают доставку', deliveryHint: 'Вопросы о доставке', readyToOrder: 'Готовы заказать',
+    buyingIntent: 'Намерение купить', followUp: 'Нужен follow-up оператора', aiPaused: 'Takeover или ИИ на паузе',
+    globalPrompt: 'Общий prompt', usedBy: 'Для Instagram + Telegram + WhatsApp', platformOverrides: 'Правила платформ',
+    instagramRules: 'Правила Instagram', telegramRules: 'Правила Telegram', whatsappRules: 'Правила WhatsApp', businessKnowledge: 'База знаний',
+    knowledgeHint: 'Товары, цены, доставка, FAQ, контакты и ссылки каталога управляются на странице База знаний и добавляются в финальный prompt.',
+    products: 'Товары', prices: 'Цены', delivery: 'Доставка', faq: 'FAQ', contacts: 'Контакты', catalogLinks: 'Ссылки каталога', telegram_bag: 'Правило размеров мешка',
+    salesBehavior: 'Стиль продаж', openingMessage: 'Первое сообщение', leadCollectionRules: 'Правила сбора лидов',
+    followUpStyle: 'Стиль follow-up', humanHandoffRules: 'Правила передачи оператору', improvePrompt: 'Улучшить prompt', improving: 'Улучшаю...',
+    regenerate: 'Сгенерировать заново', generatedSuggestion: 'Предложенный prompt', suggestionFallback: 'Сделано понятнее, безопаснее и проще для агентов.',
+    acceptSuggestion: 'Принять', decline: 'Отклонить', savePromptSettings: 'Сохранить AI prompt', saving: 'Сохранение...',
+    promptFormula: 'Формула prompt', noBusinesses: 'Backend не вернул бизнесы.', connectInstagram: 'Подключить Instagram', connectFacebook: 'Подключить Facebook',
+    unnamedBusiness: 'Без названия', active: 'активен', paused: 'пауза', botEnabled: 'Бот включен', botEnabledHint: 'Управляет автоответами для бизнеса.',
+    instagramDms: 'Instagram DM', instagramDmsHint: 'Автоответы в Instagram DM.', instagramComments: 'Комментарии Instagram',
+    instagramCommentsHint: 'Автоответы на комментарии.', language: 'Язык', tone: 'Тон', aiModel: 'AI модель', provider: 'Провайдер', model: 'Модель',
+    customModel: 'Своя модель', temperature: 'Temperature', maxTokens: 'Макс. токены', apiKeys: 'API ключи', key: 'ключ', saved: 'Сохранен', pasteApiKey: 'Вставьте API ключ',
+    clear: 'Очистить', promptReady: 'Prompt готов', promptLocal: 'Prompt сгенерирован локально', noBusinessLocal: 'Создано локально, потому что live бизнес не выбран.',
+    backendUnavailableLocal: 'Создано локально, потому что backend endpoint пока недоступен.',
+    leadNew: 'Новые', leadQualified: 'Квалиф.', leadNegotiation: 'Переговоры', leadWon: 'Сделка', leadLost: 'Потеряно',
+    leadAmount: 'Потенциал', leadSource: 'Источник', leadUpdated: 'Обновлено', leadEmpty: 'В этой стадии пока нет лидов.',
+    leadOpen: 'Открыть чат', leadPrice: 'Цена', leadPricePlaceholder: 'Добавить цену', leadPriceClear: 'Удалить цену',
+    clientsTitle: 'Таблица клиентов', clientsSubtitle: 'Все клиенты со статусом, каналом, ценой и последним сообщением.', clientsEmpty: 'Клиентов пока нет.',
+    client: 'Клиент', lastMessage: 'Последнее сообщение', status: 'Статус', channel: 'Канал', ownerAssigned: 'Ответственный', pickClient: 'Взять себе', unpickClient: 'Снять',
+    manualLeadName: 'Имя лида', manualLeadSource: 'Источник', manualLeadOwner: 'Оператор', manualLeadNote: 'Заметка', addManualLead: 'Добавить лид',
+    operatorsTitle: 'Панель оператора', operatorsSubtitle: 'Рабочая зона оператора: задачи, клиенты и лиды.',
+    textToOperators: 'Задача операторам', textToOperatorsPlaceholder: 'Напишите задачу для операторов...', saveAdminNote: 'Отправить задачу',
+    adminNotes: 'История задач', noAdminNotes: 'Задач пока нет.', messagesFromClients: 'Сообщения клиентов',
+    tasksFromAdmin: 'Задачи от админа', noTasksForYou: 'Вам пока не назначены задачи.',
+    assignOne: 'Одному', assignGroup: 'Группе', assignAll: 'Всем операторам',
+    operatorRanking: 'Рейтинг операторов', successfulDeals: 'Успешные сделки', downloadOperatorReport: 'Скачать PDF', operatorPanel: 'Панель оператора', adminPanel: 'Панель админа',
+    operatorAccounts: 'Аккаунты операторов', operatorAccountsHint: 'Создайте логины операторов для этого бизнеса.', operatorId: 'ID оператора', operatorPassword: 'Пароль',
+    addOperator: 'Добавить оператора', noOperators: 'Операторов пока нет.',
+    igGrowthTitle: 'Instagram Growth Analyzer',
+    igGrowthSubtitle: 'AI-рекомендации по качеству контента, engagement и конверсии.',
+    igGrowthScore: 'Скор аккаунта',
+    igGrowthProduct: 'Продукт для продвижения на этой неделе',
+    igGrowthProblems: 'Основные проблемы',
+    igGrowthNextContent: 'Рекомендуемый следующий контент',
+    igGrowthWeeklyPlan: 'Недельный контент-план',
+    igGrowthMonthlyPlan: 'Месячный фокус',
+    igGrowthTasks: 'Задачи по улучшению аккаунта',
+    igGrowthQuestions: 'Частые вопросы клиентов',
+    igGrowthScope: 'Охват анализа',
+    igGrowthLoading: 'Анализируем Instagram-активность...',
+    igGrowthEmpty: 'Пока нет анализа. Подключите live-данные и обновите.',
+    igGrowthRefresh: 'Обновить анализ',
+    igGrowthRetry: 'Повторить',
+    postsTitle: 'Посты',
+    postsSubtitle: 'Импортируйте посты/reels Instagram и добавляйте доп. контекст для ответов бота.',
+    importPosts: 'Импорт постов',
+    refreshPosts: 'Обновить посты',
+    postsLoading: 'Загрузка постов...',
+    postsEmpty: 'Посты пока не импортированы.',
+    postExtraInfo: 'Доп. информация по посту для ответов бота',
+    savePostInfo: 'Сохранить информацию',
+    postSaved: 'Информация по посту сохранена',
+    videoAnalyzerTitle: 'Video Analyzer',
+    videoAnalyzerSubtitle: 'Анализ Reels, TikTok и Shorts через Gemini.',
+    videoAnalyzerUpload: 'Загрузить Reel, TikTok или Shorts',
+    videoAnalyzerNiche: 'Ниша',
+    videoAnalyzerDescription: 'Текущее описание',
+    videoAnalyzerDetails: 'Детали видео',
+    videoAnalyzerRun: 'Анализировать',
+    videoAnalyzerLoading: 'Анализируем...',
+    videoAnalyzerPreview: 'Превью видео',
+    videoAnalyzerReport: 'AI отчет',
+    videoAnalyzerMeta: 'Gemini анализ',
+    videoAnalyzerEmpty: 'Загрузите видео или добавьте текстовые детали, затем запустите анализ.',
+    copy: 'Копировать',
+    copied: 'Скопировано',
+  },
+};
+
+const LEAD_STAGE_ORDER = ['new', 'qualified', 'negotiation', 'won', 'lost'];
+
+function guessLeadStage(conv) {
+  const blob = `${conv.preview} ${conv.summary}`.toLowerCase();
+  if (conv.unread > 0 || conv.needsHuman) return 'new';
+  if (/ready|order|заказ|buyurtma|olaman|сч[её]т|invoice/.test(blob)) return 'negotiation';
+  if (/thank|thanks|received|получил|rahmat|oldim/.test(blob)) return 'won';
+  if (/cancel|later|нет|yo['’`]?q|not now|stop/.test(blob)) return 'lost';
+  return 'qualified';
+}
+
+function buildLeads(conversations, leadStages, leadPrices = {}) {
+  const leads = (conversations || []).map(conv => {
+    const stage = leadStages[conv.id] || guessLeadStage(conv);
+    const inferredValue = Number(conv.kpis?.orders || 0) > 0
+      ? Number(conv.kpis.orders) * 120
+      : Math.max(90, 60 + Number(conv.unread || 0) * 45 + (conv.needsHuman ? 120 : 0));
+    return {
+      id: conv.id,
+      stage,
+      name: conv.name,
+      platform: conv.platform,
+      handle: conv.handle,
+      preview: conv.preview,
+      unread: conv.unread,
+      needsHuman: conv.needsHuman,
+      amount: inferredValue,
+      price: leadPrices[conv.id] || '',
+      updatedAt: conv.lastTime,
+      source: conv.channelName || conv.channel || conv.platform,
+      conversationId: conv.id,
+    };
+  });
+  return leads;
+}
+
+function localPromptSuggestion(field, currentPrompt = '', goal = '') {
+  const intro = {
+    global_prompt: 'You are Milana Premium factory sales operator.',
+    instagram_prompt: 'Instagram comment+DM rules:',
+    telegram_prompt: 'Telegram sales rules:',
+    whatsapp_prompt: 'WhatsApp sales rules:',
+    opening_message: 'Assalomu alaykum 😊 Qanday yordam kerak?',
+    lead_collection_rules: 'Lead collection rules:',
+    sales_rules: 'Sales reply rules:',
+    handoff_rules: 'Human handoff rules:',
+  }[field] || 'Prompt rules:';
+
+  const source = String(currentPrompt || '').trim();
+  const productHint = source.match(/[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳʼ']{4,}/)?.[0] || 'customer request';
+
+  if (field === 'opening_message') {
+    return {
+      suggested_prompt: 'Assalomu alaykum 😊 Qanday yordam kerak?',
+      explanation: 'Made the opening short and natural, without asking for phone or address too early.',
+    };
+  }
+
+  return {
+    suggested_prompt: [
+      intro,
+      `- Reply shortly, warmly, and naturally in the customer's language.`,
+      `- Use first-touch identity line for new chats.`,
+      `- For price/catalog details, handoff to manager when exact terms are needed.`,
+      `- For Instagram price/catalog comments, send details in DM and never ask for name, phone, address, or other private information publicly.`,
+      `- Collect only the order details needed, and use private chat for personal/contact information.`,
+      `- Only answer Milana Premium sales topics: products, catalog, price/order flow, wholesale, delivery, payment, address, warranty, and manager handoff.`,
+      `- Never answer unrelated topics. Refuse briefly and redirect to catalog or manager help.`,
+      `- For price questions, do not invent exact prices; one qop/meshok is usually around 400-500 USD and exact terms go to manager.`,
+      `- Never promise reservation and never invent price/stock/delivery details.`,
+      `- Use +998501551010 for manager handoff when required.`,
+      `- Do not repeat "${productHint}" or any product name in every message.`,
+      goal ? `- Main improvement goal: ${goal}.` : '',
+    ].filter(Boolean).join('\n'),
+    explanation: 'Aligned with Milana Premium sales-agent Q&A style and handoff policy.',
+  };
+}
+
+function clampPercent(value, max) {
+  if (!max) return 0;
+  return Math.max(4, Math.min(100, Math.round((Number(value || 0) / max) * 100)));
+}
+
+function formatPercent(value) {
+  if (!Number.isFinite(value)) return '0%';
+  return `${Math.round(value)}%`;
+}
+
+function keywordCount(conversations, words) {
+  const terms = words.map(word => word.toLowerCase());
+  return conversations.filter(conv => terms.some(term => `${conv.name} ${conv.preview} ${conv.summary}`.toLowerCase().includes(term))).length;
+}
+
+function buildInsights(conversations, stats, w = WORKSPACE_TEXT.en) {
+  const rows = conversations || [];
+  const totalConversations = rows.length;
+  const unreadMessages = rows.reduce((sum, conv) => sum + Number(conv.unread || 0), 0);
+  const aiHandled = rows.filter(conv => conv.aiOn && !conv.needsHuman).length;
+  const humanTakeover = rows.filter(conv => conv.needsHuman || conv.aiOn === false).length;
+  const newLeads = rows.filter(conv => conv.unread > 0 || /first|today|2 min|14 min|hr/i.test(`${conv.customerSince} ${conv.lastTime}`)).length;
+  const responseRate = totalConversations ? ((totalConversations - unreadMessages) / totalConversations) * 100 : 0;
+
+  const platformCounts = ['instagram', 'telegram', 'whatsapp'].map(platform => ({
+    label: platform === 'whatsapp' ? 'WhatsApp' : platform[0].toUpperCase() + platform.slice(1),
+    value: rows.filter(conv => conv.platform === platform).length || Number(stats?.[`${platform}_messages`] || 0),
+  }));
+
+  const inboundOutbound = [
+    { label: w.inbound, value: rows.reduce((sum, conv) => sum + Number(conv.unread || 0), 0) + totalConversations },
+    { label: w.outbound, value: rows.filter(conv => conv.aiOn).length + rows.filter(conv => conv.lastFromMe).length },
+  ];
+
+  const aiHuman = [
+    { label: w.aiReplies, value: aiHandled },
+    { label: w.humanReplies, value: humanTakeover },
+  ];
+
+  const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+  const messagesByDay = dayLabels.map((label, index) => ({
+    label,
+    value: Math.max(1, Math.round((totalConversations + unreadMessages + index * 2) * (0.55 + ((index % 3) * 0.18)))),
+  }));
+
+  const peakHours = ['09', '11', '13', '15', '17', '19'].map((label, index) => ({
+    label: `${label}:00`,
+    value: Math.max(1, Math.round((totalConversations + 2) * (0.45 + ((index + 1) % 4) * 0.16))),
+  }));
+
+  const topCustomers = rows
+    .slice()
+    .sort((a, b) => (Number(b.kpis?.orders || 0) + Number(b.unread || 0)) - (Number(a.kpis?.orders || 0) + Number(a.unread || 0)))
+    .slice(0, 5)
+    .map(conv => ({ label: conv.name, value: Number(conv.kpis?.orders || 0) || Number(conv.unread || 0) || 1, platform: conv.platform }));
+
+  const productTerms = ['xalat', 'sumka', 'dress', 'shoe', 'catalog', 'katalog', 'mahsulot', 'товар', 'collection'];
+  const priceTerms = ['price', 'narx', 'qancha', 'сколько', 'цена'];
+  const deliveryTerms = ['delivery', 'yetkaz', 'dostavka', 'доставка'];
+  const orderTerms = ['order', 'buyurtma', 'olaman', 'куплю', 'zakaz', 'ready'];
+
+  return {
+    metrics: [
+      { label: w.totalConversations, value: totalConversations, hint: w.activeThreads },
+      { label: w.newLeads, value: newLeads, hint: w.recentProspects },
+      { label: w.aiHandledChats, value: aiHandled, hint: w.coveredByAi },
+      { label: w.humanTakeoverChats, value: humanTakeover, hint: w.manualAttention },
+      { label: w.unreadMessages, value: unreadMessages, hint: w.waitingMessages },
+      { label: w.responseRate, value: formatPercent(responseRate), hint: w.estimatedInbox },
+      { label: w.avgResponseTime, value: unreadMessages ? '14m' : '6m', hint: w.liveEstimate },
+      { label: w.platformMessages, value: platformCounts.reduce((sum, item) => sum + item.value, 0), hint: w.allPlatforms },
+    ],
+    platformCounts,
+    inboundOutbound,
+    aiHuman,
+    messagesByDay,
+    topCustomers,
+    peakHours,
+    salesSignals: [
+      { label: w.mostProducts, value: keywordCount(rows, productTerms), hint: w.productIntent },
+      { label: w.priceQuestions, value: keywordCount(rows, priceTerms), hint: w.priceHint },
+      { label: w.deliveryQuestions, value: keywordCount(rows, deliveryTerms), hint: w.deliveryHint },
+      { label: w.readyToOrder, value: keywordCount(rows, orderTerms), hint: w.buyingIntent },
+      { label: w.followUp, value: humanTakeover, hint: w.aiPaused },
+    ],
+  };
+}
+
+function MiniBarChart({ title, data }) {
+  const max = Math.max(1, ...data.map(item => Number(item.value || 0)));
+  return (
+    <div className="chart-card">
+      <h3>{title}</h3>
+      <div className="bar-chart">
+        {data.map(item => (
+          <div className="bar-row" key={item.label}>
+            <span>{item.label}</span>
+            <div className="bar-track"><i style={{ width: `${clampPercent(item.value, max)}%` }} /></div>
+            <b>{item.value}</b>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ColumnChart({ title, data }) {
+  const max = Math.max(1, ...data.map(item => Number(item.value || 0)));
+  return (
+    <div className="chart-card">
+      <h3>{title}</h3>
+      <div className="column-chart">
+        {data.map(item => (
+          <div className="column" key={item.label}>
+            <i style={{ height: `${clampPercent(item.value, max)}%` }} />
+            <span>{item.label}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function InsightsDashboard({ conversations, stats, w }) {
+  const insights = buildInsights(conversations, stats, w);
+  return (
+    <div className="insights-dashboard">
+      <div className="insights-metrics">
+        {insights.metrics.map(metric => (
+          <div className="metric-card rich" key={metric.label}>
+            <span>{metric.label}</span>
+            <b>{metric.value}</b>
+            <em>{metric.hint}</em>
+          </div>
+        ))}
+      </div>
+
+      <div className="charts-grid">
+        <ColumnChart title={w.messagesByDay} data={insights.messagesByDay} />
+        <MiniBarChart title={w.messagesByPlatform} data={insights.platformCounts} />
+        <MiniBarChart title={w.inboundVsOutbound} data={insights.inboundOutbound} />
+        <MiniBarChart title={w.aiVsHuman} data={insights.aiHuman} />
+        <MiniBarChart title={w.topCustomers} data={insights.topCustomers.length ? insights.topCustomers : [{ label: w.noCustomers, value: 0 }]} />
+        <ColumnChart title={w.peakHours} data={insights.peakHours} />
+      </div>
+
+      <div className="sales-insights">
+        {insights.salesSignals.map(signal => (
+          <div className="signal-card" key={signal.label}>
+            <span>{signal.label}</span>
+            <b>{signal.value}</b>
+            <em>{signal.hint}</em>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function InstagramGrowthAnalyzerCard({ data, loading, error, onRefresh, w = WORKSPACE_TEXT.en }) {
+  const score = Number(data?.account_score || 0);
+  const categoryScores = data?.category_scores || {};
+  const nextContent = Array.isArray(data?.recommended_next_content) ? data.recommended_next_content : [];
+  const weeklyPlan = Array.isArray(data?.weekly_content_plan) ? data.weekly_content_plan : [];
+  const monthlyPlan = Array.isArray(data?.monthly_content_plan) ? data.monthly_content_plan : [];
+  const problems = Array.isArray(data?.problems) ? data.problems : [];
+  const tasks = Array.isArray(data?.account_improvement_tasks) ? data.account_improvement_tasks : [];
+  const questions = Array.isArray(data?.common_customer_questions) ? data.common_customer_questions : [];
+
+  return (
+    <section className="ig-growth-card">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.igGrowthTitle}</h3>
+          <p>{w.igGrowthSubtitle}</p>
+        </div>
+        <button className="panel-btn" onClick={() => onRefresh?.()}>{w.igGrowthRefresh}</button>
+      </div>
+
+      {loading && <div className="ig-growth-state">{w.igGrowthLoading}</div>}
+      {!loading && error && (
+        <div className="ig-growth-state error">
+          <span>{error}</span>
+          <button className="panel-btn subtle" onClick={() => onRefresh?.()}>{w.igGrowthRetry}</button>
+        </div>
+      )}
+      {!loading && !error && !data && <div className="ig-growth-state">{w.igGrowthEmpty}</div>}
+
+      {!loading && !error && data && (
+        <div className="ig-growth-body">
+          <div className="ig-growth-score">
+            <span>{w.igGrowthScore}</span>
+            <b>{Number.isFinite(score) ? `${score}/100` : '0/100'}</b>
+            <em>{w.igGrowthProduct}: {data?.product_to_promote_this_week || '—'}</em>
+            <small>
+              {data?.data_source ? `Source: ${String(data.data_source).replaceAll('_', ' ')}` : ''}
+              {data?.fetched_at ? ` · Fetched: ${String(data.fetched_at).replace('T', ' ').slice(0, 16)} UTC` : ''}
+            </small>
+          </div>
+
+          <div className="ig-growth-metrics">
+            {Object.entries(categoryScores).map(([key, value]) => (
+              <div className="metric-card rich" key={key}>
+                <span>{String(key).replaceAll('_', ' ')}</span>
+                <b>{value}</b>
+              </div>
+            ))}
+          </div>
+
+          <div className="ig-growth-grid">
+            <div className="ig-growth-column">
+              <h4>{w.igGrowthProblems}</h4>
+              <ul>{problems.map((item, idx) => <li key={`p-${idx}`}>{item}</li>)}</ul>
+            </div>
+            <div className="ig-growth-column">
+              <h4>{w.igGrowthNextContent}</h4>
+              <ul>{nextContent.map((item, idx) => <li key={`n-${idx}`}>{item?.type ? `${item.type}: ` : ''}{item?.idea || ''}</li>)}</ul>
+            </div>
+            <div className="ig-growth-column">
+              <h4>{w.igGrowthQuestions}</h4>
+              <ul>{questions.map((item, idx) => <li key={`q-${idx}`}>{item?.theme || ''}{item?.count ? ` (${item.count})` : ''}</li>)}</ul>
+            </div>
+            <div className="ig-growth-column">
+              <h4>{w.igGrowthTasks}</h4>
+              <ul>{tasks.map((item, idx) => <li key={`t-${idx}`}>{item}</li>)}</ul>
+            </div>
+          </div>
+
+          <div className="ig-growth-grid">
+            <div className="ig-growth-column">
+              <h4>{w.igGrowthWeeklyPlan}</h4>
+              <ul>{weeklyPlan.map((item, idx) => <li key={`w-${idx}`}>{item}</li>)}</ul>
+            </div>
+            <div className="ig-growth-column">
+              <h4>{w.igGrowthMonthlyPlan}</h4>
+              <ul>{monthlyPlan.map((item, idx) => <li key={`m-${idx}`}>{item}</li>)}</ul>
+            </div>
+          </div>
+
+          {data?.analysis_scope && (
+            <p className="ig-growth-scope"><b>{w.igGrowthScope}:</b> {data.analysis_scope}</p>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PostsWorkspace({
+  posts = [],
+  loading = false,
+  error = '',
+  selectedPostId = '',
+  onSelectPost,
+  onImportPosts,
+  onRefreshPosts,
+  onSaveExtraInfo,
+  selectedBusiness,
+  onToast,
+  w = WORKSPACE_TEXT.en,
+}) {
+  const selected = posts.find(item => item.post_id === selectedPostId) || posts[0] || null;
+  const [draft, setDraft] = useState('');
+
+  useEffect(() => {
+    setDraft(selected?.extra_info || '');
+  }, [selectedPostId, selected?.extra_info]);
+
+  return (
+    <section className="posts-workspace">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.postsTitle}</h3>
+          <p>{w.postsSubtitle}</p>
+        </div>
+        <div className="panel-actions">
+          <button className="panel-btn subtle" onClick={() => onRefreshPosts?.()}>{w.refreshPosts}</button>
+          <button className="panel-btn" onClick={() => onImportPosts?.()}>{w.importPosts}</button>
+        </div>
+      </div>
+
+      {loading && <div className="ig-growth-state">{w.postsLoading}</div>}
+      {!loading && error && <div className="ig-growth-state error"><span>{error}</span></div>}
+      {!loading && !error && !posts.length && <div className="ig-growth-state">{w.postsEmpty}</div>}
+
+      <VideoAnalyzerWorkspace
+        selectedBusiness={selectedBusiness}
+        selectedPost={selected}
+        onToast={onToast}
+        w={w}
+      />
+
+      {!loading && !error && posts.length > 0 && (
+        <div className="posts-grid">
+          <div className="posts-list">
+            {posts.map((post) => (
+              <button
+                key={post.post_id}
+                className={`post-row ${selected?.post_id === post.post_id ? 'active' : ''}`}
+                onClick={() => onSelectPost?.(post.post_id)}
+              >
+                <span className="post-row-head">
+                  <b>{post.media_product_type || post.media_type || 'post'}</b>
+                  <em>{(post.timestamp || '').slice(0, 10)}</em>
+                </span>
+                <p>{post.caption || post.permalink || post.post_id}</p>
+                <span className="post-row-stats">❤ {post.like_count || 0} · 💬 {post.comments_count || 0}</span>
+              </button>
+            ))}
+          </div>
+
+          <div className="post-details">
+            {selected && (
+              <>
+                <div className="post-preview">
+                  {(selected.thumbnail_url || selected.media_url) && <img src={selected.thumbnail_url || selected.media_url} alt="post preview" />}
+                  <div>
+                    <h4>{selected.media_product_type || selected.media_type || 'post'}</h4>
+                    <p>{selected.caption || '—'}</p>
+                    {selected.permalink && <a href={selected.permalink} target="_blank" rel="noreferrer">{selected.permalink}</a>}
+                  </div>
+                </div>
+                <label className="field-row prompt-row">
+                  <span>{w.postExtraInfo}</span>
+                  <textarea rows={6} value={draft} onChange={(e) => setDraft(e.target.value)} />
+                </label>
+                <div className="panel-actions">
+                  <button onClick={() => onSaveExtraInfo?.(selected.post_id, draft)}>{w.savePostInfo}</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function cleanAnalyzerText(value = '') {
+  return String(value || '')
+    .replace(/\*\*/g, '')
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/^\s*[*-]\s+/gm, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim();
+}
+
+function splitAnalyzerSections(report = '') {
+  const clean = cleanAnalyzerText(report);
+  if (!clean) return [];
+  const lines = clean.split('\n');
+  const sections = [];
+  let intro = [];
+  let current = null;
+  const headingPattern = /^([\p{Extended_Pictographic}\u2600-\u27BF]\s*)?(.{2,90})$/u;
+  const reportHeadingPattern = /^(анализ видео|анализ описания|соответствие видео|ошибки|что хорошо|улучшенное описание|вирусные варианты|лучшие хэштеги|что повысит просмотры|дополнительные идеи|итоговая оценка|оценка контента)$/i;
+
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line) {
+      if (current) current.lines.push('');
+      else if (intro.length) intro.push('');
+      return;
+    }
+
+    const hasEmojiPrefix = /^[\p{Extended_Pictographic}\u2600-\u27BF]/u.test(line);
+    const plainHeading = line
+      .replace(/^[\p{Extended_Pictographic}\u2600-\u27BF]\s*/u, '')
+      .trim();
+    const isHeading = headingPattern.test(line) && reportHeadingPattern.test(plainHeading);
+
+    if (isHeading) {
+      if (!current && intro.join('\n').trim()) {
+        sections.push({ title: 'Summary', body: intro.join('\n').trim() });
+        intro = [];
+      }
+      if (current) sections.push({ title: current.title, body: current.lines.join('\n').trim() });
+      current = { title: line, lines: [] };
+      return;
+    }
+
+    if (current) current.lines.push(line);
+    else intro.push(line);
+  });
+
+  if (current) sections.push({ title: current.title, body: current.lines.join('\n').trim() });
+  else if (intro.join('\n').trim()) sections.push({ title: 'AI report', body: intro.join('\n').trim() });
+  return sections.filter(section => section.title || section.body);
+}
+
+function AnalyzerSectionBody({ body }) {
+  const blocks = String(body || '').split(/\n{2,}/).filter(Boolean);
+  return (
+    <div className="analyzer-section-body">
+      {blocks.map((block, blockIndex) => {
+        const lines = block.split('\n').map(line => line.trim()).filter(Boolean);
+        const listLike = lines.length > 1 || lines.every(line => /^([^:]{2,48}):\s+/.test(line));
+        if (listLike) {
+          return (
+            <ul key={`block-${blockIndex}`}>
+              {lines.map((line, lineIndex) => {
+                const match = line.match(/^([^:]{2,48}):\s+(.+)$/);
+                return (
+                  <li key={`line-${lineIndex}`}>
+                    {match ? <><strong>{match[1]}</strong><span>{match[2]}</span></> : <span>{line}</span>}
+                  </li>
+                );
+              })}
+            </ul>
+          );
+        }
+        return <p key={`block-${blockIndex}`}>{lines.join(' ')}</p>;
+      })}
+    </div>
+  );
+}
+
+function AnalyzerReport({ report, meta, errorText = '', emptyText, onCopy, w = WORKSPACE_TEXT.en }) {
+  const sections = splitAnalyzerSections(report);
+  const hasReport = sections.length > 0;
+  const [activeSection, setActiveSection] = useState(0);
+  const [copiedKey, setCopiedKey] = useState('');
+
+  useEffect(() => {
+    if (!sections.length) {
+      setActiveSection(0);
+      return;
+    }
+    setActiveSection(0);
+  }, [report]);
+
+  const copySection = async (key, text, label) => {
+    const ok = await onCopy?.(text, label);
+    if (ok === false) return;
+    setCopiedKey(key);
+    window.clearTimeout(copySection.timer);
+    copySection.timer = window.setTimeout(() => setCopiedKey(''), 1600);
+  };
+
+  const currentSection = sections[activeSection] || sections[0] || null;
+
+  return (
+    <div className="video-result">
+      <div className="video-result-head">
+        <div>
+          <strong>{w.videoAnalyzerReport || 'AI report'}</strong>
+          <span>{meta || (w.videoAnalyzerMeta || 'Gemini analysis')}</span>
+        </div>
+        <button className="copy-btn" disabled={!hasReport} onClick={() => copySection('all', cleanAnalyzerText(report), w.videoAnalyzerReport || 'AI report')}>
+          {copiedKey === 'all' ? (w.copied || 'Copied') : (w.copy || 'Copy')}
+        </button>
+      </div>
+      {!hasReport ? (
+        <div className={`video-result-empty ${errorText ? 'error' : ''}`}>{errorText || emptyText}</div>
+      ) : (
+        <div className="analyzer-report-layout">
+          <nav className="analyzer-section-nav" aria-label={w.videoAnalyzerReport || 'AI report'}>
+            {sections.map((section, index) => (
+              <button
+                key={`${section.title}-${index}`}
+                className={`analyzer-section-tab ${activeSection === index ? 'active' : ''}`}
+                onClick={() => setActiveSection(index)}
+              >
+                <span className="analyzer-section-tab-index">{String(index + 1).padStart(2, '0')}</span>
+                <span className="analyzer-section-tab-title">{section.title}</span>
+              </button>
+            ))}
+          </nav>
+          {currentSection && (
+            <article className="analyzer-section-detail">
+              <header className="analyzer-section-detail-head">
+                <div className="analyzer-section-detail-title">
+                  <strong>{currentSection.title}</strong>
+                  <span>{w.videoAnalyzerSectionLabel || 'Selected section'}</span>
+                </div>
+                <button className="copy-btn subtle" onClick={() => copySection(`section-${activeSection}`, `${currentSection.title}\n${currentSection.body}`.trim(), currentSection.title)}>
+                  {copiedKey === `section-${activeSection}` ? (w.copied || 'Copied') : (w.copy || 'Copy')}
+                </button>
+              </header>
+              <div className="analyzer-section-detail-body">
+                <AnalyzerSectionBody body={currentSection.body} />
+              </div>
+            </article>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VideoAnalyzerWorkspace({ selectedBusiness, selectedPost, onToast, w = WORKSPACE_TEXT.en }) {
+  const [videoFile, setVideoFile] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState('');
+  const [brand, setBrand] = useState(selectedBusiness?.business_name || '');
+  const [niche, setNiche] = useState(selectedBusiness?.business_type || 'Fashion / product sales');
+  const [description, setDescription] = useState('');
+  const [details, setDetails] = useState('');
+  const [model, setModel] = useState('gemini-3-flash-preview');
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState('');
+  const [meta, setMeta] = useState('');
+  const [errorText, setErrorText] = useState('');
+  const descriptionRef = useRef(null);
+
+  useEffect(() => {
+    if (!brand && selectedBusiness?.business_name) setBrand(selectedBusiness.business_name);
+    if (!niche && selectedBusiness?.business_type) setNiche(selectedBusiness.business_type);
+  }, [selectedBusiness?.business_name, selectedBusiness?.business_type]);
+
+  useEffect(() => {
+    if (!description && selectedPost?.caption) setDescription(selectedPost.caption);
+    if (!details && selectedPost?.extra_info) setDetails(selectedPost.extra_info);
+  }, [selectedPost?.post_id]);
+
+  useEffect(() => () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+  }, [previewUrl]);
+
+  const selectVideo = (event) => {
+    const file = event.target.files?.[0] || null;
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setVideoFile(file);
+    setPreviewUrl(file ? URL.createObjectURL(file) : '');
+    setMeta(file ? `${file.name} · ${Math.round((file.size / 1024 / 1024) * 10) / 10} MB` : '');
+  };
+
+  const analyze = async () => {
+    setLoading(true);
+    setResult('');
+    setErrorText('');
+    try {
+      const captured = videoFile ? await captureVideoFramesFromFile(videoFile, 4) : { frames: [], duration: 0 };
+      const response = await API.postJson('/api/v2/video-analyzer/analyze', {
+        description,
+        brand,
+        niche,
+        details,
+        model,
+        duration: captured.duration,
+        frames: captured.frames,
+      }, { timeoutMs: 320000 });
+      const data = response?.data || {};
+      setResult(data.report || '');
+      setMeta(`Gemini · ${data.model || model} · ${captured.frames.length} frames`);
+      setErrorText('');
+      onToast?.('Video analysis ready');
+    } catch (e) {
+      setResult('');
+      setMeta('Analyzer failed');
+      setErrorText(e.message || 'Video analysis failed');
+      onToast?.(e.message || 'Video analysis failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const copyText = async (text, label = '') => {
+    const clean = cleanAnalyzerText(text);
+    if (!clean) return false;
+    try {
+      await navigator.clipboard?.writeText(clean);
+      onToast?.(`${label || 'Text'} copied`);
+      window.setTimeout(() => {
+        descriptionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        descriptionRef.current?.focus();
+      }, 80);
+      return true;
+    } catch (e) {
+      onToast?.('Copy failed');
+      return false;
+    }
+  };
+
+  return (
+    <section className="video-analyzer-workspace">
+      <div className="section-card-head video-analyzer-head">
+        <div>
+          <h3>{w.videoAnalyzerTitle || 'Video Analyzer'}</h3>
+          <p>{w.videoAnalyzerSubtitle || 'Analyze Reels, TikToks, and Shorts with Gemini.'}</p>
+        </div>
+      </div>
+      <div className="video-analyzer-form">
+        <label className="video-upload">
+          <input type="file" accept="video/*" onChange={selectVideo} />
+          <I.Photo />
+          <span>{videoFile ? videoFile.name : (w.videoAnalyzerUpload || 'Upload Reel, TikTok, or Shorts')}</span>
+        </label>
+        <div className="model-grid">
+          <label className="field-row">
+            <span>{w.brand || 'Brand'}</span>
+            <input value={brand} onChange={(e) => setBrand(e.target.value)} placeholder="Milana Premium" />
+          </label>
+          <label className="field-row">
+            <span>{w.videoAnalyzerNiche || 'Niche'}</span>
+            <input value={niche} onChange={(e) => setNiche(e.target.value)} placeholder="Fashion, beauty, food..." />
+          </label>
+        </div>
+        <label className="field-row">
+          <span>{w.videoAnalyzerDescription || 'Current caption'}</span>
+          <textarea ref={descriptionRef} value={description} onChange={(e) => setDescription(e.target.value)} rows={5} placeholder="Paste the current Instagram/TikTok/Shorts caption." />
+        </label>
+        <label className="field-row">
+          <span>{w.videoAnalyzerDetails || 'Video details'}</span>
+          <textarea value={details} onChange={(e) => setDetails(e.target.value)} rows={4} placeholder="What is shown, product name, audience, offer, or context." />
+        </label>
+        <div className="model-grid">
+          <label className="field-row">
+            <span>{w.model || 'Model'}</span>
+            <select value={model} onChange={(e) => setModel(e.target.value)}>
+              <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
+              <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+              <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
+            </select>
+          </label>
+          <button className="panel-btn video-analyzer-run" disabled={loading || (!videoFile && !description.trim() && !details.trim())} onClick={analyze}>
+            {loading ? (w.videoAnalyzerLoading || 'Analyzing...') : (w.videoAnalyzerRun || 'Analyze')}
+          </button>
+        </div>
+      </div>
+
+      <div className="video-analyzer-output">
+        {previewUrl ? (
+          <video src={previewUrl} controls playsInline preload="metadata" />
+        ) : (
+          <div className="video-preview-empty">{w.videoAnalyzerPreview || 'Video preview'}</div>
+        )}
+      </div>
+
+      <div className="video-analyzer-report-pane">
+        <AnalyzerReport
+          report={result}
+          meta={meta}
+          errorText={errorText}
+          emptyText={w.videoAnalyzerEmpty || 'Upload a video or add text details, then run analysis.'}
+          onCopy={copyText}
+          w={w}
+        />
+      </div>
+    </section>
+  );
+}
+
+function PromptGeneratorField({
+  field,
+  label,
+  value,
+  rows = 5,
+  businessId,
+  onChange,
+  onGeneratePrompt,
+  generatorState,
+  w = WORKSPACE_TEXT.en,
+}) {
+  const state = generatorState[field] || {};
+  const hasSuggestion = !!state.suggestedPrompt;
+  const improve = () => onGeneratePrompt(field, value, 'make it more natural and sales-focused');
+
+  return (
+    <div className="prompt-generator-field">
+      <PromptField label={label} value={value} rows={rows} onChange={onChange} />
+      <div className="prompt-tools">
+        <button className="panel-btn subtle" disabled={state.loading} onClick={improve}>
+          {state.loading ? w.improving : w.improvePrompt}
+        </button>
+        {hasSuggestion && (
+          <button className="panel-btn subtle" disabled={state.loading} onClick={() => onGeneratePrompt(field, value, 'regenerate with a clearer and more practical sales style')}>
+            {w.regenerate}
+          </button>
+        )}
+      </div>
+      {hasSuggestion && (
+        <div className="suggestion-card">
+          <div>
+            <span>{w.generatedSuggestion}</span>
+            <p>{state.explanation || w.suggestionFallback}</p>
+          </div>
+          <pre>{state.suggestedPrompt}</pre>
+          <div className="panel-actions">
+            <button onClick={() => { onChange(state.suggestedPrompt); onGeneratePrompt(field, state.suggestedPrompt, 'decline'); }}>{w.acceptSuggestion}</button>
+            <button className="subtle-action" onClick={() => onGeneratePrompt(field, value, 'decline')}>{w.decline}</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LeadsBoard({ conversations, leadStages, leadPrices, setLeadStage, setLeadPrice, onOpenConversation, w }) {
+  const leads = useMemo(() => buildLeads(conversations, leadStages, leadPrices), [conversations, leadStages, leadPrices]);
+  const stageNames = {
+    new: w.leadNew,
+    qualified: w.leadQualified,
+    negotiation: w.leadNegotiation,
+    won: w.leadWon,
+    lost: w.leadLost,
+  };
+  return (
+    <div className="leads-board">
+      {LEAD_STAGE_ORDER.map(stage => {
+        const list = leads.filter(item => item.stage === stage);
         return (
-            res.json()
-            .get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-            .strip()
-        )
+          <section className={`lead-column lead-stage-${stage}`} key={stage}>
+            <header>
+              <h3>{stageNames[stage]}</h3>
+              <span>{list.length}</span>
+            </header>
+            <div className="lead-list">
+              {!list.length && <div className="lead-empty">{w.leadEmpty}</div>}
+              {list.map(lead => (
+                <article className="lead-card" key={lead.id}>
+                  <div className="lead-head">
+                    <strong>{lead.name}</strong>
+                    <span>{lead.platform}</span>
+                  </div>
+                  <p>{lead.preview}</p>
+                  <div className="lead-meta">
+                    <span>{w.leadSource}: <b>{lead.source}</b></span>
+                    <span>{w.leadUpdated}: <b>{lead.updatedAt}</b></span>
+                  </div>
+                  <label className="lead-price-row">
+                    <span>{w.leadPrice}</span>
+                    <input
+                      value={lead.price}
+                      placeholder={w.leadPricePlaceholder}
+                      onChange={(e) => setLeadPrice(lead.id, e.target.value)}
+                    />
+                    {lead.price && (
+                      <button type="button" title={w.leadPriceClear} onClick={() => setLeadPrice(lead.id, '')}>x</button>
+                    )}
+                  </label>
+                  <div className="lead-actions">
+                    <select value={lead.stage} onChange={(e) => setLeadStage(lead.id, e.target.value)}>
+                      {LEAD_STAGE_ORDER.map(option => (
+                        <option key={option} value={option}>{stageNames[option]}</option>
+                      ))}
+                    </select>
+                    <button onClick={() => onOpenConversation(lead.conversationId)}>{w.leadOpen}</button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
 
-    if provider == "gemini":
-        system_text = "\n\n".join(m["content"] for m in messages if m.get("role") == "system")
-        contents = [
-            {
-                "role": "model" if m.get("role") == "assistant" else "user",
-                "parts": [{"text": m.get("content", "")}],
-            }
-            for m in messages
-            if m.get("role") != "system" and m.get("content")
-        ]
-        res = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-            params={"key": api_key},
-            json={
-                "systemInstruction": {"parts": [{"text": system_text}]},
-                "contents": contents,
-                "generationConfig": {
-                    "temperature": temperature,
-                    "maxOutputTokens": max_tokens,
-                },
-            },
-            timeout=30,
-        )
-        log(log_label, {"provider": provider, "model": model, "status": res.status_code, "body": res.text[:1000]})
-        if not res.ok:
-            return ""
-        parts = (
-            res.json()
-            .get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [])
-        )
-        return "\n".join(part.get("text", "") for part in parts).strip()
+function ClientsTable({
+  conversations,
+  leadStages,
+  leadPrices,
+  onOpenConversation,
+  clientOwners = {},
+  manualClients = [],
+  manualLeads = [],
+  operatorAccounts = [],
+  onAddManualClient = () => {},
+  onRemoveManualClient = () => {},
+  onAddManualLead = () => {},
+  onRemoveManualLead = () => {},
+  onLeadStageChange = () => {},
+  onLeadPriceChange = () => {},
+  currentUser = null,
+  onPickClient = () => {},
+  w,
+}) {
+  const currentOwnerLabel = userOwnerLabel(currentUser);
+  const currentOwnerKeys = useMemo(() => userOwnerKeys(currentUser), [currentUser]);
+  const [candidateId, setCandidateId] = useState('');
+  const [manualLeadForm, setManualLeadForm] = useState({
+    name: '',
+    platform: 'telegram',
+    owner: currentOwnerLabel,
+    price: '',
+    note: '',
+  });
+  useEffect(() => {
+    setManualLeadForm(prev => prev.owner ? prev : { ...prev, owner: currentOwnerLabel });
+  }, [currentOwnerLabel]);
+  const operatorOptions = useMemo(() => {
+    const options = [];
+    const add = (value) => {
+      const clean = String(value || '').trim();
+      if (clean && !options.some(item => item.toLowerCase() === clean.toLowerCase())) options.push(clean);
+    };
+    add(currentOwnerLabel);
+    (operatorAccounts || []).forEach(item => add(item?.login_id));
+    Object.values(clientOwners || {}).forEach(add);
+    return options;
+  }, [currentOwnerLabel, operatorAccounts, clientOwners]);
+  const conversationMap = useMemo(
+    () => new Map((conversations || []).map(conv => [conv.id, conv])),
+    [conversations],
+  );
+  const rows = useMemo(
+    () => {
+      const conversationRows = (manualClients || [])
+      .map(id => conversationMap.get(id))
+      .filter(Boolean)
+      .map(conv => ({
+        ...conv,
+        stage: leadStages[conv.id] || guessLeadStage(conv),
+        price: leadPrices[conv.id] || '',
+        owner: String(clientOwners?.[conv.id] || '').trim(),
+        sourceType: 'conversation',
+      }));
+      const manualRows = (manualLeads || [])
+        .filter(Boolean)
+        .map(lead => {
+          const id = String(lead.id || '').trim();
+          return {
+            id,
+            name: String(lead.name || 'Manual lead').trim(),
+            handle: String(lead.note || '').trim() || '@manual',
+            platform: String(lead.platform || 'manual').trim(),
+            channelName: String(lead.platform || 'manual').trim(),
+            stage: leadStages[id] || lead.stage || 'new',
+            price: leadPrices[id] || lead.price || '',
+            owner: String(clientOwners?.[id] || lead.operator || lead.owner || '').trim(),
+            preview: String(lead.note || '').trim() || '-',
+            unread: 0,
+            avatar: avatarFor(String(lead.name || 'Manual lead'), id),
+            sourceType: 'manual',
+          };
+        });
+      return [...conversationRows, ...manualRows];
+    },
+    [manualClients, manualLeads, conversationMap, leadStages, leadPrices, clientOwners],
+  );
+  const availableCandidates = useMemo(
+    () => (conversations || []).filter(conv => !(manualClients || []).includes(conv.id)),
+    [conversations, manualClients],
+  );
 
-    if provider == "anthropic":
-        system_text = "\n\n".join(m["content"] for m in messages if m.get("role") == "system")
-        anthropic_messages = [
-            {
-                "role": "assistant" if m.get("role") == "assistant" else "user",
-                "content": m.get("content", ""),
-            }
-            for m in messages
-            if m.get("role") != "system" and m.get("content")
-        ]
-        res = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "system": system_text,
-                "messages": anthropic_messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-            },
-            timeout=30,
-        )
-        log(log_label, {"provider": provider, "model": model, "status": res.status_code, "body": res.text[:1000]})
-        if not res.ok:
-            return ""
-        return "\n".join(
-            block.get("text", "")
-            for block in res.json().get("content", [])
-            if block.get("type") == "text"
-        ).strip()
+  const stageNames = {
+    new: w.leadNew,
+    qualified: w.leadQualified,
+    negotiation: w.leadNegotiation,
+    won: w.leadWon,
+    lost: w.leadLost,
+  };
 
-    return ""
+  return (
+    <div className="clients-section">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.clientsTitle}</h3>
+          <p>Important clients added manually by admin/operators.</p>
+        </div>
+        <span>{rows.length}</span>
+      </div>
+      <div className="panel-actions" style={{ marginBottom: 12 }}>
+        <select value={candidateId} onChange={(e) => setCandidateId(e.target.value)}>
+          <option value="">Select conversation...</option>
+          {availableCandidates.map(conv => (
+            <option key={conv.id} value={conv.id}>{conv.name} ({conv.handle})</option>
+          ))}
+        </select>
+        <button
+          onClick={() => {
+            if (!candidateId) return;
+            onAddManualClient(candidateId);
+            setCandidateId('');
+          }}
+          disabled={!candidateId}
+        >
+          Add client
+        </button>
+      </div>
+      <div className="manual-lead-form">
+        <input
+          value={manualLeadForm.name}
+          placeholder={w.manualLeadName || 'Lead name'}
+          onChange={(e) => setManualLeadForm(prev => ({ ...prev, name: e.target.value }))}
+        />
+        <select
+          value={manualLeadForm.platform}
+          aria-label={w.manualLeadSource || 'Source'}
+          onChange={(e) => setManualLeadForm(prev => ({ ...prev, platform: e.target.value }))}
+        >
+          <option value="telegram">Telegram</option>
+          <option value="whatsapp">WhatsApp</option>
+          <option value="instagram">Instagram</option>
+          <option value="phone">Phone</option>
+          <option value="other">Other</option>
+        </select>
+        <select
+          value={manualLeadForm.owner}
+          aria-label={w.manualLeadOwner || 'Operator'}
+          onChange={(e) => setManualLeadForm(prev => ({ ...prev, owner: e.target.value }))}
+        >
+          {operatorOptions.map(option => <option key={option} value={option}>{option}</option>)}
+        </select>
+        <input
+          value={manualLeadForm.price}
+          placeholder={w.leadPricePlaceholder || 'Add price'}
+          onChange={(e) => setManualLeadForm(prev => ({ ...prev, price: e.target.value }))}
+        />
+        <input
+          value={manualLeadForm.note}
+          placeholder={w.manualLeadNote || 'Note'}
+          onChange={(e) => setManualLeadForm(prev => ({ ...prev, note: e.target.value }))}
+        />
+        <button
+          type="button"
+          onClick={() => {
+            if (!manualLeadForm.name.trim()) return;
+            onAddManualLead(manualLeadForm);
+            setManualLeadForm({ name: '', platform: 'telegram', owner: currentOwnerLabel, price: '', note: '' });
+          }}
+          disabled={!manualLeadForm.name.trim() || !manualLeadForm.owner.trim()}
+        >
+          {w.addManualLead || 'Add manual lead'}
+        </button>
+      </div>
+      <div className="clients-table-wrap">
+        <table className="clients-table">
+          <thead>
+            <tr>
+              <th>{w.client}</th>
+              <th>{w.channel}</th>
+              <th>{w.status}</th>
+              <th>{w.leadPrice}</th>
+              <th>{w.lastMessage}</th>
+              <th>{w.unreadMessages}</th>
+              <th>{w.ownerAssigned || 'Owner'}</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {!rows.length && (
+              <tr>
+                <td colSpan="8" className="clients-empty">{w.clientsEmpty}</td>
+              </tr>
+            )}
+            {rows.map(row => (
+              <tr key={row.id}>
+                <td>
+                  <div className="client-cell">
+                    <Avatar data={row.avatar} size={32} platform={row.platform} />
+                    <span>
+                      <strong>{row.name}</strong>
+                      <em>{row.handle}</em>
+                    </span>
+                  </div>
+                </td>
+                <td>{row.channelName || row.platform}</td>
+                <td>
+                  <select value={row.stage} onChange={(e) => onLeadStageChange(row.id, e.target.value)}>
+                    {LEAD_STAGE_ORDER.map(option => (
+                      <option key={option} value={option}>{stageNames[option]}</option>
+                    ))}
+                  </select>
+                </td>
+                <td>
+                  <input
+                    className="client-price-input"
+                    value={row.price || ''}
+                    placeholder="-"
+                    onChange={(e) => onLeadPriceChange(row.id, e.target.value)}
+                  />
+                </td>
+                <td className="client-preview">{row.preview}</td>
+                <td>{row.unread || 0}</td>
+                <td>
+                  {row.owner ? (
+                    <span className="chip human" style={{ textTransform: 'none' }}>{row.owner}</span>
+                  ) : (
+                    <span style={{ opacity: 0.65 }}>-</span>
+                  )}
+                </td>
+                <td style={{ display: 'flex', gap: 8 }}>
+                  {row.sourceType === 'conversation' ? (
+                    <button className="table-action" onClick={() => onOpenConversation(row.id)}>{w.leadOpen}</button>
+                  ) : null}
+                  {row.owner && currentOwnerKeys.has(row.owner.toLowerCase()) ? (
+                    <button className="table-action" onClick={() => onPickClient(row.id, '')}>{w.unpickClient || 'Unpick'}</button>
+                  ) : (
+                    <button className="table-action" onClick={() => onPickClient(row.id, currentOwnerLabel)}>{w.pickClient || 'Pick me'}</button>
+                  )}
+                  <button className="table-action" onClick={() => row.sourceType === 'manual' ? onRemoveManualLead(row.id) : onRemoveManualClient(row.id)}>Remove</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
+function userOwnerKeys(currentUser) {
+  const keys = new Set();
+  const add = (value) => {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw) return;
+    keys.add(raw);
+    const short = raw.split('@')[0];
+    if (short) keys.add(short);
+  };
+  add(currentUser?.ownerEmail);
+  add(currentUser?.email);
+  add(currentUser?.name);
+  add(currentUser?.id);
+  return keys;
+}
 
+function userOwnerLabel(currentUser) {
+  const raw = String(currentUser?.ownerEmail || currentUser?.email || currentUser?.name || currentUser?.id || '').trim();
+  if (!raw) return 'operator';
+  return raw.split('@')[0] || raw;
+}
 
-def clean_sales_reply(reply_text: str, user_text: str = "", business: dict = None, lead_state: dict = None) -> str:
-    user = normalize_id(user_text).lower()
-    lang = detect_customer_language(user_text)
-    allow_handoff = business_allows_human_handoff(business)
-
-    if wants_deal_handoff(user_text) and allow_handoff:
-        if lang == "en":
-            return LEAD_CONTACT_REQUEST_EN
-        if lang == "ru":
-            return LEAD_CONTACT_REQUEST_RU
-        if lang == "kk":
-            return LEAD_CONTACT_REQUEST_KK
-        return LEAD_CONTACT_REQUEST_UZ
-
-    if any(phrase in user for phrase in [
-        "meni haqimda hamma ma'lumotni unut",
-        "meni haqimda hamma malumotni unut",
-        "men haqimda hamma ma'lumotni unut",
-        "men haqimda hamma malumotni unut",
-        "hamma ma'lumotni unut",
-        "hamma malumotni unut",
-        "forget everything about me",
-        "delete my data",
-    ]):
-        if lang == "en":
-            return "Of course."
-        if lang == "ru":
-            return "Конечно."
-        return "Albatta 👍"
-
-    if any(phrase in user for phrase in [
-        "botinglar yoqmadi",
-        "bot yoqmadi",
-        "yoqmadi",
-        "stop",
-        "bas",
-        "kerakmas",
-        "kerak emas",
-    ]):
-        if lang == "en":
-            return "Understood. I will keep replies simpler and shorter."
-        if lang == "ru":
-            return "Понял. Буду отвечать проще и короче."
-        return "Tushundim 👍 Oddiyroq va qisqa javob beraman."
-
-    if any(phrase in user for phrase in [
-        "ololmayapman",
-        "ololmayman",
-        "qarzga",
-        "hozircha olmayman",
-        "hozircha yo'q",
-        "keyinroq",
-        "pul yo'q",
-    ]):
-        if lang == "en":
-            return "No problem. Write whenever it is convenient for you."
-        if lang == "ru":
-            return "Понимаю. Напишите, когда вам будет удобно."
-        return "Tushunarli 😊 Muammo emas, qachon qulay bo'lsa yozing."
-
-    text = normalize_id(reply_text)
-    if not text:
-        if lang == "en":
-            return "Your message has been received."
-        if lang == "ru":
-            return "Ваше сообщение получено."
-        return "Xabaringiz qabul qilindi 😊"
-
-    if looks_like_internal_prompt_leak(text):
-        log("Prompt leak blocked", {"reply_preview": text[:300], "user_text": user_text[:120]})
-        return safe_prompt_leak_fallback(user_text, business, lead_state)
-
-    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
-    text = re.sub(r"__([^_]+)__", r"\1", text)
-    text = re.sub(r"^[\-•]+\s*", "", text, flags=re.MULTILINE)
-
-    parts = []
-    seen = set()
-    for part in re.split(r"\n\s*\n|\n", text):
-        clean = re.sub(r"\s+", " ", part).strip()
-        if not clean:
-            continue
-        key = clean.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        parts.append(clean)
-
-    text = "\n".join(parts).strip()
-
-    forced_contact_request = False
-
-    if contains_forbidden_product_photo_question(text):
-        text = replacement_for_forbidden_product_photo_question(user_text, business)
-
-    if re.search(r"menejerimiz bilan bog'?lay|manager.*connect|connect you with our manager", text, re.IGNORECASE) and not is_price_question(user_text):
-        text = LEAD_CONTACT_REQUEST_UZ if lang not in {"en", "ru", "kk"} else {
-            "en": LEAD_CONTACT_REQUEST_EN,
-            "ru": LEAD_CONTACT_REQUEST_RU,
-            "kk": LEAD_CONTACT_REQUEST_KK,
-        }.get(lang, LEAD_CONTACT_REQUEST_UZ)
-        forced_contact_request = True
-
-    noisy_phrases = [
-        "menedjerimiz siz bilan bog'lanib",
-        "menejerimiz siz bilan bog'lanib",
-        "vakilimiz tez orada siz bilan bog‘lanadi",
-        "vakilimiz tez orada siz bilan bog'lanadi",
-    ]
-    for phrase in noisy_phrases:
-        text = re.sub(re.escape(phrase), "", text, flags=re.IGNORECASE)
-
-    text = complete_sentence_reply(text)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-
-    # If customer asked price but reply has no numeric price hint, force concise pricing follow-up.
-    price_ask = is_price_question(user_text)
-    has_number = bool(re.search(r"\d", text))
-    if price_ask and (_reply_mentions_phone_request(text) or _reply_mentions_name_request(text)):
-        text = generic_price_fallback_reply(user_text, business)
-        forced_contact_request = False
-        has_number = bool(re.search(r"\d", text))
-    if price_ask and not has_number and not forced_contact_request:
-        text = generic_price_fallback_reply(user_text, business)
-
-    if contains_forbidden_product_photo_question(text):
-        text = replacement_for_forbidden_product_photo_question(user_text, business)
-
-    # Strong language guard: if customer wrote in English but reply is not English, return safe English fallback.
-    if lang == "en":
-        has_cyr = bool(re.search(r"[А-Яа-яЁё]", text))
-        uz_markers = ("salom", "assalomu", "alaykum", "qaysi", "mahsulot", "katalog")
-        low = text.lower()
-        if has_cyr or any(m in low for m in uz_markers):
-            if price_ask:
-                text = generic_price_fallback_reply(user_text, business)
-            else:
-                text = "Hello! Of course. Which products are you interested in?"
-
-    # Never push catalog on simple greetings.
-    if is_greeting_only(user_text) and mentions_catalog(text):
-        if lang == "en":
-            text = "Hello! How can I help you today?"
-        elif lang == "ru":
-            text = "Здравствуйте! Чем могу помочь?"
-        elif lang == "kk":
-            text = "Сәлеметсіз бе! Қалай көмектесе аламын?"
-        else:
-            text = "Assalomu alaykum 😊 Qanday yordam kerak?"
-
-    if looks_like_internal_prompt_leak(text):
-        log("Prompt leak blocked after cleanup", {"reply_preview": text[:300], "user_text": user_text[:120]})
-        return safe_prompt_leak_fallback(user_text, business, lead_state)
-
-    text = complete_sentence_reply(text, limit=900)
-    text = enforce_lead_reply_guardrails(text, user_text, business, lead_state)
-
-    if text:
-        return text
-    lead_fallback = lead_followup_reply(user_text, business, lead_state)
-    if lead_fallback:
-        return lead_fallback
-    if lang == "en":
-        return "Understood."
-    if lang == "kk":
-        return "Түсіндім."
-    if lang == "ru":
-        return "Понял."
-    return "Tushunarli 👍"
-
-
-PROMPT_LEAK_MARKERS = (
-    "narx bo'yicha ma'lumot",
-    "if customer",
-    "agar mijoz",
-    "bot aniq narx aytmasin",
-    "do not ask",
-    "do not mention",
-    "always enforce these rules",
-    "internal system",
-    "system prompt",
-    "reply separately",
-    "never mention ai",
-    "suggested product answer",
-)
-
-
-def looks_like_internal_prompt_leak(text: str) -> bool:
-    low = normalize_id(text).lower()
-    if not low:
-        return False
-
-    marker_hits = sum(1 for marker in PROMPT_LEAK_MARKERS if marker in low)
-    rule_line_hits = len(re.findall(r"(?:^|\n)\s*[-•]\s*(?:if|do not|never|always|agar|bot|reply|narx)", low))
-    imperative_hits = len(re.findall(r"\b(?:if customer|agar mijoz|do not|never|always enforce|reply separately)\b", low))
-
-    if marker_hits >= 1 and (rule_line_hits >= 1 or imperative_hits >= 1):
-        return True
-    if marker_hits >= 2:
-        return True
-    return False
-
-
-def safe_prompt_leak_fallback(user_text: str, business: dict = None, lead_state: dict = None) -> str:
-    lang = detect_customer_language(user_text)
-    if is_price_question(user_text):
-        return generic_price_fallback_reply(user_text, business)
-    if is_greeting_only(user_text):
-        if lang == "en":
-            return "Hello! How can I help you today?"
-        if lang == "ru":
-            return "Здравствуйте! Чем могу помочь?"
-        if lang == "kk":
-            return "Сәлеметсіз бе! Қалай көмектесе аламын?"
-        return "Assalomu alaykum 😊 Qanday yordam kerak?"
-
-    lead_fallback = lead_followup_reply(user_text, business, lead_state)
-    if lead_fallback:
-        return lead_fallback
-
-    if lang == "en":
-        return "Of course. Which product are you interested in?"
-    if lang == "ru":
-        return "Конечно. Какой товар вас интересует?"
-    if lang == "kk":
-        return "Әрине. Сізді қай тауар қызықтырады?"
-    return "Albatta. Sizga qaysi mahsulot kerak?"
-
-
-def safe_outbound_leak_fallback(business: dict = None) -> str:
-    lang = normalize_id((business or {}).get("language")).lower()
-    if lang.startswith("en"):
-        return "Which model do you need?"
-    if lang.startswith("ru"):
-        return "Какая модель вам нужна?"
-    if lang.startswith("kk"):
-        return "Қай модель керек?"
-    return "Qaysi model kerak?"
-
-
-def _safe_score(value) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return 0.0
-
-
-def product_matcher_file_url(api_url: str) -> str:
-    api_url = normalize_id(api_url)
-    if not api_url:
-        return ""
-    if api_url.endswith("/api/process-media-url"):
-        return api_url[:-len("/api/process-media-url")] + "/api/process-media"
-    if api_url.endswith("/api/process-media"):
-        return api_url
-    return api_url.rstrip("/") + "/api/process-media"
-
-
-def product_matcher_url_url(api_url: str) -> str:
-    api_url = normalize_id(api_url)
-    if not api_url:
-        return ""
-    if api_url.endswith("/api/process-media"):
-        return api_url[:-len("/api/process-media")] + "/api/process-media-url"
-    if api_url.endswith("/api/process-media-url"):
-        return api_url
-    return api_url.rstrip("/") + "/api/process-media-url"
-
-
-def product_matcher_health_url(api_url: str) -> str:
-    api_url = normalize_id(api_url)
-    if not api_url:
-        return ""
-    if "/api/" in api_url:
-        return api_url.split("/api/", 1)[0].rstrip("/") + "/health"
-    return api_url.rstrip("/") + "/health"
-
-
-def append_url_query(url: str, params: dict) -> str:
-    parsed = urlparse(url)
-    query = parse_qs(parsed.query, keep_blank_values=True)
-    for key, value in (params or {}).items():
-        clean_key = normalize_id(key)
-        clean_value = normalize_id(value)
-        if clean_key and clean_value:
-            query[clean_key] = [clean_value]
-    return parsed._replace(query=urlencode(query, doseq=True)).geturl()
-
-
-def download_media_for_matcher(media_url: str, access_token: str = "") -> tuple[bytes, str, str]:
-    media_url = normalize_id(media_url)
-    if not media_url:
-        raise ValueError("Empty media URL")
-
-    limit_bytes = PRODUCT_MATCHER_MAX_MEDIA_MB * 1024 * 1024
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        "Accept": "*/*",
+function buildOperatorRankingRows({ leadStages = {}, clientOwners = {}, manualLeads = [], operatorDeals = {}, operatorAccounts = [] }) {
+  const stats = new Map();
+  const ensureRow = (id) => {
+    const operatorId = String(id || '').trim();
+    if (!operatorId) return null;
+    const key = operatorId.toLowerCase();
+    if (!stats.has(key)) {
+      stats.set(key, {
+        id: operatorId,
+        name: operatorId.charAt(0).toUpperCase() + operatorId.slice(1),
+        picked: 0,
+        deals: 0,
+      });
     }
-    clean_token = normalize_id(access_token)
-    if clean_token:
-        headers["Authorization"] = f"Bearer {clean_token}"
+    return stats.get(key);
+  };
 
-    try:
-        response = requests.get(media_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 30), stream=True, headers=headers)
-        response.raise_for_status()
-    except requests.HTTPError as exc:
-        response = getattr(exc, "response", None)
-        if not clean_token or response is None or response.status_code != 403:
-            raise
-        token_url = append_url_query(media_url, {"access_token": clean_token})
-        token_headers = {key: value for key, value in headers.items() if key.lower() != "authorization"}
-        response = requests.get(token_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 30), stream=True, headers=token_headers)
-        response.raise_for_status()
+  const accountRows = Array.isArray(operatorAccounts)
+    ? operatorAccounts
+      .filter(item => String(item?.role || '').toLowerCase() === 'operator')
+      .map(item => {
+        const loginId = String(item?.login_id || '').trim();
+        if (!loginId) return null;
+        return ensureRow(loginId);
+      })
+      .filter(Boolean)
+    : [];
 
-    content_type = normalize_id(response.headers.get("content-type")).split(";")[0].strip() or "application/octet-stream"
-    chunks = []
-    total = 0
-    for chunk in response.iter_content(chunk_size=64 * 1024):
-        if not chunk:
-            continue
-        total += len(chunk)
-        if total > limit_bytes:
-            raise ValueError(f"Media is too large (> {PRODUCT_MATCHER_MAX_MEDIA_MB} MB)")
-        chunks.append(chunk)
-    data = b"".join(chunks)
-    if not data:
-        raise ValueError("Downloaded media is empty")
+  Object.entries(clientOwners || {}).forEach(([conversationId, owner]) => {
+    const row = ensureRow(owner);
+    if (!row) return;
+    row.picked += 1;
+    if (String(leadStages?.[conversationId] || '').toLowerCase() === 'won') row.deals += 1;
+  });
 
-    filename = f"media{mimetypes.guess_extension(content_type) or '.bin'}"
-    return data, filename, content_type
+  (manualLeads || []).forEach(lead => {
+    const id = String(lead?.id || '').trim();
+    if (!id || clientOwners?.[id]) return;
+    const row = ensureRow(lead?.operator || lead?.owner);
+    if (!row) return;
+    row.picked += 1;
+    if (String(leadStages?.[id] || lead?.stage || '').toLowerCase() === 'won') row.deals += 1;
+  });
 
+  Object.entries(operatorDeals || {}).forEach(([operatorId, value]) => {
+    const row = ensureRow(operatorId);
+    if (!row || row.deals > 0) return;
+    const legacyDeals = Number(value || 0);
+    if (Number.isFinite(legacyDeals) && legacyDeals > 0) row.deals = legacyDeals;
+  });
 
-def build_product_match_reply(code: str, model: str, price: str, currency: str, top_score: float, business: dict = None) -> str:
-    code = normalize_id(code)
-    model = normalize_id(model)
-    price = normalize_id(price)
-    currency = normalize_id(currency)
-    label = model or code or "shu model"
-    pack_info = default_pack_size_sentence("uz", business=business)
-    if price:
-        return f"Model {label} narxi {price} {currency or '$'}. {pack_info} Nechta qop kerak?"
-    return f"Model {label} bo'yicha aniqroq rasm yoki kod yuboring. {pack_info} Nechta qop kerak?"
+  const rows = Array.from(stats.values());
+  if (!rows.length && !accountRows.length) return [{ id: 'unassigned', name: 'Unassigned', picked: 0, deals: 0 }];
+  return rows.sort((a, b) => (b.deals - a.deals) || (b.picked - a.picked) || a.name.localeCompare(b.name));
+}
 
+function OperatorsRanking({ leadStages, clientOwners = {}, manualLeads = [], operatorDeals = {}, operatorAccounts = [], onDownloadReport, reportDisabled = false, w }) {
+  const rows = buildOperatorRankingRows({ leadStages, clientOwners, manualLeads, operatorDeals, operatorAccounts });
 
-def normalize_product_code(value: str) -> str:
-    value = re.sub(r"[^A-Za-z0-9-]", "", normalize_id(value).upper())
-    value = re.sub(r"-{2,}", "-", value).strip("-")
-    return value
+  return (
+    <section className="operator-ranking">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.operatorRanking}</h3>
+          <p>{w.successfulDeals}</p>
+        </div>
+        <button type="button" className="panel-btn" disabled={reportDisabled} onClick={onDownloadReport}>
+          {w.downloadOperatorReport || 'Download PDF'}
+        </button>
+      </div>
+      <div className="operator-rank-list">
+        {rows.map((row, index) => (
+          <div className="operator-rank-row" key={row.id}>
+            <span className="rank-number">{index + 1}</span>
+            <strong>{row.name}</strong>
+            <span>{row.deals} {w.successfulDeals || 'successful deals'} · {row.picked} picked</span>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
 
+function OperatorAccountsPanel({ selectedBusinessId, onToast, w, readOnly = false, compactTitle = false, operatorsData = null, onReload = null }) {
+  const [operators, setOperators] = useState([]);
+  const [loginId, setLoginId] = useState('');
+  const [password, setPassword] = useState('');
+  const [saving, setSaving] = useState(false);
 
-def extract_codes_from_text_local(text: str) -> list[str]:
-    text = normalize_id(text)
-    if not text:
-        return []
-    found = []
-    for raw in re.findall(r"\b[A-Za-z]{1,4}-?\d{2,6}\b", text):
-        code = normalize_product_code(raw)
-        if code and code not in found:
-            found.append(code)
-    return found
+  const loadOperators = async () => {
+    if (operatorsData) return;
+    try {
+      const fallback = await API.get('/api/v2/operators');
+      setOperators(fallback.data || []);
+    } catch (e) {
+      // Keep previous list when a transient request fails.
+    }
+  };
 
+  useEffect(() => {
+    if (!operatorsData) loadOperators();
+  }, [selectedBusinessId, operatorsData]);
 
-def _extract_json_object_loose(text: str) -> dict:
-    raw = normalize_id(text)
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict):
-            return parsed
-    except Exception:
-        pass
-    match = re.search(r"\{[\s\S]*\}", raw)
-    if not match:
-        return {}
-    try:
-        parsed = json.loads(match.group(0))
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        return {}
+  useEffect(() => {
+    if (onReload) onReload();
+  }, [onReload, selectedBusinessId]);
 
+  const createOperator = async (e) => {
+    e.preventDefault();
+    if (readOnly) return;
+    if (!selectedBusinessId || !loginId.trim() || !password.trim()) return;
+    setSaving(true);
+    try {
+      await API.postJson('/api/v2/operators', {
+        business_id: selectedBusinessId,
+        login_id: loginId.trim(),
+        password,
+      });
+      setLoginId('');
+      setPassword('');
+      onToast('Operator account created');
+      if (onReload) onReload();
+      else loadOperators();
+    } catch (err) {
+      onToast(err.message || 'Could not create operator');
+    } finally {
+      setSaving(false);
+    }
+  };
 
-def _get_local_catalog_rows(force_refresh: bool = False) -> list[dict]:
-    now = time.time()
-    cached_rows = PRODUCT_MATCHER_LOCAL_CATALOG_CACHE.get("rows") if isinstance(PRODUCT_MATCHER_LOCAL_CATALOG_CACHE, dict) else []
-    loaded_at = PRODUCT_MATCHER_LOCAL_CATALOG_CACHE.get("loaded_at", 0.0) if isinstance(PRODUCT_MATCHER_LOCAL_CATALOG_CACHE, dict) else 0.0
-    if not force_refresh and cached_rows and (now - float(loaded_at or 0.0)) < PRODUCT_MATCHER_LOCAL_CATALOG_CACHE_TTL_SECONDS:
-        return cached_rows
+  return (
+    <section className="operator-accounts-card">
+      <div className="section-card-head">
+        <div>
+          <h3>{compactTitle ? (w.operatorsTitle || 'Operators') : w.operatorAccounts}</h3>
+          <p>{compactTitle ? w.messagesFromClients : w.operatorAccountsHint}</p>
+        </div>
+        <span>{(operatorsData || operators).length}</span>
+      </div>
+      {!readOnly && (
+        <form className="operator-account-form" onSubmit={createOperator}>
+          <label className="field-row">
+            <span>{w.operatorId}</span>
+            <input value={loginId} onChange={(e) => setLoginId(e.target.value)} placeholder="operator@business.com" />
+          </label>
+          <label className="field-row">
+            <span>{w.operatorPassword}</span>
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Minimum 6 characters" />
+          </label>
+          <button disabled={saving || !loginId.trim() || password.length < 6}>{saving ? w.saving : w.addOperator}</button>
+        </form>
+      )}
+      <div className="operator-account-list">
+        {!(operatorsData || operators).length && <span>{w.noOperators}</span>}
+        {(operatorsData || operators).map((operator, idx) => (
+          <div key={operator.login_id} className="operator-account-item">
+            <div className="operator-account-main">
+              <strong>{operator.login_id}</strong>
+              <small>ID #{idx + 1}</small>
+            </div>
+            <em className="operator-role-chip">{operator.role || 'operator'}</em>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
 
-    fields = "product_code,model_code,price,currency,combined_text,image_url,image_sha256,image_fingerprint,embedding_model,embedding_preview,source_pdf,page,card_index"
-    try:
-        res = (
-            catalog_supabase
-            .table(PRODUCT_MATCHER_LOCAL_CATALOG_TABLE)
-            .select(fields)
-            .limit(PRODUCT_MATCHER_LOCAL_FETCH_LIMIT)
-            .execute()
-        )
-        rows = res.data if isinstance(res.data, list) else []
-    except Exception as exc:
-        same_database = normalize_id(CATALOG_SUPABASE_URL).rstrip("/") == normalize_id(SUPABASE_URL).rstrip("/")
-        log("Local catalog fetch failed", {
-            "table": PRODUCT_MATCHER_LOCAL_CATALOG_TABLE,
-            "catalog_supabase_url": normalize_id(CATALOG_SUPABASE_URL).split("//")[-1].split(".")[0] if CATALOG_SUPABASE_URL else "",
-            "same_as_business_database": same_database,
-            "fix": "Set CATALOG_SUPABASE_URL and CATALOG_SUPABASE_SERVICE_KEY in Render." if same_database else "",
-            "error": str(exc),
-        })
-        return cached_rows or []
+function BusinessChannelsManager({ selectedBusiness, onToast }) {
+  const businessId = String(selectedBusiness?.id || '').trim();
+  const [channels, setChannels] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState({
+    platform: 'instagram',
+    accountLabel: '',
+    externalAccountId: '',
+    accessToken: '',
+    pageAccessToken: '',
+    phoneNumberId: '',
+    wabaId: '',
+    botToken: '',
+  });
 
-    normalized_rows = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        product_code = normalize_product_code(row.get("product_code"))
-        model_code = normalize_product_code(row.get("model_code"))
-        combined_text = normalize_id(row.get("combined_text"))
-        if not (product_code or model_code or combined_text):
-            continue
-        normalized_rows.append({
-            "product_code": product_code,
-            "model_code": model_code,
-            "price": normalize_id(row.get("price")),
-            "currency": normalize_id(row.get("currency")),
-            "combined_text": combined_text,
-            "image_url": normalize_id(row.get("image_url")),
-            "image_sha256": normalize_id(row.get("image_sha256")).lower(),
-            "image_fingerprint": normalize_id(row.get("image_fingerprint")),
-            "embedding_model": normalize_id(row.get("embedding_model")).lower(),
-            "embedding_preview": normalize_id(row.get("embedding_preview")),
-            "source_pdf": normalize_id(row.get("source_pdf")),
-            "page": row.get("page"),
-            "card_index": row.get("card_index"),
-        })
+  const loadChannels = async () => {
+    if (!businessId) {
+      setChannels([]);
+      return;
+    }
+    setLoading(true);
+    try {
+      const data = await API.get(`/api/businesses/${encodeURIComponent(businessId)}/channels`);
+      setChannels(data.data || []);
+    } catch (e) {
+      setChannels([]);
+      onToast(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    PRODUCT_MATCHER_LOCAL_CATALOG_CACHE["rows"] = normalized_rows
-    PRODUCT_MATCHER_LOCAL_CATALOG_CACHE["loaded_at"] = now
-    return normalized_rows
+  useEffect(() => {
+    loadChannels();
+  }, [businessId]);
 
+  const onChange = (key, value) => setForm(prev => ({ ...prev, [key]: value }));
 
-def _extract_output_text_from_responses(body: dict) -> str:
-    text = normalize_id(body.get("output_text"))
-    if text:
-        return text
-    output = body.get("output") if isinstance(body.get("output"), list) else []
-    for item in output:
-        if not isinstance(item, dict):
-            continue
-        content = item.get("content") if isinstance(item.get("content"), list) else []
-        for chunk in content:
-            if not isinstance(chunk, dict):
-                continue
-            value = normalize_id(chunk.get("text"))
-            if value:
-                return value
-    return ""
-
-
-def _extract_media_vision_hints_local(media_bytes: bytes, mime_type: str, user_text: str) -> dict:
-    if not OPENAI_API_KEY:
-        return {}
-    clean_mime = normalize_id(mime_type).split(";")[0].lower()
-    if not clean_mime.startswith("image/"):
-        return {}
-
-    b64 = base64.b64encode(media_bytes).decode("ascii")
-    prompt = {
-        "task": "Identify product codes/models, garment details, colors, patterns, and useful keywords from this product image.",
-        "customer_message": normalize_id(user_text),
-        "output_format": {
-            "product_codes": ["code strings"],
-            "model_codes": ["model strings"],
-            "keywords": ["short style/product keywords"],
-            "colors": ["dominant colors"],
-            "garment_type": "short product type label",
-            "detected_text": "short OCR-like text seen on image",
-            "confidence": "0..1",
-        },
+  const addChannel = async (e) => {
+    e.preventDefault();
+    if (!businessId) return;
+    const platform = String(form.platform || '').trim().toLowerCase();
+    const accountLabel = String(form.accountLabel || '').trim();
+    const externalAccountId = String(form.externalAccountId || '').trim();
+    if (!platform || !accountLabel || !externalAccountId) {
+      onToast('Platform, account name, and external account ID are required.');
+      return;
     }
 
-    payload = {
-        "model": PRODUCT_MATCHER_OPENAI_VISION_MODEL,
-        "input": [
-            {
-                "role": "system",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": (
-                            "Return ONLY JSON. Do not add markdown. "
-                            "Focus on codes, model identifiers, and concise retrieval keywords."
-                        ),
-                    }
-                ],
-            },
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": json.dumps(prompt, ensure_ascii=False)},
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:{clean_mime};base64,{b64}",
-                        "detail": PRODUCT_MATCHER_OPENAI_VISION_DETAIL,
-                    },
-                ],
-            },
-        ],
-        "temperature": 0.0,
+    const config = {};
+    if (form.accessToken.trim()) config.access_token = form.accessToken.trim();
+    if (form.pageAccessToken.trim()) config.page_access_token = form.pageAccessToken.trim();
+    if (form.phoneNumberId.trim()) config.phone_number_id = form.phoneNumberId.trim();
+    if (form.wabaId.trim()) config.waba_id = form.wabaId.trim();
+    if (form.botToken.trim()) config.bot_token = form.botToken.trim();
+
+    setSaving(true);
+    try {
+      await API.postJson(`/api/businesses/${encodeURIComponent(businessId)}/channels`, {
+        platform,
+        account_label: accountLabel,
+        account_external_id: externalAccountId,
+        is_active: true,
+        config,
+      });
+      onToast('Channel saved');
+      setForm(prev => ({
+        ...prev,
+        accountLabel: '',
+        externalAccountId: '',
+        accessToken: '',
+        pageAccessToken: '',
+        phoneNumberId: '',
+        wabaId: '',
+        botToken: '',
+      }));
+      await loadChannels();
+    } catch (e2) {
+      onToast(e2.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const removeChannel = async (channelId) => {
+    if (!channelId) return;
+    try {
+      await API.delete(`/api/business-channels/${encodeURIComponent(channelId)}`);
+      onToast('Channel removed');
+      await loadChannels();
+    } catch (e) {
+      onToast(e.message);
+    }
+  };
+
+  return (
+    <div className="channel-manager">
+      <div className="settings-section">
+        <h3>Connected channels</h3>
+        <p className="section-hint">Add multiple Instagram/WhatsApp/Telegram accounts for this business.</p>
+        {loading ? <div className="empty">Loading... please wait</div> : (
+          <div className="channel-list">
+            {(channels || []).map(row => (
+              <div className="channel-row" key={row.id}>
+                <span>
+                  <strong>{row.account_label || row.platform}</strong>
+                  <em>{row.platform} · {row.account_external_id}</em>
+                </span>
+                <button className="ghost" onClick={() => removeChannel(row.id)}>Remove</button>
+              </div>
+            ))}
+            {!channels.length && <div className="empty">No channels connected yet.</div>}
+          </div>
+        )}
+      </div>
+
+      <form className="settings-section" onSubmit={addChannel}>
+        <h3>Add channel</h3>
+        <div className="model-grid">
+          <label className="field-row">
+            <span>Platform</span>
+            <select value={form.platform} onChange={(e) => onChange('platform', e.target.value)}>
+              <option value="instagram">Instagram</option>
+              <option value="whatsapp">WhatsApp</option>
+              <option value="telegram">Telegram</option>
+              <option value="telegram_bot">Telegram Bot</option>
+            </select>
+          </label>
+          <label className="field-row">
+            <span>Account name</span>
+            <input value={form.accountLabel} onChange={(e) => onChange('accountLabel', e.target.value)} placeholder="Milana Premium IG 2" />
+          </label>
+        </div>
+        <label className="field-row">
+          <span>External account ID</span>
+          <input value={form.externalAccountId} onChange={(e) => onChange('externalAccountId', e.target.value)} placeholder="IG business ID / WhatsApp phone_number_id / Bot username" />
+        </label>
+        <div className="model-grid">
+          <label className="field-row">
+            <span>Access token</span>
+            <input value={form.accessToken} onChange={(e) => onChange('accessToken', e.target.value)} placeholder="Optional token" />
+          </label>
+          <label className="field-row">
+            <span>Page access token</span>
+            <input value={form.pageAccessToken} onChange={(e) => onChange('pageAccessToken', e.target.value)} placeholder="Instagram/Facebook page token" />
+          </label>
+        </div>
+        <div className="model-grid">
+          <label className="field-row">
+            <span>WhatsApp phone_number_id</span>
+            <input value={form.phoneNumberId} onChange={(e) => onChange('phoneNumberId', e.target.value)} placeholder="Optional" />
+          </label>
+          <label className="field-row">
+            <span>WhatsApp WABA ID</span>
+            <input value={form.wabaId} onChange={(e) => onChange('wabaId', e.target.value)} placeholder="Optional" />
+          </label>
+        </div>
+        <label className="field-row">
+          <span>Telegram bot token</span>
+          <input value={form.botToken} onChange={(e) => onChange('botToken', e.target.value)} placeholder="Optional" />
+        </label>
+        <div className="panel-actions">
+          <button type="submit" disabled={saving || !businessId}>{saving ? 'Saving...' : 'Save channel'}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function AdminTaskDispatchCard({ adminNotes, onAdminNote, operatorAccounts = [], w }) {
+  const [draft, setDraft] = useState('');
+  const [assignMode, setAssignMode] = useState('one');
+  const operatorIds = useMemo(
+    () => (operatorAccounts || [])
+      .filter(item => String(item?.role || '').toLowerCase() === 'operator')
+      .map(item => String(item?.login_id || '').trim())
+      .filter(Boolean),
+    [operatorAccounts],
+  );
+  const [singleOperator, setSingleOperator] = useState('');
+  const [groupOperators, setGroupOperators] = useState([]);
+
+  useEffect(() => {
+    if (!singleOperator && operatorIds.length) setSingleOperator(operatorIds[0]);
+  }, [operatorIds, singleOperator]);
+
+  const toggleGroupOperator = (operatorId) => {
+    setGroupOperators(prev => prev.includes(operatorId) ? prev.filter(item => item !== operatorId) : [...prev, operatorId]);
+  };
+
+  const saveTask = () => {
+    const clean = draft.trim();
+    if (!clean) return;
+    let recipients = [];
+    if (assignMode === 'all') recipients = ['*'];
+    else if (assignMode === 'group') recipients = groupOperators;
+    else recipients = singleOperator ? [singleOperator] : [];
+    if (!recipients.length) return;
+    onAdminNote(clean, recipients, assignMode);
+    setDraft('');
+  };
+
+  return (
+    <section className="operator-note-card">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.textToOperators}</h3>
+          <p>{w.operatorsSubtitle}</p>
+        </div>
+      </div>
+      <div className="operators-mode-switch" style={{ marginBottom: 10 }}>
+        <button type="button" className={assignMode === 'one' ? 'active' : ''} onClick={() => setAssignMode('one')}>{w.assignOne}</button>
+        <button type="button" className={assignMode === 'group' ? 'active' : ''} onClick={() => setAssignMode('group')}>{w.assignGroup}</button>
+        <button type="button" className={assignMode === 'all' ? 'active' : ''} onClick={() => setAssignMode('all')}>{w.assignAll}</button>
+      </div>
+      {assignMode === 'one' && (
+        <label className="field-row">
+          <span>{w.assignOne}</span>
+          <select value={singleOperator} onChange={(e) => setSingleOperator(e.target.value)}>
+            {operatorIds.map(item => <option key={item} value={item}>{item}</option>)}
+          </select>
+        </label>
+      )}
+      {assignMode === 'group' && (
+        <div className="operator-account-list" style={{ marginBottom: 10 }}>
+          {operatorIds.map(item => (
+            <label key={item} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input type="checkbox" checked={groupOperators.includes(item)} onChange={() => toggleGroupOperator(item)} />
+              <strong>{item}</strong>
+            </label>
+          ))}
+        </div>
+      )}
+      <textarea value={draft} placeholder={w.textToOperatorsPlaceholder} onChange={(e) => setDraft(e.target.value)} rows={5} />
+      <div className="panel-actions">
+        <button disabled={!draft.trim()} onClick={saveTask}>{w.saveAdminNote}</button>
+      </div>
+      <div className="admin-note-list">
+        <strong>{w.adminNotes}</strong>
+        {!adminNotes.length && <span>{w.noAdminNotes}</span>}
+        {adminNotes.slice(0, 6).map(note => (
+          <p key={note.id}>
+            {note.text}
+            {Array.isArray(note.recipients) && note.recipients.length
+              ? ` (${note.recipients[0] === '*' ? w.assignAll : note.recipients.join(', ')})`
+              : ''}
+          </p>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function operatorRecipientKeys(currentUser) {
+  const keys = new Set();
+  const pushKey = (value) => {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw) return;
+    keys.add(raw);
+    const username = raw.split('@')[0];
+    if (username) keys.add(username);
+  };
+  pushKey(currentUser?.ownerEmail);
+  pushKey(currentUser?.email);
+  pushKey(currentUser?.name);
+  pushKey(currentUser?.id);
+  return keys;
+}
+
+function isTaskForOperator(note, keys) {
+  const recipients = Array.isArray(note?.recipients)
+    ? note.recipients.map(item => String(item || '').trim().toLowerCase()).filter(Boolean)
+    : ['*'];
+  if (!recipients.length || recipients.includes('*')) return true;
+  return recipients.some(recipient => {
+    if (keys.has(recipient)) return true;
+    const username = recipient.split('@')[0];
+    return username ? keys.has(username) : false;
+  });
+}
+
+function OperatorTaskInboxCard({ adminNotes = [], currentUser, w }) {
+  const keys = useMemo(() => operatorRecipientKeys(currentUser), [currentUser]);
+  const tasks = useMemo(
+    () => (adminNotes || []).filter(note => isTaskForOperator(note, keys)),
+    [adminNotes, keys],
+  );
+
+  return (
+    <section className="operator-note-card">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.tasksFromAdmin}</h3>
+          <p>{w.operatorsSubtitle}</p>
+        </div>
+      </div>
+      <div className="admin-note-list">
+        {!tasks.length && <span>{w.noTasksForYou}</span>}
+        {tasks.slice(0, 8).map(task => (
+          <p key={task.id}>{task.text}</p>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function OperatorMessagesCard({ conversations, onOpenConversation, w }) {
+  const priorityRows = useMemo(() => [...(conversations || [])]
+    .sort((a, b) => Number(b.unread || 0) - Number(a.unread || 0))
+    .slice(0, 8), [conversations]);
+
+  return (
+    <section className="operator-messages-card">
+      <div className="section-card-head">
+        <div>
+          <h3>{w.messagesFromClients}</h3>
+          <p>{w.clientsSubtitle}</p>
+        </div>
+        <span>{priorityRows.length}</span>
+      </div>
+      <div className="operator-message-list">
+        {priorityRows.map(row => (
+          <button key={row.id} onClick={() => onOpenConversation(row.id)}>
+            <Avatar data={row.avatar} size={32} platform={row.platform} />
+            <span>
+              <strong>{row.name}</strong>
+              <em>{row.preview}</em>
+            </span>
+            <b>{row.unread || 0}</b>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function AdminPanel(props) {
+  const { conversations, leadStages, leadPrices, clientOwners, manualLeads, operatorDeals, adminNotes, onAdminNote, setLeadStage, setLeadPrice, onOpenConversation, selectedBusinessId, operatorAccounts, onReloadOperatorAccounts, onDownloadOperatorReport, w } = props;
+  return (
+    <div className="operator-panel">
+      <AdminTaskDispatchCard adminNotes={adminNotes} onAdminNote={onAdminNote} operatorAccounts={operatorAccounts} w={w} />
+      <OperatorMessagesCard conversations={conversations} onOpenConversation={onOpenConversation} w={w} />
+      <OperatorAccountsPanel selectedBusinessId="" onToast={() => {}} w={w} readOnly operatorsData={operatorAccounts} onReload={onReloadOperatorAccounts} />
+      <OperatorsRanking
+        leadStages={leadStages}
+        clientOwners={clientOwners}
+        manualLeads={manualLeads}
+        operatorDeals={operatorDeals}
+        operatorAccounts={operatorAccounts}
+        onDownloadReport={onDownloadOperatorReport}
+        reportDisabled={!selectedBusinessId}
+        w={w}
+      />
+      <section className="operator-leads-card">
+        <div className="section-card-head">
+          <div>
+            <h3>{w.leadsTitle}</h3>
+            <p>{w.clientsSubtitle}</p>
+          </div>
+        </div>
+        <LeadsBoard conversations={conversations} leadStages={leadStages} leadPrices={leadPrices} setLeadStage={setLeadStage} setLeadPrice={setLeadPrice} onOpenConversation={onOpenConversation} w={w} />
+      </section>
+    </div>
+  );
+}
+
+function OperatorPanel(props) {
+  const { conversations, leadStages, leadPrices, adminNotes, setLeadStage, setLeadPrice, onOpenConversation, w, currentUser } = props;
+  return (
+    <div className="operator-panel">
+      <OperatorTaskInboxCard adminNotes={adminNotes} currentUser={currentUser} w={w} />
+      <OperatorMessagesCard conversations={conversations} onOpenConversation={onOpenConversation} w={w} />
+      <section className="operator-leads-card">
+        <div className="section-card-head">
+          <div>
+            <h3>{w.leadsTitle}</h3>
+            <p>{w.clientsSubtitle}</p>
+          </div>
+        </div>
+        <LeadsBoard conversations={conversations} leadStages={leadStages} leadPrices={leadPrices} setLeadStage={setLeadStage} setLeadPrice={setLeadPrice} onOpenConversation={onOpenConversation} w={w} />
+      </section>
+    </div>
+  );
+}
+
+function OperatorsSection(props) {
+  const roleScope = resolveRoleScope(props.currentUser, props.businesses || []);
+  const isOperator = roleScope.isOperator;
+  if (isOperator) return <OperatorPanel {...props} />;
+  return <AdminPanel {...props} />;
+}
+
+function WorkspacePanel({
+  lang,
+  t,
+  view,
+  stats,
+  posts,
+  postsLoading,
+  postsError,
+  selectedPostId,
+  onSelectPost,
+  onImportPosts,
+  onRefreshPosts,
+  onSavePostInfo,
+  growthAnalyzer,
+  growthAnalyzerLoading,
+  growthAnalyzerError,
+  onRefreshGrowthAnalyzer,
+  conversations,
+  businesses,
+  selectedBusinessId,
+  onSelectBusiness,
+  onRefresh,
+  onBusinessSetting,
+  promptSettings,
+  onPromptSetting,
+  onSavePromptSettings,
+  promptLoading,
+  promptSaving,
+  onToast,
+  onGeneratePrompt,
+  generatorState,
+  leadStages,
+  leadPrices,
+  clientOwners,
+  manualClients,
+  manualLeads,
+  operatorDeals,
+  adminNotes,
+  operatorAccounts,
+  onReloadOperatorAccounts,
+  onLeadStageChange,
+  onLeadPriceChange,
+  onPickClient,
+  onAddManualClient,
+  onRemoveManualClient,
+  onAddManualLead,
+  onRemoveManualLead,
+  onOperatorDealChange,
+  onAdminNote,
+  onDownloadOperatorReport,
+  onOpenConversation,
+  ownerEmail,
+  onOwnerEmailSave,
+  onSignOut,
+  currentUser,
+  userProfile,
+  onUpdateUserProfile,
+}) {
+  const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
+  const roleScope = resolveRoleScope(currentUser, businesses || []);
+  const isOperator = roleScope.isOperator;
+  if (isOperator && !['leads', 'inbox', 'posts', 'clients', 'operators', 'profile'].includes(view)) return null;
+  const selectedBusiness = businesses.find(b => b.id === selectedBusinessId) || businesses[0] || {};
+  const activeProviderId = aiProviderForBusiness(selectedBusiness);
+  const activeProvider = AI_PROVIDERS.find(provider => provider.id === activeProviderId) || AI_PROVIDERS[0];
+  const activeModel = selectedBusiness.ai_model || activeProvider.defaultModel;
+  const modelSelectValue = activeProvider.models.includes(activeModel) ? activeModel : 'custom';
+  const title = {
+    insights: t.insights,
+    posts: t.posts || w.postsTitle,
+    leads: t.leads,
+    clients: t.clients || w.clientsTitle,
+    operators: t.operators || w.operatorsTitle,
+    knowledge: t.knowledge,
+    prompts: w.promptsTitle,
+    accounts: t.accounts,
+    settings: t.settings,
+    profile: w.profile,
+  }[view] || w.workspace;
+
+  if (view === 'inbox') return null;
+
+  return (
+    <section className="workspace-panel">
+      <div className="workspace-head">
+        <div>
+          <h2>{title}</h2>
+          <p>{selectedBusiness.business_name || w.liveWorkspace}</p>
+        </div>
+        <button className="panel-btn" onClick={onRefresh}>{w.refresh}</button>
+      </div>
+
+      {view === 'insights' && (
+        <>
+          <InsightsDashboard conversations={conversations} stats={stats} w={w} />
+          <InstagramGrowthAnalyzerCard
+            data={growthAnalyzer}
+            loading={growthAnalyzerLoading}
+            error={growthAnalyzerError}
+            onRefresh={onRefreshGrowthAnalyzer}
+            w={w}
+          />
+        </>
+      )}
+
+      {view === 'posts' && (
+        <PostsWorkspace
+          posts={posts}
+          loading={postsLoading}
+          error={postsError}
+          selectedPostId={selectedPostId}
+          onSelectPost={onSelectPost}
+          onImportPosts={onImportPosts}
+          onRefreshPosts={onRefreshPosts}
+          onSaveExtraInfo={onSavePostInfo}
+          selectedBusiness={selectedBusiness}
+          onToast={onToast}
+          w={w}
+        />
+      )}
+
+      {view === 'leads' && (
+        <LeadsBoard
+          conversations={conversations}
+          leadStages={leadStages}
+          leadPrices={leadPrices}
+          setLeadStage={onLeadStageChange}
+          setLeadPrice={onLeadPriceChange}
+          onOpenConversation={onOpenConversation}
+          w={w}
+          businesses={businesses}
+          currentUser={currentUser}
+        />
+      )}
+
+      {view === 'clients' && (
+        <ClientsTable
+          conversations={conversations}
+          leadStages={leadStages}
+          leadPrices={leadPrices}
+          clientOwners={clientOwners}
+          manualClients={manualClients}
+          manualLeads={manualLeads}
+          operatorAccounts={operatorAccounts}
+          onAddManualClient={onAddManualClient}
+          onRemoveManualClient={onRemoveManualClient}
+          onAddManualLead={onAddManualLead}
+          onRemoveManualLead={onRemoveManualLead}
+          onLeadStageChange={onLeadStageChange}
+          onLeadPriceChange={onLeadPriceChange}
+          currentUser={currentUser}
+          onPickClient={onPickClient}
+          onOpenConversation={onOpenConversation}
+          w={w}
+        />
+      )}
+
+      {view === 'operators' && (
+        <OperatorsSection
+          conversations={conversations}
+          leadStages={leadStages}
+          leadPrices={leadPrices}
+          selectedBusinessId={selectedBusinessId}
+          operatorDeals={operatorDeals}
+          clientOwners={clientOwners}
+          manualLeads={manualLeads}
+          adminNotes={adminNotes}
+          operatorAccounts={operatorAccounts}
+          onReloadOperatorAccounts={onReloadOperatorAccounts}
+          onAdminNote={onAdminNote}
+          onDownloadOperatorReport={onDownloadOperatorReport}
+          setLeadStage={onLeadStageChange}
+          setLeadPrice={onLeadPriceChange}
+          onOpenConversation={onOpenConversation}
+          currentUser={currentUser}
+          businesses={businesses}
+          w={w}
+        />
+      )}
+
+      {view === 'accounts' && (
+        <div className="account-list">
+          {businesses.map(b => (
+            <button key={b.id} className={`account-row ${b.id === selectedBusinessId ? 'active' : ''}`} onClick={() => onSelectBusiness(b.id)}>
+              <Avatar data={avatarFor(b.business_name || b.instagram_business_id || 'Business', b.id)} size={38} platform={b.oauth_provider === 'whatsapp' ? 'whatsapp' : 'instagram'} />
+              <span>
+                <strong>{b.business_name || w.unnamedBusiness}</strong>
+                <em>{b.oauth_provider || b.business_type || 'business'} · {b.bot_enabled ? w.active : w.paused}</em>
+              </span>
+            </button>
+          ))}
+          {!businesses.length && <div className="empty">{w.noBusinesses}</div>}
+          <BusinessChannelsManager selectedBusiness={selectedBusiness} onToast={onToast} />
+        </div>
+      )}
+
+      {view === 'knowledge' && (
+        <div className="knowledge-view">
+          {['products', 'prices', 'delivery_info', 'working_hours', 'faq', 'catalog_link', 'sales_phone', 'telegram_bag', 'knowledge'].map(key => (
+            <label key={key}>
+              <span>{w[key] || key.replaceAll('_', ' ')}</span>
+              <textarea
+                value={selectedBusiness[key] || ''}
+                onChange={(e) => onBusinessSetting(selectedBusiness.id, { [key]: e.target.value }, false)}
+                onBlur={(e) => onBusinessSetting(selectedBusiness.id, { [key]: e.target.value }, true)}
+                rows={key === 'knowledge' || key === 'faq' ? 4 : key === 'telegram_bag' ? 3 : 2}
+              />
+            </label>
+          ))}
+        </div>
+      )}
+
+      {view === 'prompts' && (
+        <div className="settings-view prompt-settings-view">
+          <div className="settings-section">
+            <h3>{w.globalPrompt}</h3>
+            <PromptGeneratorField
+              field="global_prompt"
+              label={w.usedBy}
+              value={promptSettings.global_prompt}
+              rows={7}
+              businessId={selectedBusiness.id}
+              onChange={(value) => onPromptSetting('global_prompt', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
+            />
+          </div>
+
+          <div className="settings-section">
+            <h3>{w.platformOverrides}</h3>
+            <PromptGeneratorField
+              field="instagram_prompt"
+              label={w.instagramRules}
+              value={promptSettings.instagram_prompt}
+              businessId={selectedBusiness.id}
+              onChange={(value) => onPromptSetting('instagram_prompt', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
+            />
+            <PromptGeneratorField
+              field="telegram_prompt"
+              label={w.telegramRules}
+              value={promptSettings.telegram_prompt}
+              businessId={selectedBusiness.id}
+              onChange={(value) => onPromptSetting('telegram_prompt', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
+            />
+            <PromptGeneratorField
+              field="whatsapp_prompt"
+              label={w.whatsappRules}
+              value={promptSettings.whatsapp_prompt}
+              businessId={selectedBusiness.id}
+              onChange={(value) => onPromptSetting('whatsapp_prompt', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
+            />
+          </div>
+
+          <div className="settings-section">
+            <h3>{w.businessKnowledge}</h3>
+            <p className="section-hint">{w.knowledgeHint}</p>
+            <div className="prompt-knowledge-grid">
+              <span>{w.products}</span>
+              <span>{w.prices}</span>
+              <span>{w.delivery}</span>
+              <span>{w.faq}</span>
+              <span>{w.contacts}</span>
+              <span>{w.catalogLinks}</span>
+            </div>
+          </div>
+
+          <div className="settings-section">
+            <h3>{w.salesBehavior}</h3>
+            <PromptGeneratorField
+              field="opening_message"
+              label={w.openingMessage}
+              value={promptSettings.opening_message}
+              rows={4}
+              businessId={selectedBusiness.id}
+              onChange={(value) => onPromptSetting('opening_message', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
+            />
+            <PromptGeneratorField
+              field="lead_collection_rules"
+              label={w.leadCollectionRules}
+              value={promptSettings.lead_collection_rules}
+              businessId={selectedBusiness.id}
+              onChange={(value) => onPromptSetting('lead_collection_rules', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
+            />
+            <PromptGeneratorField
+              field="sales_rules"
+              label={w.followUpStyle}
+              value={promptSettings.sales_rules}
+              businessId={selectedBusiness.id}
+              onChange={(value) => onPromptSetting('sales_rules', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
+            />
+            <PromptGeneratorField
+              field="handoff_rules"
+              label={w.humanHandoffRules}
+              value={promptSettings.handoff_rules}
+              businessId={selectedBusiness.id}
+              onChange={(value) => onPromptSetting('handoff_rules', value)}
+              onGeneratePrompt={onGeneratePrompt}
+              generatorState={generatorState}
+              w={w}
+            />
+          </div>
+
+          <div className="panel-actions">
+            <button disabled={promptLoading || promptSaving || !selectedBusiness.id} onClick={onSavePromptSettings}>
+              {promptSaving ? w.saving : w.savePromptSettings}
+            </button>
+            <button onClick={() => onToast('Final prompt = Global prompt + Business knowledge + Platform-specific prompt + Conversation memory')}>
+              {w.promptFormula}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {view === 'settings' && (
+        <div className="settings-view">
+          <ToggleRow
+            label={w.botEnabled}
+            hint={w.botEnabledHint}
+            checked={!!selectedBusiness.bot_enabled}
+            onChange={(enabled) => onBusinessSetting(selectedBusiness.id, { bot_enabled: enabled }, true)}
+            w={w}
+          />
+          <ToggleRow
+            label={w.instagramDms}
+            hint={w.instagramDmsHint}
+            checked={selectedBusiness.auto_reply_dms !== false}
+            onChange={(enabled) => onBusinessSetting(selectedBusiness.id, { auto_reply_dms: enabled }, true)}
+            w={w}
+          />
+          <ToggleRow
+            label={w.instagramComments}
+            hint={w.instagramCommentsHint}
+            checked={selectedBusiness.auto_reply_comments !== false}
+            onChange={(enabled) => onBusinessSetting(selectedBusiness.id, { auto_reply_comments: enabled }, true)}
+            w={w}
+          />
+          <label className="field-row">
+            <span>{w.language}</span>
+            <input value={selectedBusiness.language || ''} onChange={(e) => onBusinessSetting(selectedBusiness.id, { language: e.target.value }, false)} onBlur={(e) => onBusinessSetting(selectedBusiness.id, { language: e.target.value }, true)} />
+          </label>
+          <label className="field-row">
+            <span>{w.tone}</span>
+            <input value={selectedBusiness.tone || ''} onChange={(e) => onBusinessSetting(selectedBusiness.id, { tone: e.target.value }, false)} onBlur={(e) => onBusinessSetting(selectedBusiness.id, { tone: e.target.value }, true)} />
+          </label>
+          <div className="settings-section">
+            <h3>{w.aiModel}</h3>
+            <div className="model-grid">
+              <label className="field-row">
+                <span>{w.provider}</span>
+                <select
+                  value={activeProvider.id}
+                  onChange={(e) => {
+                    const provider = AI_PROVIDERS.find(item => item.id === e.target.value) || AI_PROVIDERS[0];
+                    onBusinessSetting(selectedBusiness.id, { ai_model: provider.defaultModel }, true);
+                  }}
+                >
+                  {AI_PROVIDERS.map(provider => (
+                    <option key={provider.id} value={provider.id}>{provider.label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="field-row">
+                <span>{w.model}</span>
+                <select
+                  value={modelSelectValue}
+                  onChange={(e) => {
+                    if (e.target.value === 'custom') return;
+                    onBusinessSetting(selectedBusiness.id, { ai_model: e.target.value }, true);
+                  }}
+                >
+                  {activeProvider.models.map(model => (
+                    <option key={model} value={model}>{model}</option>
+                  ))}
+                  <option value="custom">{w.customModel}</option>
+                </select>
+              </label>
+            </div>
+            <label className="field-row">
+              <span>{w.customModel}</span>
+              <input
+                value={activeModel}
+                onChange={(e) => onBusinessSetting(selectedBusiness.id, { ai_model: e.target.value }, false)}
+                onBlur={(e) => onBusinessSetting(selectedBusiness.id, { ai_model: e.target.value.trim() || activeProvider.defaultModel }, true)}
+              />
+            </label>
+            <div className="model-grid">
+              <label className="field-row">
+                <span>{w.temperature}</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.1"
+                  value={selectedBusiness.ai_temperature ?? 0.5}
+                  onChange={(e) => onBusinessSetting(selectedBusiness.id, { ai_temperature: e.target.value }, false)}
+                  onBlur={(e) => onBusinessSetting(selectedBusiness.id, { ai_temperature: Number(e.target.value || 0.5) }, true)}
+                />
+              </label>
+              <label className="field-row">
+                <span>{w.maxTokens}</span>
+                <input
+                  type="number"
+                  min="50"
+                  max="1000"
+                  step="10"
+                  value={selectedBusiness.ai_max_tokens ?? 130}
+                  onChange={(e) => onBusinessSetting(selectedBusiness.id, { ai_max_tokens: e.target.value }, false)}
+                  onBlur={(e) => onBusinessSetting(selectedBusiness.id, { ai_max_tokens: Number(e.target.value || 130) }, true)}
+                />
+              </label>
+            </div>
+            <p className="section-hint">
+              {w.modelHint || 'Provider, model, temperature, and API keys stay here. Sales prompts now live in AI Prompt Settings so Instagram, Telegram, and WhatsApp share one source of truth.'}
+            </p>
+          </div>
+          <div className="settings-section">
+            <h3>{w.apiKeys}</h3>
+            <div className="key-grid">
+              {AI_PROVIDERS.map(provider => (
+                <SecretField
+                  key={provider.id}
+                  business={selectedBusiness}
+	                  provider={provider}
+	                  onBusinessSetting={onBusinessSetting}
+	                  w={w}
+	                />
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {view === 'settings' && !isOperator && (
+        <OperatorAccountsPanel
+          selectedBusinessId={selectedBusinessId}
+          onToast={onToast}
+          w={w}
+          operatorsData={operatorAccounts}
+          onReload={onReloadOperatorAccounts}
+        />
+      )}
+
+      {view === 'profile' && (
+        <div className="settings-view">
+          <label className="field-row">
+            <span>Display name</span>
+            <input
+              value={userProfile?.name || ''}
+              placeholder="Your name"
+              onChange={(e) => onUpdateUserProfile({ name: e.target.value })}
+            />
+          </label>
+          <label className="field-row">
+            <span>Photo URL</span>
+            <input
+              value={userProfile?.photo || ''}
+              placeholder="https://..."
+              onChange={(e) => onUpdateUserProfile({ photo: e.target.value })}
+            />
+          </label>
+          <div className="metric-card">
+            <span>Profile preview</span>
+            <b style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="av" style={{ width: 28, height: 28, fontSize: 12 }}>
+                {userProfile?.photo ? <img src={userProfile.photo} alt={userProfile?.name || 'Profile'} /> : initialsFromName(userProfile?.name || '')}
+              </span>
+              {userProfile?.name || 'User'}
+            </b>
+          </div>
+          <div className="metric-card"><span>API base</span><b>{API_BASE}</b></div>
+          <label className="field-row">
+            <span>Business owner email</span>
+            <input
+              defaultValue={ownerEmail || ''}
+              placeholder="owner@business.com"
+              onBlur={(e) => onOwnerEmailSave(e.target.value)}
+            />
+          </label>
+          <div className="panel-actions">
+            <button onClick={() => { window.localStorage.removeItem('instaagent_dashboard_secret'); window.sessionStorage.removeItem('instaagent_dashboard_secret'); onToast('Dashboard secret cleared'); }}>Clear secret</button>
+            <button onClick={() => navigator.clipboard?.writeText(API_BASE).then(() => onToast('API base copied'))}>Copy API base</button>
+            <button onClick={onSignOut}>Sign out</button>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// ---------- Rail ----------
+function Rail({ t, activeView, onView, currentUser, userProfile, businesses }) {
+  const roleScope = resolveRoleScope(currentUser, businesses || []);
+  const isOperator = roleScope.isOperator;
+  const items = [
+    { id: 'leads', icon: <I.Star />, label: t.leads || 'Leads' },
+    { id: 'inbox', icon: <I.Inbox />, label: t.inbox, dot: true },
+    { id: 'posts', icon: <I.Photo />, label: t.posts || 'Posts' },
+    { id: 'clients', icon: <I.Comment />, label: t.clients || 'Clients' },
+    { id: 'operators', icon: <I.Phone />, label: t.operators || 'Operators' },
+    { id: 'knowledge', icon: <I.Book />, label: t.knowledge },
+    { id: 'prompts', icon: <I.Sparkle />, label: t.prompts || 'AI Prompts' },
+    { id: 'accounts', icon: <I.Layers />, label: t.accounts },
+  ].filter(item => !isOperator || ['leads', 'inbox', 'posts', 'clients', 'operators'].includes(item.id));
+  return (
+    <aside className="rail">
+      {items.map(it => (
+        <button key={it.id} className={`rail-btn ${activeView === it.id ? 'active' : ''}`} title={it.label} onClick={() => onView(it.id)}>
+          {it.icon}
+          <span className="rail-label">{it.label}</span>
+          {it.dot && <span className="dot" />}
+        </button>
+      ))}
+      <div className="rail-spacer" />
+      {!isOperator && (
+        <button className={`rail-btn ${activeView === 'settings' ? 'active' : ''}`} title={t.settings} onClick={() => onView('settings')}>
+          <I.Sett />
+          <span className="rail-label">{t.settings}</span>
+        </button>
+      )}
+      <button className={`rail-btn ${activeView === 'profile' ? 'active' : ''}`} title={t.you || 'You'} onClick={() => onView('profile')}>
+        <span className="rail-avatar-mini">
+          {userProfile?.photo ? <img src={userProfile.photo} alt={userProfile?.name || 'You'} /> : initialsFromName(userProfile?.name || 'You')}
+        </span>
+        <span className="rail-label">{t.you || 'You'}</span>
+      </button>
+      {!isOperator && (
+        <button className={`rail-btn ${activeView === 'insights' ? 'active' : ''}`} title={t.insights} onClick={() => onView('insights')}>
+          <I.Chart />
+          <span className="rail-label">{t.insights}</span>
+        </button>
+      )}
+    </aside>
+  );
+}
+
+// ---------- Conversation row ----------
+function Row({ c, selected, onClick, t }) {
+  const isUnread = c.unread > 0;
+  return (
+    <div className={`row ${selected ? 'selected' : ''}`} onClick={onClick}>
+      <Avatar data={c.avatar} platform={c.platform} />
+      <div className="row-body">
+        <div className="row-line1">
+          <span className="row-name">{c.name}</span>
+          <span className="row-handle">·  {c.handle}</span>
+        </div>
+        <div className={`row-preview ${isUnread ? 'unread' : ''}`}>
+          {c.lastFromMe && <span className="me">{t.you} · </span>}
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.preview}</span>
+        </div>
+      </div>
+      <div className="row-meta">
+        <span className={`row-time ${isUnread ? 'unread' : ''}`}>{c.lastTime}</span>
+        <div className="row-badges">
+          {c.needsHuman && <span className="chip human">{t.needs.toLowerCase()}</span>}
+          {!c.needsHuman && c.aiOn && <span className="chip ai">AI</span>}
+          {isUnread && <span className="chip unread">{c.unread}</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- List column ----------
+function ListColumn({ conversations, selectedId, onSelect, t, loading, apiError, liveMode, onRefresh }) {
+  const [filter, setFilter] = useState('all');
+  const [platforms, setPlatforms] = useState({ instagram: true, telegram: true, whatsapp: true });
+  const [instagramChannels, setInstagramChannels] = useState({ dm: true, comments: true });
+  const [search, setSearch] = useState('');
+  const showLoadingState = loading && conversations.length === 0;
+
+  const counts = useMemo(() => ({
+    all: conversations.length,
+    needs: conversations.filter(c => c.needsHuman).length,
+    unread: conversations.filter(c => c.unread > 0).length,
+    ai: conversations.filter(c => c.aiOn && !c.needsHuman).length,
+  }), [conversations]);
+
+  const filtered = useMemo(() => {
+    return conversations.filter(c => {
+      if (!platforms[c.platform]) return false;
+      if (c.platform === 'instagram') {
+        const isComment = Boolean(c.isCommentThread || String(c.channel || '').toLowerCase().includes('comment'));
+        if (isComment && !instagramChannels.comments) return false;
+        if (!isComment && !instagramChannels.dm) return false;
+      }
+      if (filter === 'needs' && !c.needsHuman) return false;
+      if (filter === 'unread' && c.unread === 0) return false;
+      if (filter === 'ai' && (!c.aiOn || c.needsHuman)) return false;
+      if (search) {
+        const q = search.toLowerCase();
+        if (!`${c.name} ${c.handle} ${c.preview}`.toLowerCase().includes(q)) return false;
+      }
+      return true;
+    });
+  }, [conversations, filter, platforms, search]);
+
+  const priority = filtered.filter(c => c.needsHuman || c.unread > 0);
+  const rest = filtered.filter(c => !c.needsHuman && c.unread === 0);
+
+  return (
+    <section className="list-col">
+      <div className="list-head">
+        <div className={`api-strip ${liveMode ? 'live' : 'mock'}`}>
+          <span>{liveMode || conversations.length > 0 ? t.liveBackend : (showLoadingState ? 'Loading... please wait' : 'Waiting for live data')}</span>
+          <button onClick={onRefresh} title={t.refresh}>{loading ? t.syncing : t.refresh}</button>
+        </div>
+        {apiError && <div className="api-error">{apiError}</div>}
+        <div className="search">
+          <I.Search />
+          <input
+            placeholder={t.search}
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <kbd>⌘K</kbd>
+        </div>
+        <div className="filters">
+          <button className={`filter ${filter === 'all' ? 'active' : ''}`} onClick={() => setFilter('all')}>
+            {t.all} <span className="num">{counts.all}</span>
+          </button>
+          <button className={`filter warn ${filter === 'needs' ? 'active' : ''}`} onClick={() => setFilter('needs')}>
+            {t.needs} <span className="num">{counts.needs}</span>
+          </button>
+          <button className={`filter ${filter === 'unread' ? 'active' : ''}`} onClick={() => setFilter('unread')}>
+            {t.unread} <span className="num">{counts.unread}</span>
+          </button>
+          <button className={`filter ${filter === 'ai' ? 'active' : ''}`} onClick={() => setFilter('ai')}>
+            {t.aiHandled} <span className="num">{counts.ai}</span>
+          </button>
+        </div>
+        <div className="platform-toggle">
+          <button className={platforms.instagram ? 'on' : ''} onClick={() => setPlatforms(p => ({ ...p, instagram: !p.instagram }))}>
+            <span className="pdot ig" /> {t.instagram}
+          </button>
+          <button className={platforms.telegram ? 'on' : ''} onClick={() => setPlatforms(p => ({ ...p, telegram: !p.telegram }))}>
+            <span className="pdot tg" /> {t.telegram}
+          </button>
+          <button className={platforms.whatsapp ? 'on' : ''} onClick={() => setPlatforms(p => ({ ...p, whatsapp: !p.whatsapp }))}>
+            <span className="pdot wa" /> {t.whatsapp}
+          </button>
+        </div>
+        {platforms.instagram && (
+          <div className="platform-toggle" style={{ marginTop: 8 }}>
+            <button className={instagramChannels.dm ? 'on' : ''} onClick={() => setInstagramChannels(v => ({ ...v, dm: !v.dm }))}>Instagram DMs</button>
+            <button className={instagramChannels.comments ? 'on' : ''} onClick={() => setInstagramChannels(v => ({ ...v, comments: !v.comments }))}>Instagram comments</button>
+          </div>
+        )}
+      </div>
+      <div className="list-scroll">
+        {priority.length > 0 && (
+          <>
+            <div className="list-section">{t.priority} <em>· {priority.length}</em></div>
+            {priority.map(c => (
+              <Row key={c.id} c={c} selected={c.id === selectedId} onClick={() => onSelect(c.id)} t={t} />
+            ))}
+          </>
+        )}
+        {rest.length > 0 && (
+          <>
+            <div className="list-section">{t.everything}</div>
+            {rest.map(c => (
+              <Row key={c.id} c={c} selected={c.id === selectedId} onClick={() => onSelect(c.id)} t={t} />
+            ))}
+          </>
+        )}
+        {filtered.length === 0 && (
+          showLoadingState ? (
+            <div className="loading-state" role="status" aria-live="polite">
+              <span className="spinner" aria-hidden="true" />
+              <p>Loading... please wait</p>
+            </div>
+          ) : (
+            <div className="empty">{t.noConversations}</div>
+          )
+        )}
+      </div>
+    </section>
+  );
+}
+
+// ---------- Voice wave (decorative) ----------
+function VoiceWave({ count = 28 }) {
+  const heights = useMemo(() => Array.from({ length: count }, (_, i) => {
+    const v = 4 + Math.abs(Math.sin(i * 0.7) + Math.cos(i * 0.3)) * 7;
+    return Math.min(18, Math.max(3, v));
+  }), [count]);
+  return (
+    <div className="voice-wave">
+      {heights.map((h, i) => <i key={i} style={{ height: h }} />)}
+    </div>
+  );
+}
+
+// ---------- Message bubble ----------
+function Message({ m, conv, t, onReplyComment, onEditMessage, onDeleteMessage }) {
+  if (m.side === 'system' && m.type === 'handoff') {
+    return (
+      <div className="handoff-banner">
+        <div className="icon"><I.AlertTri /></div>
+        <div className="text">
+          <strong>{t.handoffTitle}</strong>
+          <span>{m.text}</span>
+        </div>
+      </div>
+    );
+  }
+  const fromAi = m.from === 'ai';
+  const canReplyToComment = Boolean(
+    conv?.isCommentThread &&
+    m.side === 'inbound' &&
+    m.commentId &&
+    typeof onReplyComment === 'function'
+  );
+  const canManageOutbound = Boolean(
+    conv?.platform === 'telegram' &&
+    m.side === 'outbound' &&
+    !m.pending &&
+    m.id &&
+    !String(m.id).startsWith('optimistic-')
+  );
+  return (
+    <div className={`msg-group ${m.side} ${fromAi ? 'from-ai' : ''}`}>
+      {m.type === 'text' && (
+        <div className="bubble">{m.text}</div>
+      )}
+      {m.type === 'media' && (
+        <div className="bubble media">
+          {m.mediaKind === 'video' && isPlayableVideoUrl(m.mediaUrl) ? (
+            <>
+              <video className="media-video" src={m.mediaUrl} controls />
+              <a className="open-post-link" href={m.mediaUrl} target="_blank" rel="noreferrer">
+                Open media
+              </a>
+            </>
+          ) : m.mediaUrl && (m.mediaKind === 'photo' || isRenderableImageUrl(m.mediaUrl)) && !isInstagramPostLink(m.mediaUrl) ? (
+            <a href={m.mediaUrl} target="_blank" rel="noreferrer">
+              <img className="media-img" src={m.mediaUrl} alt={m.label || 'attachment'} />
+            </a>
+          ) : m.mediaKind === 'file' && m.mediaUrl && !isInstagramPostLink(m.mediaUrl) ? (
+            <a className="file-chip" href={m.mediaUrl} target="_blank" rel="noreferrer">
+              <I.Paperclip />
+              <span>{m.label || 'open file'}</span>
+            </a>
+          ) : m.mediaKind === 'file' ? (
+            <div className="file-chip">
+              <I.Paperclip />
+              <span>{m.label || 'document'}</span>
+            </div>
+          ) : m.mediaUrl ? (
+            <a className="file-chip" href={m.mediaUrl} target="_blank" rel="noreferrer">
+              <I.Paperclip />
+              <span>{m.label || 'open media'}</span>
+            </a>
+          ) : (
+            <span className="ph" data-label={m.label || 'photo'} />
+          )}
+          {m.mediaCaption && <div className="cap">{m.mediaCaption}</div>}
+          {m.forwardLink && conv?.platform === 'instagram' && (
+            <a className="open-post-link" href={m.forwardLink} target="_blank" rel="noreferrer">
+              Open on Instagram
+            </a>
+          )}
+          {!m.mediaUrl && m.mediaFileId && <div className="media-note">Media ID saved. Preview needs backend media download URL.</div>}
+        </div>
+      )}
+      {m.type === 'voice' && (
+        <div className="bubble voice">
+          <button className="tool-btn" style={{ background: 'rgba(255,255,255,.1)' }}><I.Mic /></button>
+          {m.mediaUrl ? <audio className="voice-player" src={m.mediaUrl} controls /> : <VoiceWave />}
+          <span className="voice-time">{m.duration || '0:12'}</span>
+        </div>
+      )}
+      {m.type === 'catalog' && (
+        <div className="bubble catalog">
+          <div className="catalog-body">{m.catalogText}</div>
+          <a className="catalog-btn">{m.catalogLabel} →</a>
+        </div>
+      )}
+      <div className="msg-meta">
+        {fromAi && <span className="ai-mark">auto</span>}
+        <span>{m.time}</span>
+        {m.pending && <span className="send-state">sending</span>}
+        {m.failed && <span className="send-state failed">failed</span>}
+        {m.side === 'outbound' && !m.failed && <span className="check"><I.DoubleCheck /></span>}
+        {canManageOutbound && (
+          <span className="msg-actions">
+            {m.type === 'text' && (
+              <button type="button" onClick={() => onEditMessage?.(m)}>Edit</button>
+            )}
+            <button type="button" className="danger" onClick={() => onDeleteMessage?.(m)}>Delete</button>
+          </span>
+        )}
+      </div>
+      {canReplyToComment && (
+        <button
+          type="button"
+          className="msg-reply-btn"
+          onClick={() => onReplyComment(m)}
+        >
+          Reply
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ---------- Thread head ----------
+function ThreadHead({ conv, aiOn, onToggleAi, canToggleAi = true, t, onPin, onArchive, onDelete, onMore, moreOpen }) {
+  if (!conv) return null;
+  return (
+    <div className="topbar-thread">
+      <div className="thread-head-info">
+        <Avatar data={conv.avatar} platform={conv.platform} size={36} />
+        <div className="info-text">
+          <div className="name">{conv.name}</div>
+          <div className="sub">
+            {conv.online && <span className="fixed online-dot" />}
+            <span className="fixed">{conv.handle}</span>
+            <span className="fixed dot" />
+            <span>{conv.location}</span>
+          </div>
+        </div>
+      </div>
+      <div className="thread-actions">
+        {canToggleAi && (
+          <button className={`ai-toggle ${aiOn ? 'on' : ''}`} onClick={onToggleAi}>
+            <span className="switch" />
+            <span className="label-i">{aiOn ? t.aiOn : t.aiOff}</span>
+          </button>
+        )}
+        <button className={`icon-btn ${conv.pinned ? 'active' : ''}`} title="Pin" onClick={onPin}><I.Star /></button>
+        <button className="icon-btn" title="Archive" onClick={onArchive}><I.Archive /></button>
+        <div className="menu-wrap">
+          <button className="icon-btn" title="More" onClick={onMore}><I.Dots /></button>
+          {moreOpen && (
+            <div className="pop-menu thread-menu">
+              <button onClick={onPin}>{conv.pinned ? 'Unpin chat' : 'Pin chat'}</button>
+              <button onClick={() => navigator.clipboard?.writeText(conv.customerId)}>Copy customer ID</button>
+              <button onClick={onArchive}>Archive locally</button>
+              <button className="danger" onClick={onDelete}>{t.deleteChat}</button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Thread column ----------
+function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, onEditMessage, onDeleteMessage, sending, threadLoading, onTool }) {
+  if (!conv) {
+    return <section className="thread-col" />;
+  }
+  const scrollRef = useRef(null);
+  const imageInputRef = useRef(null);
+  const attachInputRef = useRef(null);
+  const composerRef = useRef(null);
+  const emojiPanelRef = useRef(null);
+  const emojiToggleRef = useRef(null);
+  const recorderRef = useRef(null);
+  const recordingChunksRef = useRef([]);
+  const recordingStreamRef = useRef(null);
+  const recordingShouldSendRef = useRef(true);
+  const [draft, setDraft] = useState('');
+  const [showSuggestions, setShowSuggestions] = useState(true);
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [recordingStartedAt, setRecordingStartedAt] = useState(0);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [replyTarget, setReplyTarget] = useState(null);
+  const voiceRecordingSupported = ['telegram', 'whatsapp'].includes(conv.platform);
+
+  const sendDraft = async () => {
+    const text = draft.trim();
+    if (!text) return;
+    setDraft('');
+    const sent = await onSend(text, { replyToCommentId: replyTarget?.commentId || '' });
+    if (sent !== false) setReplyTarget(null);
+  };
+
+  const selectReplyTarget = (message) => {
+    if (!message?.commentId) return;
+    const preview = String(message.text || message.mediaCaption || '').trim();
+    setReplyTarget({
+      commentId: message.commentId,
+      preview: preview || '[comment]',
+    });
+    requestAnimationFrame(() => composerRef.current?.focus());
+  };
+
+  const uploadImage = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    const sent = await onTool('photo', setDraft, file, draft);
+    if (sent) setDraft('');
+  };
+
+  const insertEmoji = (emoji) => {
+    setDraft(current => `${current}${current && !current.endsWith(' ') ? ' ' : ''}${emoji}`);
+    setEmojiOpen(false);
+  };
+
+  const stopRecordingTracks = () => {
+    recordingStreamRef.current?.getTracks().forEach(track => track.stop());
+    recordingStreamRef.current = null;
+  };
+
+  const startVoiceRecording = async () => {
+    if (sending || recording) return;
+
+    if (!voiceRecordingSupported) {
+      await onTool('voice-instagram', setDraft);
+      return;
     }
 
-    try:
-        res = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=PRODUCT_MATCHER_OPENAI_VISION_TIMEOUT_SECONDS,
-        )
-        body = safe_json(res)
-        if not res.ok:
-            log("Local vision request failed", {"status": res.status_code, "body": body})
-            return {}
-    except Exception as exc:
-        log("Local vision request error", str(exc))
-        return {}
-
-    raw_text = _extract_output_text_from_responses(body)
-    parsed = _extract_json_object_loose(raw_text)
-    parsed_codes = []
-    for key in ("product_codes", "model_codes"):
-        values = parsed.get(key)
-        if isinstance(values, list):
-            parsed_codes.extend(values)
-    if isinstance(parsed.get("detected_text"), str):
-        parsed_codes.extend(extract_codes_from_text_local(parsed.get("detected_text")))
-
-    codes = []
-    for code in parsed_codes:
-        normalized = normalize_product_code(code)
-        if normalized and normalized not in codes:
-            codes.append(normalized)
-
-    keywords = []
-    raw_keywords = parsed.get("keywords")
-    if isinstance(raw_keywords, list):
-        for item in raw_keywords:
-            token = normalize_id(item).lower()
-            if token and token not in keywords:
-                keywords.append(token)
-
-    detected_text = normalize_id(parsed.get("detected_text"))
-    if detected_text:
-        for token in re.findall(r"[A-Za-z0-9'-]{3,}", detected_text.lower()):
-            if token not in keywords:
-                keywords.append(token)
-
-    return {
-        "codes": codes[:24],
-        "keywords": keywords[:PRODUCT_MATCHER_LOCAL_MAX_KEYWORDS],
-        "colors": [normalize_id(x).lower() for x in (parsed.get("colors") if isinstance(parsed.get("colors"), list) else [])][:8],
-        "garment_type": normalize_id(parsed.get("garment_type")).lower(),
-        "detected_text": detected_text,
-        "confidence": _safe_score(parsed.get("confidence")),
-        "raw_text": raw_text[:400],
+    if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+      await onTool('voice-unsupported', setDraft);
+      return;
     }
 
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = recordingMimeType();
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
 
-def _parse_float_list(value, limit: int = 12) -> list[float]:
-    if value is None:
-        return []
-    if isinstance(value, list):
-        items = value
-    elif isinstance(value, tuple):
-        items = list(value)
-    else:
-        text = normalize_id(value)
-        if not text:
-            return []
-        try:
-            parsed = json.loads(text)
-            if isinstance(parsed, list):
-                items = parsed
-            else:
-                items = re.findall(r"-?\d+(?:\.\d+)?", text)
-        except Exception:
-            items = re.findall(r"-?\d+(?:\.\d+)?", text)
-    result = []
-    for item in items[:limit]:
-        try:
-            result.append(float(item))
-        except Exception:
-            continue
-    return result
+      recordingChunksRef.current = [];
+      recordingShouldSendRef.current = true;
+      recordingStreamRef.current = stream;
+      recorderRef.current = recorder;
 
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) recordingChunksRef.current.push(event.data);
+      };
 
-def _image_sha256_from_bytes(media_bytes: bytes) -> str:
-    if not media_bytes:
-        return ""
-    return hashlib.sha256(media_bytes).hexdigest()
+      recorder.onstop = async () => {
+        const shouldSend = recordingShouldSendRef.current;
+        const chunks = recordingChunksRef.current;
+        const finalMimeType = recorder.mimeType || mimeType || 'audio/webm';
 
+        setRecording(false);
+        setRecordingStartedAt(0);
+        setRecordingSeconds(0);
+        stopRecordingTracks();
 
-def _build_image_signatures_from_bytes(media_bytes: bytes) -> list[list[float]]:
-    if not media_bytes:
-        return []
+        if (!shouldSend || !chunks.length) return;
 
-    try:
-        from PIL import Image
-        import numpy as np
-    except Exception:
-        return []
+        const blob = new Blob(chunks, { type: finalMimeType });
+        const file = new File(
+          [blob],
+          `voice-${Date.now()}.${extensionForMime(finalMimeType)}`,
+          { type: finalMimeType },
+        );
+        await onTool('voice', setDraft, file);
+      };
 
-    try:
-        image = Image.open(io.BytesIO(media_bytes)).convert("RGB").resize((128, 128))
-        arr = np.asarray(image, dtype=np.float32)
-    except Exception:
-        return []
-
-    signatures = []
-
-    try:
-        rgb_hist = []
-        total_pixels = float(arr.shape[0] * arr.shape[1] * 3) or 1.0
-        for channel in range(3):
-            hist, _ = np.histogram(arr[:, :, channel], bins=4, range=(0, 255))
-            rgb_hist.extend((hist.astype(np.float32) / total_pixels).tolist())
-        signatures.append([float(x) for x in rgb_hist])
-    except Exception:
-        pass
-
-    try:
-        lum = 0.299 * arr[:, :, 0] + 0.587 * arr[:, :, 1] + 0.114 * arr[:, :, 2]
-        lum_hist, _ = np.histogram(lum, bins=12, range=(0, 255))
-        lum_total = float(lum_hist.sum()) or 1.0
-        signatures.append((lum_hist.astype(np.float32) / lum_total).tolist())
-    except Exception:
-        pass
-
-    try:
-        flat = arr.reshape(-1, 3)
-        means = (flat.mean(axis=0) / 255.0).tolist()
-        stds = (flat.std(axis=0) / 255.0).tolist()
-        percentiles = np.percentile(flat, [10, 25, 50], axis=0) / 255.0
-        signatures.append([float(x) for x in (means + stds + percentiles.reshape(-1).tolist())[:12]])
-    except Exception:
-        pass
-
-    return [sig for sig in signatures if len(sig) >= 6]
-
-
-def _vector_similarity(left: list[float], right: list[float]) -> float:
-    if not left or not right:
-        return 0.0
-    size = min(len(left), len(right))
-    if size < 4:
-        return 0.0
-    l = [float(x) for x in left[:size]]
-    r = [float(x) for x in right[:size]]
-    dot = sum(a * b for a, b in zip(l, r))
-    left_norm = sum(a * a for a in l) ** 0.5
-    right_norm = sum(b * b for b in r) ** 0.5
-    if not left_norm or not right_norm:
-        return 0.0
-    return max(0.0, min(1.0, dot / (left_norm * right_norm)))
-
-
-def _row_image_similarity_score(row: dict, media_sha256: str, media_signatures: list[list[float]]) -> float:
-    row_sha256 = normalize_id(row.get("image_sha256")).lower()
-    if row_sha256 and media_sha256 and row_sha256 == media_sha256:
-        return 1.0
-
-    row_signature = _parse_float_list(row.get("embedding_preview"), limit=12)
-    if not row_signature:
-        return 0.0
-
-    best = 0.0
-    for media_signature in media_signatures or []:
-        score = _vector_similarity(row_signature, media_signature)
-        if score > best:
-            best = score
-    return best
-
-
-def _score_local_catalog_row(row: dict, code_set: set, keyword_set: set, media_sha256: str = "", media_signatures: list[list[float]] = None, vision: dict = None) -> tuple[float, dict]:
-    code = normalize_product_code(row.get("product_code"))
-    model = normalize_product_code(row.get("model_code"))
-    text_blob = " ".join(
-        [
-            normalize_id(row.get("combined_text")).upper(),
-            code,
-            model,
-            normalize_id(row.get("image_fingerprint")).upper(),
-        ]
-    )
-
-    code_score = 0.0
-    if code and code in code_set:
-        code_score = 1.0
-    elif model and model in code_set:
-        code_score = 0.92
-
-    keyword_hits = 0
-    if keyword_set:
-        lower_blob = text_blob.lower()
-        for kw in keyword_set:
-            if kw and kw in lower_blob:
-                keyword_hits += 1
-    keyword_score = 0.0
-    if keyword_set:
-        keyword_score = min(1.0, keyword_hits / max(1, min(6, len(keyword_set))))
-
-    text_score = 0.0
-    if code and code in text_blob:
-        text_score = 1.0
-    elif model and model in text_blob:
-        text_score = 0.9
-
-    image_score = _row_image_similarity_score(row, media_sha256, media_signatures or [])
-    if vision and isinstance(vision, dict):
-        row_text = normalize_id(row.get("combined_text")).lower()
-        row_type_blob = f"{code} {model} {row_text}".lower()
-        for color in vision.get("colors", []) or []:
-            token = normalize_id(color).lower()
-            if token and token in row_type_blob:
-                image_score = max(image_score, 0.55)
-        garment_type = normalize_id(vision.get("garment_type")).lower()
-        if garment_type and garment_type in row_type_blob:
-            image_score = max(image_score, 0.60)
-
-    final_score = (0.54 * code_score) + (0.18 * keyword_score) + (0.08 * text_score) + (0.20 * image_score)
-    parts = {
-        "final": round(final_score, 6),
-        "code": round(code_score, 6),
-        "keyword": round(keyword_score, 6),
-        "text": round(text_score, 6),
-        "image": round(image_score, 6),
+      recorder.start();
+      setRecording(true);
+      setRecordingStartedAt(Date.now());
+      setRecordingSeconds(0);
+    } catch (error) {
+      stopRecordingTracks();
+      await onTool('voice-permission', setDraft, null, error?.message || '');
     }
-    return final_score, parts
+  };
 
+  const stopVoiceRecording = () => {
+    if (!recording || !recorderRef.current) return;
+    recordingShouldSendRef.current = true;
+    recorderRef.current.stop();
+  };
 
-def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_type: str = "", access_token: str = "") -> dict:
-    if catalog_matcher_module is not None:
-        try:
-            return catalog_matcher_module.analyze_media_for_sales_reply_local(
-                media_url=media_url,
-                user_text=user_text,
-                media_type=media_type,
-                access_token=access_token,
-            )
-        except Exception as exc:
-            log("catalog_matcher local delegation failed", {"error": str(exc)})
-    if not PRODUCT_MATCHER_LOCAL_ENABLED:
-        return {}
-    media_type = normalize_id(media_type).lower()
-    if media_type and media_type not in {"photo", "file", "image"}:
-        return {}
-    if not media_url:
-        return {}
+  const cancelVoiceRecording = () => {
+    if (!recording || !recorderRef.current) return;
+    recordingShouldSendRef.current = false;
+    recorderRef.current.stop();
+  };
 
-    try:
-        media_bytes, _, mime_type = download_media_for_matcher(media_url, access_token=access_token)
-    except Exception as exc:
-        log("Local matcher download failed", {"error": str(exc)})
-        return {}
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.style.scrollBehavior = 'auto';
+    const scroll = () => { el.scrollTop = el.scrollHeight; };
+    scroll();
+    const r1 = requestAnimationFrame(scroll);
+    const r2 = requestAnimationFrame(() => requestAnimationFrame(scroll));
+    const t1 = setTimeout(scroll, 100);
+    const t2 = setTimeout(scroll, 400);
+    const t3 = setTimeout(() => { el.style.scrollBehavior = 'smooth'; }, 500);
+    setDraft('');
+    setReplyTarget(null);
+    return () => {
+      cancelAnimationFrame(r1); cancelAnimationFrame(r2);
+      clearTimeout(t1); clearTimeout(t2); clearTimeout(t3);
+    };
+  }, [conv.id]);
 
-    vision = _extract_media_vision_hints_local(media_bytes, mime_type, user_text)
-    media_sha256 = _image_sha256_from_bytes(media_bytes)
-    media_signatures = _build_image_signatures_from_bytes(media_bytes)
-    extracted_codes = extract_codes_from_text_local(user_text)
-    for code in vision.get("codes", []):
-        if code not in extracted_codes:
-            extracted_codes.append(code)
-    code_set = {normalize_product_code(code) for code in extracted_codes if code}
+  useEffect(() => {
+    if (!recording) return undefined;
+    const timer = window.setInterval(() => {
+      setRecordingSeconds(Math.max(0, Math.floor((Date.now() - recordingStartedAt) / 1000)));
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [recording, recordingStartedAt]);
 
-    keyword_set = {normalize_id(x).lower() for x in re.findall(r"[A-Za-z0-9'-]{3,}", normalize_id(user_text))}
-    for token in vision.get("keywords", []):
-        clean = normalize_id(token).lower()
-        if clean:
-            keyword_set.add(clean)
+  useEffect(() => () => {
+    recordingShouldSendRef.current = false;
+    if (recorderRef.current?.state === 'recording') recorderRef.current.stop();
+    stopRecordingTracks();
+  }, []);
 
-    rows = _get_local_catalog_rows()
-    if not rows:
-        return {}
-    exact_image_match = any(
-        normalize_id(row.get("image_sha256")).lower()
-        and normalize_id(row.get("image_sha256")).lower() == media_sha256
-        for row in rows
-    )
+  useEffect(() => {
+    if (!emojiOpen) return undefined;
 
-    scored = []
-    for row in rows:
-        score, parts = _score_local_catalog_row(
-            row,
-            code_set,
-            keyword_set,
-            media_sha256=media_sha256,
-            media_signatures=media_signatures,
-            vision=vision,
-        )
-        if score <= 0:
-            continue
-        scored.append({
-            **row,
-            "score": score,
-            "components": parts,
-        })
+    const closeOnOutsideTouch = (event) => {
+      const target = event.target;
+      if (!target) return;
+      if (emojiPanelRef.current?.contains(target)) return;
+      if (emojiToggleRef.current?.contains(target)) return;
+      setEmojiOpen(false);
+    };
 
-    scored.sort(key=lambda item: item.get("score", 0.0), reverse=True)
-    matches = scored[:PRODUCT_MATCHER_TOP_K]
-    if not matches:
-        return {}
+    const closeOnEscape = (event) => {
+      if (event.key === 'Escape') setEmojiOpen(false);
+    };
 
-    top = matches[0]
-    top_score = _safe_score(top.get("score"))
-    code = normalize_id(top.get("product_code"))
-    model = normalize_id(top.get("model_code"))
-    price = normalize_id(top.get("price"))
-    currency = normalize_id(top.get("currency"))
-    image_score = _safe_score(top.get("components", {}).get("image"))
+    document.addEventListener('pointerdown', closeOnOutsideTouch, true);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideTouch, true);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [emojiOpen]);
 
-    visual_evidence = exact_image_match or bool(code_set) or bool(vision.get("codes")) or bool(vision.get("keywords")) or bool(vision.get("garment_type"))
-    accepted_by_score = top_score >= PRODUCT_MATCHER_MIN_SCORE and visual_evidence
-    accepted_by_code = bool(code_set)
-    accepted_by_image = image_score >= max(PRODUCT_MATCHER_WEAK_MIN_SCORE, 0.45) and visual_evidence
-    accepted_weak_match = bool(code or model or price) and top_score >= PRODUCT_MATCHER_WEAK_MIN_SCORE and visual_evidence
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const last = messages[messages.length - 1];
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom > 240 && last?.side !== 'outbound') return;
+    requestAnimationFrame(() => {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    });
+  }, [messages.length, conv.id]);
 
-    log("Local media matcher response summary", {
-        "match_count": len(matches),
-        "top_score": round(top_score, 4),
-        "top_product_code": code,
-        "top_model_code": model,
-        "has_price": bool(price),
-        "extracted_codes": list(code_set)[:8],
-        "vision_confidence": _safe_score(vision.get("confidence")),
-        "accepted_by_score": accepted_by_score,
-        "accepted_by_code": accepted_by_code,
-        "accepted_by_image": accepted_by_image,
-        "accepted_weak_match": accepted_weak_match,
-    })
+  // Group consecutive same-side messages for tight bubble corners
+  const groups = useMemo(() => {
+    const out = [];
+    let lastSide = null;
+    for (const m of messages) {
+      if (m.side === 'system') { out.push(m); lastSide = null; continue; }
+      const same = m.side === lastSide;
+      out.push({ ...m, same });
+      lastSide = m.side;
+    }
+    return out;
+  }, [messages]);
+  const commentPost = useMemo(() => resolveCommentPostPreview(conv, messages), [conv, messages]);
 
-    if not (accepted_by_score or accepted_by_code or accepted_by_image or accepted_weak_match):
-        return {}
+  let lastDay = null;
 
-    alternatives = []
-    for item in matches[1:3]:
-        alt_code = normalize_id(item.get("product_code"))
-        alt_model = normalize_id(item.get("model_code"))
-        alt_score = _safe_score(item.get("score"))
-        if alt_code or alt_model:
-            alternatives.append(f"{alt_code or alt_model} ({alt_score:.2f})")
+  return (
+    <section className="thread-col">
+      <div className="messages" ref={scrollRef}>
+        {threadLoading && (!messages || messages.length === 0) && <div className="empty">Loading conversation…</div>}
+        {conv.isCommentThread && (commentPost.postImageUrl || commentPost.postPermalink || commentPost.postId) && (
+          <div className="post-preview-card">
+            {commentPost.postImageUrl && isVideoPostPreview(commentPost) ? (
+              <video
+                className="post-preview-video"
+                src={commentPost.postImageUrl}
+                controls
+                playsInline
+                preload="metadata"
+              />
+            ) : commentPost.postImageUrl ? (
+              <img className="post-preview-image" src={commentPost.postImageUrl} alt="Instagram post" />
+            ) : (
+              <div className="post-preview-fallback">Instagram post</div>
+            )}
+            <div className="post-preview-meta">
+              <strong>Commented post</strong>
+              {commentPost.postPermalink ? (
+                <a href={commentPost.postPermalink} target="_blank" rel="noreferrer">Open on Instagram</a>
+              ) : (
+                <span>ID: {commentPost.postId || 'unknown'}</span>
+              )}
+            </div>
+          </div>
+        )}
+        {groups.map(m => {
+          const dayChanged = m.day && m.day !== lastDay;
+          if (m.day) lastDay = m.day;
+          return (
+            <React.Fragment key={m.id}>
+              {dayChanged && <div className="day-sep">{m.day}</div>}
+              <Message
+                m={m}
+                conv={conv}
+                t={t}
+                onReplyComment={selectReplyTarget}
+                onEditMessage={onEditMessage}
+                onDeleteMessage={onDeleteMessage}
+              />
+            </React.Fragment>
+          );
+        })}
+        {aiOn && conv.needsHuman === false && (
+          <div className="ai-banner">
+            <I.Sparkle />
+            <span><em>AI</em> is keeping this chat warm. Start typing to take over.</span>
+          </div>
+        )}
+      </div>
 
-    parts = []
-    if code:
-        parts.append(f"code={code}")
-    if model:
-        parts.append(f"model={model}")
-    if price:
-        parts.append(f"price={price} {currency}".strip())
+      {/* Suggested replies */}
+      {showSuggestions && conv.suggestions && conv.suggestions.length > 0 && (
+        <div className="suggest-row">
+          <span className="label">{t.suggested}</span>
+          {conv.suggestions.map((s, i) => (
+            <button key={i} className="suggestion" onClick={() => setDraft(s)}>{s}</button>
+          ))}
+        </div>
+      )}
 
-    context_lines = [
-        "Product media analysis (high-priority context for this customer message):",
-        f"- Top match confidence: {top_score:.2f}",
-    ]
-    if parts:
-        context_lines.append(f"- Top match details: {', '.join(parts)}")
-    if code_set:
-        context_lines.append(f"- Extracted codes from media/text: {', '.join(sorted(code_set)[:8])}")
-    if alternatives:
-        context_lines.append(f"- Alternatives: {', '.join(alternatives)}")
-    context_lines.append("- Use this to answer product/price questions for the attached media.")
+      <div className="composer">
+        <div className="composer-card">
+          {replyTarget?.commentId && (
+            <div className="reply-target-bar">
+              <span>Replying to: {replyTarget.preview.slice(0, 90)}</span>
+              <button type="button" onClick={() => setReplyTarget(null)}>Cancel</button>
+            </div>
+          )}
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/*"
+            style={{ display: 'none' }}
+            onChange={uploadImage}
+          />
+          <input
+            ref={attachInputRef}
+            type="file"
+            accept="image/*"
+            style={{ display: 'none' }}
+            onChange={uploadImage}
+          />
+          <textarea
+            ref={composerRef}
+            className="composer-input"
+            placeholder={`${t.typing} ${conv.name.split(' ')[0]}…`}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={1}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendDraft();
+              }
+            }}
+          />
+          <div className="composer-bar">
+            <button className="tool-btn" title="Attach image" disabled={sending} onClick={() => attachInputRef.current?.click()}><I.Paperclip /></button>
+            <button className="tool-btn" title="Photo" disabled={sending} onClick={() => imageInputRef.current?.click()}><I.Photo /></button>
+            <button
+              className={`tool-btn ${recording ? 'recording active' : ''} ${!voiceRecordingSupported ? 'unsupported' : ''}`}
+              title={voiceRecordingSupported ? (recording ? 'Stop and send voice' : 'Record voice') : 'Voice recording unavailable for Instagram'}
+              disabled={sending}
+              onClick={recording ? stopVoiceRecording : startVoiceRecording}
+            >
+              <I.Mic />
+            </button>
+            <button
+              ref={emojiToggleRef}
+              className={`tool-btn ${emojiOpen ? 'active' : ''}`}
+              title="Emoji"
+              onClick={() => setEmojiOpen(open => !open)}
+            >
+              <I.Smile />
+            </button>
+            <div className="grow" />
+            <span style={{ fontSize: 11, color: 'var(--muted)', marginRight: 6 }}>{t.kbdHint}</span>
+            <button className={`send ${draft.trim() ? '' : 'disabled'}`} onClick={sendDraft}>
+              <I.Send /> {t.send}
+            </button>
+          </div>
+          {recording && (
+            <div className="recording-strip">
+              <span className="record-dot" />
+              <span>Recording {formatRecordTime(recordingSeconds)}</span>
+              <button type="button" onClick={cancelVoiceRecording}>Cancel</button>
+              <button type="button" onClick={stopVoiceRecording}>Send</button>
+            </div>
+          )}
+          {emojiOpen && (
+            <div ref={emojiPanelRef} className="emoji-panel">
+              {EMOJI_SETS.map(group => (
+                <div className="emoji-group" key={group.label}>
+                  <div className="emoji-label">{group.label}</div>
+                  <div className="emoji-grid">
+                    {group.items.map((emoji, index) => (
+                      <button
+                        key={`${group.label}-${emoji}-${index}`}
+                        type="button"
+                        className="emoji-cell"
+                        onClick={() => insertEmoji(emoji)}
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
 
-    return {
-        "context": "\n".join(context_lines),
-        "reply_hint": build_product_match_reply(code, model, price, currency, top_score),
-        "top_score": top_score,
-        "top_match_code": code,
-        "top_match_model": model,
-        "matches": matches,
+// ---------- Detail column ----------
+function DetailColumn({ conv, t, stats, onDelete, messages = [] }) {
+  if (!conv) return <aside className="detail-col" />;
+  const commentPost = resolveCommentPostPreview(conv, messages);
+  return (
+    <aside className="detail-col">
+      <div className="cust-card">
+        <div className="cust-avatar" style={{ background: conv.avatar.color }}>
+          {conv.avatar.initials}
+        </div>
+        <h2 className="cust-name">{conv.name}</h2>
+        <div className="cust-handle">
+          <PlatformIcon p={conv.platform} />
+          <span>{conv.handle}</span>
+          <span style={{ width: 3, height: 3, borderRadius: '50%', background: 'var(--muted)' }} />
+          <span>{conv.location}</span>
+        </div>
+        <div className="cust-meta">
+          {conv.tags.map(t => <span key={t} className="tag">{t}</span>)}
+          <span className="tag">{t.since} {conv.customerSince}</span>
+        </div>
+      </div>
+
+      <div className="detail-section">
+        <h3>{t.summary} <em>· auto</em></h3>
+        <div className="summary">{conv.summary}</div>
+      </div>
+
+      <div className="detail-section">
+        <h3>{t.channel}</h3>
+        {conv.isCommentThread && (commentPost.postImageUrl || commentPost.postPermalink || commentPost.postId) && (
+          <div className="detail-post-card">
+            {commentPost.postImageUrl && isVideoPostPreview(commentPost) ? (
+              <video
+                className="detail-post-video"
+                src={commentPost.postImageUrl}
+                controls
+                playsInline
+                preload="metadata"
+              />
+            ) : commentPost.postImageUrl ? (
+              <img className="detail-post-image" src={commentPost.postImageUrl} alt="Instagram post" />
+            ) : (
+              <div className="detail-post-fallback">Instagram post</div>
+            )}
+            <div className="detail-post-meta">
+              <span>Source post</span>
+              {commentPost.postPermalink ? (
+                <a href={commentPost.postPermalink} target="_blank" rel="noreferrer">Open on Instagram</a>
+              ) : (
+                <small>ID: {commentPost.postId || 'unknown'}</small>
+              )}
+            </div>
+          </div>
+        )}
+        <div className="channel-facts">
+          <span>{t.platform} <b>{conv.platform}</b></span>
+          <span>{t.channel} <b>{conv.channelName || conv.channel || t.inbox}</b></span>
+          <span>{t.customer} <b>{conv.customerId}</b></span>
+          <span>{t.chat} <b>{conv.chatId || conv.customerId}</b></span>
+          <span>{t.sendVia} <b>{sendRouteFor(conv)}</b></span>
+        </div>
+        <div className="panel-actions compact">
+          <button className="danger" onClick={onDelete}>{t.deleteChat}</button>
+        </div>
+      </div>
+
+      <div className="detail-section">
+        <h3>{t.stats}</h3>
+        <div className="kpi-row">
+          <div className="kpi">
+            <div className="label">Messages</div>
+            <div className="value">{conv.kpis.orders}</div>
+            <div className="delta up">{conv.kpis.last || 'synced'}</div>
+          </div>
+          <div className="kpi">
+            <div className="label">Unread</div>
+            <div className="value">{conv.kpis.ltv}</div>
+            <div className={`delta ${String(conv.kpis.conv).startsWith('+') ? 'up' : ''}`}>{conv.kpis.conv}</div>
+          </div>
+        </div>
+      </div>
+
+      {stats && (
+        <div className="detail-section">
+          <h3>Backend</h3>
+          <div className="backend-grid">
+            <span>Accounts <b>{stats.total_accounts ?? 0}</b></span>
+            <span>Active <b>{stats.active_accounts ?? 0}</b></span>
+            <span>Instagram <b>{stats.instagram_messages ?? 0}</b></span>
+            <span>Telegram <b>{stats.telegram_messages ?? 0}</b></span>
+            <span>WhatsApp <b>{stats.whatsapp_messages ?? 0}</b></span>
+          </div>
+        </div>
+      )}
+
+      {conv.orders.length > 0 && (
+        <div className="detail-section">
+          <h3>{t.orders}</h3>
+          {conv.orders.map((o, i) => (
+            <div key={i} className="order">
+              <div className="ph" />
+              <div className="body">
+                <div className="t">{o.t}</div>
+                <div className="s">{o.s}</div>
+              </div>
+              <div className="price">{o.price}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="detail-section">
+        <h3>{t.notes}</h3>
+        <div className="note">{t.note}</div>
+      </div>
+    </aside>
+  );
+}
+
+// ---------- Top bar ----------
+function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, canToggleAi = true, activeView, onToggleAi, onRefresh, onToast, onPin, onArchive, onDelete, onMore, moreOpen, onOpenProfile, onSignOut, userProfile, onUpdateUserProfile }) {
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const fileInputRef = useRef(null);
+  const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
+  const workspaceNames = { inbox: t.inbox, insights: t.insights, posts: t.posts || w.postsTitle, knowledge: t.knowledge, prompts: w.promptsTitle, accounts: t.accounts, settings: t.settings, profile: w.profile };
+  const displayName = String(userProfile?.name || 'User');
+  const initials = initialsFromName(displayName);
+
+  const uploadAvatar = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      onToast('Please choose an image file.');
+      return;
+    }
+    if (file.size > 3 * 1024 * 1024) {
+      onToast('Image is too large. Max 3 MB.');
+      return;
+    }
+    try {
+      const photo = await fileToDataUrl(file);
+      onUpdateUserProfile({ photo });
+      onToast('Profile photo updated');
+      setProfileOpen(false);
+    } catch (e) {
+      onToast('Could not read this image');
+    }
+  };
+
+  return (
+    <header className="topbar">
+      <div className="brand">
+        <div className="brand-mark" />
+      </div>
+      <div className="topbar-list">
+        <span className="wordmark">{t.appName}<em>{t.appNameAccent}</em></span>
+        <div className="menu-wrap" style={{ marginLeft: 'auto' }}>
+          <button className="acct-pill" title="Switch account" onClick={() => setAccountOpen(v => !v)}>
+            <span className="av">L</span>
+            <span>{conv?.businessId ? `Business ${String(conv.businessId).slice(0, 4)}` : 'Loomé'}</span>
+            <I.Caret />
+          </button>
+          {accountOpen && (
+            <div className="pop-menu account-menu">
+              <button onClick={() => { onRefresh(); setAccountOpen(false); }}>Refresh accounts</button>
+              <button onClick={() => { window.open(`${API_BASE}/connect-instagram`, '_blank'); setAccountOpen(false); }}>Connect Instagram</button>
+              <button onClick={() => { window.open(`${API_BASE}/connect-facebook`, '_blank'); setAccountOpen(false); }}>Connect Facebook</button>
+            </div>
+          )}
+        </div>
+      </div>
+      {activeView === 'inbox' ? (
+        <ThreadHead
+          conv={conv}
+          aiOn={aiOn}
+          canToggleAi={canToggleAi}
+          onToggleAi={onToggleAi}
+          t={t}
+          onPin={onPin}
+          onArchive={onArchive}
+          onDelete={onDelete}
+          onMore={onMore}
+          moreOpen={moreOpen}
+        />
+      ) : (
+        <div className="topbar-thread workspace-top-title">
+          <span>{workspaceNames[activeView] || w.workspace}</span>
+        </div>
+      )}
+      <div className="topbar-right">
+        <div className="lang">
+          {['en', 'uz', 'ru'].map(l => (
+            <button key={l} className={lang === l ? 'on' : ''} onClick={() => setLang(l)}>{l}</button>
+          ))}
+        </div>
+        <button className="theme-btn" title="Theme" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
+          {theme === 'dark' ? <I.Sun /> : <I.Moon />}
+        </button>
+        <button className="icon-btn" title="Notifications" onClick={() => { onRefresh(); onToast('Inbox refreshed'); }} style={{ background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 8 }}>
+          <I.Bell />
+        </button>
+        <div className="menu-wrap">
+          <button className="profile" onClick={() => setProfileOpen(v => !v)}>
+            <span className="av">{userProfile?.photo ? <img src={userProfile.photo} alt={displayName} /> : initials}</span>
+            <span>{displayName}</span>
+            <I.Caret />
+          </button>
+          {profileOpen && (
+            <div className="pop-menu profile-menu">
+              <button onClick={() => { onOpenProfile?.(); setProfileOpen(false); }}>Profile settings</button>
+              <button onClick={() => fileInputRef.current?.click()}>Change photo</button>
+              <button onClick={() => { window.localStorage.removeItem('instaagent_dashboard_secret'); window.sessionStorage.removeItem('instaagent_dashboard_secret'); onToast('Dashboard secret cleared'); }}>Clear secret</button>
+              <button onClick={onSignOut}>Sign out</button>
+            </div>
+          )}
+          <input ref={fileInputRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={uploadAvatar} />
+        </div>
+      </div>
+    </header>
+  );
+}
+
+// ---------- App root ----------
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "theme": "light"
+}/*EDITMODE-END*/;
+
+function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
+  const t = window.STRINGS[lang];
+  const cachedConversationsRef = useRef(loadCachedConversations());
+  const cachedThreadsRef = useRef(loadCachedThreads());
+  const hasCachedInbox = cachedConversationsRef.current.items.length > 0;
+  const [booting, setBooting] = useState(!hasCachedInbox);
+
+  const [conversations, setConversations] = useState(() => cachedConversationsRef.current.items);
+  const [selectedId, setSelectedId] = useState(() => cachedConversationsRef.current.selectedId || cachedConversationsRef.current.items[0]?.id || '');
+  const [threads, setThreads] = useState(() => cachedThreadsRef.current);
+  const [loading, setLoading] = useState(false);
+  const [threadLoading, setThreadLoading] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [apiError, setApiError] = useState('');
+  const [liveMode, setLiveMode] = useState(false);
+  const [stats, setStats] = useState(null);
+  const [posts, setPosts] = useState([]);
+  const [postsLoading, setPostsLoading] = useState(false);
+  const [postsError, setPostsError] = useState('');
+  const [selectedPostId, setSelectedPostId] = useState('');
+  const [growthAnalyzer, setGrowthAnalyzer] = useState(null);
+  const [growthAnalyzerLoading, setGrowthAnalyzerLoading] = useState(false);
+  const [growthAnalyzerError, setGrowthAnalyzerError] = useState('');
+  const [activeView, setActiveView] = useState('inbox');
+  const [toast, setToast] = useState('');
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [businesses, setBusinesses] = useState([]);
+  const [selectedBusinessId, setSelectedBusinessId] = useState('');
+  const [ownerEmail, setOwnerEmail] = useState(resolvedOwnerEmail());
+  const [promptSettings, setPromptSettings] = useState({});
+  const [promptLoading, setPromptLoading] = useState(false);
+  const [promptSaving, setPromptSaving] = useState(false);
+  const [promptGeneratorState, setPromptGeneratorState] = useState({});
+  const [operatorAccounts, setOperatorAccounts] = useState([]);
+  const [leadStages, setLeadStages] = useState(() => readStoredObject(LEAD_STAGES_STORAGE_KEY));
+  const [leadPrices, setLeadPrices] = useState(() => readStoredObject(LEAD_PRICES_STORAGE_KEY));
+  const [clientOwners, setClientOwners] = useState(() => readStoredObject(CLIENT_OWNERS_STORAGE_KEY));
+  const [manualClients, setManualClients] = useState(() => {
+    const stored = readStoredObject(MANUAL_CLIENTS_STORAGE_KEY);
+    return Array.isArray(stored.items) ? stored.items : [];
+  });
+  const [manualLeads, setManualLeads] = useState(() => {
+    const stored = readStoredObject(MANUAL_LEADS_STORAGE_KEY);
+    return Array.isArray(stored.items) ? stored.items : [];
+  });
+  const [operatorDeals, setOperatorDeals] = useState(() => readStoredObject(OPERATOR_DEALS_STORAGE_KEY));
+  const [operatorAdminNotes, setOperatorAdminNotes] = useState(() => {
+    const stored = readStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY);
+    return Array.isArray(stored.items) ? stored.items : [];
+  });
+  const [aiOverrides, setAiOverrides] = useState(() => readStoredObject(AI_OVERRIDE_STORAGE_KEY));
+  const [deletedConversations, setDeletedConversations] = useState(() => readStoredObject(DELETED_CONVERSATIONS_STORAGE_KEY));
+  const [userProfile, setUserProfile] = useState(() => readUserProfile(currentUser));
+  const selectedIdRef = useRef(selectedId);
+  const liveModeRef = useRef(liveMode);
+  const aiOverridesRef = useRef(aiOverrides);
+  const deletedConversationsRef = useRef(deletedConversations);
+  const threadPollBusy = useRef(false);
+  const inboxPollBusy = useRef(false);
+  const statsPollBusy = useRef(false);
+  const threadWarmupRunningRef = useRef(0);
+  const threadWarmupQueueRef = useRef([]);
+  const threadWarmupSeenRef = useRef(new Set());
+  const threadLoadPromisesRef = useRef({});
+  const localOutboundMessagesRef = useRef({});
+  const businessesRef = useRef([]);
+  const workspaceStateHydratedRef = useRef(false);
+  const workspaceStateTimersRef = useRef({});
+  const seenOperatorTaskIdsRef = useRef(new Set());
+  const conv = conversations.find(c => c.id === selectedId);
+  const aiOn = conv ? conv.aiOn : false;
+  const cachedSelectedMessages = getThreadMessages(threads[selectedId]);
+  const messages = cachedSelectedMessages.length
+    ? cachedSelectedMessages
+    : (conv?.preview
+      ? [{
+        id: `preview-${selectedId || 'thread'}`,
+        side: 'inbound',
+        type: 'text',
+        time: conv?.lastTime || '',
+        text: conv?.preview || '',
+        isPreview: true,
+      }]
+      : window.getThread(selectedId));
+  const roleScope = resolveRoleScope(currentUser, businesses);
+  const isOperator = roleScope.isOperator;
+  const currentOwnerLabel = userOwnerLabel(currentUser);
+
+  const [theme, setTheme] = useState(TWEAK_DEFAULTS.theme);
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [theme]);
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  useEffect(() => {
+    writeStoredObject(CACHED_CONVERSATIONS_STORAGE_KEY, {
+      items: conversations,
+      selectedId: selectedId || conversations[0]?.id || '',
+      updatedAt: Date.now(),
+    });
+  }, [conversations, selectedId]);
+
+  useEffect(() => {
+    writeStoredObject(CACHED_THREADS_STORAGE_KEY, {
+      items: trimThreadCache(threads),
+      updatedAt: Date.now(),
+    });
+  }, [threads]);
+
+  useEffect(() => {
+    liveModeRef.current = liveMode;
+  }, [liveMode]);
+
+  useEffect(() => {
+    aiOverridesRef.current = aiOverrides;
+  }, [aiOverrides]);
+
+  useEffect(() => {
+    deletedConversationsRef.current = deletedConversations;
+  }, [deletedConversations]);
+
+  useEffect(() => {
+    if (!isOperator) return;
+    const keys = operatorRecipientKeys(currentUser);
+    const visibleTasks = (operatorAdminNotes || []).filter(note => isTaskForOperator(note, keys));
+    if (!visibleTasks.length) return;
+
+    const seen = seenOperatorTaskIdsRef.current;
+    if (!seen.size) {
+      visibleTasks.forEach(task => seen.add(String(task.id)));
+      return;
     }
 
+    const fresh = visibleTasks.filter(task => !seen.has(String(task.id)));
+    if (!fresh.length) return;
+    fresh.forEach(task => seen.add(String(task.id)));
+    showToast(`New task from admin: ${fresh[0]?.text || ''}`.trim());
+  }, [isOperator, currentUser, operatorAdminNotes]);
 
-def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: str = "", access_token: str = "") -> dict:
-    if catalog_matcher_module is not None:
-        try:
-            return catalog_matcher_module.analyze_media_for_sales_reply(
-                media_url=media_url,
-                user_text=user_text,
-                media_type=media_type,
-                access_token=access_token,
-            )
-        except Exception as exc:
-            log("catalog_matcher delegation failed", {"error": str(exc)})
-    media_url = normalize_id(media_url)
-    if not PRODUCT_MATCHER_ENABLED or not PRODUCT_MATCHER_API_URLS or not media_url:
-        if PRODUCT_MATCHER_LOCAL_ENABLED and PRODUCT_MATCHER_ENABLED and media_url:
-            return analyze_media_for_sales_reply_local(
-                media_url=media_url,
-                user_text=user_text,
-                media_type=media_type,
-                access_token=access_token,
-            )
-        return {}
-    local_result = analyze_media_for_sales_reply_local(
-        media_url=media_url,
-        user_text=user_text,
-        media_type=media_type,
-        access_token=access_token,
-    )
-    if local_result:
-        return local_result
-    if PRODUCT_MATCHER_LOCAL_ONLY:
-        return {}
-    if media_type and media_type not in {"photo", "video", "file"}:
-        return {}
+  useEffect(() => {
+    setUserProfile(readUserProfile(currentUser));
+  }, [currentUser?.ownerEmail, currentUser?.email]);
 
-    payload = {
-        "media_url": media_url,
-        "user_message": user_text or "",
-        "language": media_matcher_language(user_text),
-        "top_k": PRODUCT_MATCHER_TOP_K,
+  const showToast = (message) => {
+    setToast(message);
+    window.clearTimeout(showToast.timer);
+    showToast.timer = window.setTimeout(() => setToast(''), 2200);
+  };
+
+  const updateUserProfile = (patch = {}) => {
+    const next = saveUserProfile(currentUser, patch);
+    setUserProfile(next);
+  };
+
+  const loadStats = async () => {
+    try {
+      const data = await API.get('/api/v2/stats');
+      setStats(data.data || null);
+    } catch (e) {
+      setStats(null);
     }
-    body = {}
-    last_upload_error = ""
-    last_url_error = ""
+  };
 
-    try:
-        media_bytes, filename, mime_type = download_media_for_matcher(media_url, access_token=access_token)
-    except Exception as exc:
-        media_bytes = b""
-        filename = ""
-        mime_type = ""
-        last_upload_error = f"download: {exc}"
+  const loadGrowthAnalyzer = async (businessId = selectedBusinessId, { silent = false, noCache = false } = {}) => {
+    const business = String(businessId || '').trim();
+    if (!business) {
+      setGrowthAnalyzer(null);
+      setGrowthAnalyzerError('');
+      return null;
+    }
+    if (!silent) setGrowthAnalyzerLoading(true);
+    try {
+      const data = await API.get(`/api/v2/instagram-growth-analyzer?business_id=${encodeURIComponent(business)}&days=30&no_cache=${noCache ? '1' : '0'}`);
+      setGrowthAnalyzer(data?.data || null);
+      setGrowthAnalyzerError('');
+      return data?.data || null;
+    } catch (e) {
+      setGrowthAnalyzer(null);
+      setGrowthAnalyzerError(e.message || 'Could not load growth analysis');
+      return null;
+    } finally {
+      if (!silent) setGrowthAnalyzerLoading(false);
+    }
+  };
 
-    if media_bytes:
-        upload_data = {
-            "user_message": user_text or "",
-            "language": media_matcher_language(user_text),
-            "top_k": str(PRODUCT_MATCHER_TOP_K),
+  const resolveBusinessId = (candidate = '') => {
+    const direct = String(candidate || '').trim();
+    if (direct) return direct;
+    const selected = String(selectedBusinessId || '').trim();
+    if (selected) return selected;
+    const fromCurrentConversation = String((conv || {}).businessId || '').trim();
+    if (fromCurrentConversation) return fromCurrentConversation;
+    const fromSelectedConversation = String(
+      (conversations || []).find(item => item.id === (selectedIdRef.current || selectedId))?.businessId || '',
+    ).trim();
+    if (fromSelectedConversation) return fromSelectedConversation;
+    const fromConversationList = String((conversations || []).find(item => item.businessId)?.businessId || '').trim();
+    if (fromConversationList) return fromConversationList;
+    const fromRef = String((businessesRef.current || [])[0]?.id || '').trim();
+    if (fromRef) return fromRef;
+    const fromState = String((businesses || [])[0]?.id || '').trim();
+    return fromState;
+  };
+
+  const loadInstagramPosts = async (businessId = selectedBusinessId, { refresh = false, silent = false } = {}) => {
+    let business = resolveBusinessId(businessId);
+    if (!business) {
+      await loadBusinesses({ silent: true });
+      business = resolveBusinessId(businessId);
+    }
+    if (!business) {
+      setPosts([]);
+      setSelectedPostId('');
+      setPostsError('');
+      return [];
+    }
+    if (!silent) setPostsLoading(true);
+    try {
+      const data = await API.get(
+        `/api/v2/instagram-posts?business_id=${encodeURIComponent(business)}&refresh=${refresh ? '1' : '0'}&limit=300`,
+        { timeoutMs: refresh ? 180000 : 60000 },
+      );
+      const rows = Array.isArray(data?.data) ? data.data : [];
+      setPosts(rows);
+      setSelectedPostId((current) => (rows.some(item => item.post_id === current) ? current : (rows[0]?.post_id || '')));
+      setPostsError('');
+      return rows;
+    } catch (e) {
+      setPosts([]);
+      setSelectedPostId('');
+      setPostsError(e.message || 'Could not load posts');
+      return [];
+    } finally {
+      if (!silent) setPostsLoading(false);
+    }
+  };
+
+  const importInstagramPosts = async (businessId = selectedBusinessId) => {
+    let business = resolveBusinessId(businessId);
+    if (!business) {
+      await loadBusinesses({ silent: true });
+      business = resolveBusinessId(businessId);
+    }
+    if (!business) {
+      showToast('No business found. Please connect/select a business first.');
+      return [];
+    }
+    if (!String(selectedBusinessId || '').trim() || String(selectedBusinessId).trim() !== business) {
+      setSelectedBusinessId(business);
+    }
+    setPostsLoading(true);
+    try {
+      const data = await API.postJson(
+        '/api/v2/instagram-posts/import',
+        { business_id: business, max_items: 300 },
+        { timeoutMs: 180000 },
+      );
+      const rows = Array.isArray(data?.data) ? data.data : [];
+      setPosts(rows);
+      setSelectedPostId(rows[0]?.post_id || '');
+      setPostsError('');
+      showToast(`Imported ${rows.length} posts`);
+      return rows;
+    } catch (e) {
+      setPostsError(e.message || 'Could not import posts');
+      showToast(e.message || 'Could not import posts');
+      return [];
+    } finally {
+      setPostsLoading(false);
+    }
+  };
+
+  const saveInstagramPostInfo = async (postId, extraInfo) => {
+    const business = resolveBusinessId(selectedBusinessId);
+    if (!business || !postId) return;
+    try {
+      await API.postJson('/api/v2/instagram-posts/extra-info', {
+        business_id: business,
+        post_id: postId,
+        extra_info: extraInfo || '',
+      });
+      setPosts(items => items.map(item => item.post_id === postId ? { ...item, extra_info: extraInfo || '' } : item));
+      showToast((WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en).postSaved);
+    } catch (e) {
+      showToast(e.message || 'Could not save post info');
+    }
+  };
+
+  const loadWorkspaceState = async (businessId = selectedBusinessId) => {
+    const business = String(businessId || '').trim();
+    if (!business || !liveModeRef.current) return;
+    try {
+      const response = await API.get(`/api/v2/workspace-state?business_id=${encodeURIComponent(business)}`);
+      const state = response?.data || {};
+      workspaceStateHydratedRef.current = true;
+
+      if (state.lead_stages && typeof state.lead_stages === 'object') {
+        setLeadStages(state.lead_stages);
+        writeStoredObject(LEAD_STAGES_STORAGE_KEY, state.lead_stages);
+      }
+      if (state.lead_prices && typeof state.lead_prices === 'object') {
+        setLeadPrices(state.lead_prices);
+        writeStoredObject(LEAD_PRICES_STORAGE_KEY, state.lead_prices);
+      }
+      if (state.client_owners && typeof state.client_owners === 'object') {
+        setClientOwners(state.client_owners);
+        writeStoredObject(CLIENT_OWNERS_STORAGE_KEY, state.client_owners);
+      }
+      if (state.manual_clients && typeof state.manual_clients === 'object') {
+        const clientIds = Array.isArray(state.manual_clients.items) ? state.manual_clients.items.map(String).filter(Boolean) : [];
+        setManualClients(clientIds);
+        writeStoredObject(MANUAL_CLIENTS_STORAGE_KEY, { items: clientIds });
+      }
+      if (state.manual_leads && typeof state.manual_leads === 'object') {
+        const leads = Array.isArray(state.manual_leads.items) ? state.manual_leads.items.filter(Boolean) : [];
+        setManualLeads(leads);
+        writeStoredObject(MANUAL_LEADS_STORAGE_KEY, { items: leads });
+      }
+      if (state.operator_deals && typeof state.operator_deals === 'object') {
+        setOperatorDeals(state.operator_deals);
+        writeStoredObject(OPERATOR_DEALS_STORAGE_KEY, state.operator_deals);
+      }
+      if (state.operator_admin_notes && typeof state.operator_admin_notes === 'object') {
+        const notes = Array.isArray(state.operator_admin_notes.items) ? state.operator_admin_notes.items : [];
+        setOperatorAdminNotes(notes);
+        writeStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY, { items: notes });
+      }
+    } catch (e) {
+      workspaceStateHydratedRef.current = true;
+    }
+  };
+
+  const loadOperatorTasks = async (businessId = selectedBusinessId, { forMe = true, silent = true } = {}) => {
+    const business = String(businessId || '').trim();
+    if (!business || !liveModeRef.current) return [];
+    try {
+      const data = await API.get(`/api/v2/operator-tasks?business_id=${encodeURIComponent(business)}&for_me=${forMe ? '1' : '0'}`);
+      const rows = Array.isArray(data?.data) ? data.data : [];
+      setOperatorAdminNotes(rows);
+      writeStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY, { items: rows });
+      return rows;
+    } catch (e) {
+      if (!silent) showToast(e.message || 'Could not load tasks');
+      return [];
+    }
+  };
+
+  const queueWorkspaceStateSave = (statePatch = {}) => {
+    if (!liveModeRef.current || !workspaceStateHydratedRef.current) return;
+    const business = String(selectedBusinessId || '').trim();
+    if (!business) return;
+
+    Object.entries(statePatch).forEach(([key, value]) => {
+      window.clearTimeout(workspaceStateTimersRef.current[key]);
+      workspaceStateTimersRef.current[key] = window.setTimeout(async () => {
+        try {
+          await API.postJson('/api/v2/workspace-state', {
+            business_id: business,
+            state: { [key]: value },
+          });
+        } catch (e) {
+          // Keep local UX fast; backend sync can retry on the next edit.
         }
-        upload_files = {"file": (filename, media_bytes, mime_type)}
-        for matcher_url in PRODUCT_MATCHER_API_URLS:
-            upload_url = product_matcher_file_url(matcher_url)
-            try:
-                response = requests.post(
-                    upload_url,
-                    data=upload_data,
-                    files=upload_files,
-                    timeout=max(PRODUCT_MATCHER_TIMEOUT_SECONDS, 90),
-                )
-            except Exception as exc:
-                last_upload_error = f"{upload_url}: {exc}"
-                continue
-            if not response.ok:
-                last_upload_error = f"{upload_url}: HTTP {response.status_code}"
-                continue
-            body = safe_json(response)
-            if isinstance(body, dict) and body.get("status") == "ok":
-                break
-            last_upload_error = f"{upload_url}: invalid response shape"
-        else:
-            body = {}
+      }, 450);
+    });
+  };
 
-    if not (isinstance(body, dict) and body.get("status") == "ok"):
-        for matcher_url in PRODUCT_MATCHER_API_URLS:
-            url_endpoint = product_matcher_url_url(matcher_url)
-            try:
-                response = requests.post(
-                    url_endpoint,
-                    json=payload,
-                    timeout=max(PRODUCT_MATCHER_TIMEOUT_SECONDS, 90),
-                )
-            except Exception as exc:
-                last_url_error = f"{url_endpoint}: {exc}"
-                continue
-            if not response.ok:
-                last_url_error = f"{url_endpoint}: HTTP {response.status_code}"
-                continue
-            body = safe_json(response)
-            if isinstance(body, dict) and body.get("status") == "ok":
-                break
-            last_url_error = f"{url_endpoint}: invalid response shape"
-        else:
-            body = {}
+  const downloadOperatorReport = async () => {
+    const business = resolveBusinessId(selectedBusinessId);
+    if (!business) {
+      showToast('Select a business first');
+      return;
+    }
+    try {
+      const response = await API.fetchWithTimeout(
+        `${API_BASE}${scopedPath(`/api/v2/operator-deals/report.pdf?business_id=${encodeURIComponent(business)}`)}`,
+        { headers: apiHeaders() },
+        45000,
+      );
+      if (!response.ok) {
+        let message = `Request failed: ${response.status}`;
+        try {
+          const data = await response.json();
+          message = apiErrorMessage(data, response.status);
+        } catch (e) {
+          // PDF endpoint may not return JSON on infrastructure errors.
+        }
+        throw new Error(message);
+      }
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `operator-deals-${business}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      showToast('Operator report downloaded');
+    } catch (e) {
+      showToast(e.message || 'Could not download report');
+    }
+  };
 
-    if not (isinstance(body, dict) and body.get("status") == "ok"):
-        log("Media matcher call failed", {"upload_mode": last_upload_error or "n/a", "url_mode": last_url_error or "n/a"})
-        return {}
+  const loadBusinesses = async ({ silent = false, ownerEmailOverride = '' } = {}) => {
+    try {
+      const data = await API.get('/api/businesses');
+      const rows = data.data || [];
+      businessesRef.current = rows;
+      setBusinesses(rows);
+      setSelectedBusinessId(current => rows.some(item => item.id === current) ? current : rows[0]?.id || '');
+      return rows;
+    } catch (e) {
+      if (!silent) showToast(e.message);
+      businessesRef.current = [];
+      return [];
+    }
+  };
 
-    matches = body.get("matches") if isinstance(body.get("matches"), list) else []
-    top = matches[0] if matches else {}
-    top_score = _safe_score(top.get("score"))
-    extracted_codes = body.get("extracted_codes") if isinstance(body.get("extracted_codes"), list) else []
-    code = normalize_id(top.get("product_code"))
-    model = normalize_id(top.get("model_code"))
-    price = normalize_id(top.get("price"))
-    currency = normalize_id(top.get("currency"))
-    matcher_debug = body.get("debug") if isinstance(body.get("debug"), dict) else {}
-    has_match_identity = bool(code or model or price)
-    accepted_by_score = top_score >= PRODUCT_MATCHER_MIN_SCORE
-    accepted_by_code = bool(extracted_codes)
-    accepted_weak_match = has_match_identity and top_score >= PRODUCT_MATCHER_WEAK_MIN_SCORE
+  const loadPromptSettings = async (businessId = selectedBusinessId, { silent = false } = {}) => {
+    if (!businessId) return {};
+    setPromptLoading(true);
+    try {
+      const data = await API.get(`/api/ai-prompt-settings/${encodeURIComponent(businessId)}`);
+      const next = data.data || {};
+      setPromptSettings(next);
+      return next;
+    } catch (e) {
+      if (!silent) showToast(e.message);
+      return {};
+    } finally {
+      setPromptLoading(false);
+    }
+  };
 
-    log("Media matcher response summary", {
-        "match_count": len(matches),
-        "top_score": round(top_score, 4),
-        "top_product_code": code,
-        "top_model_code": model,
-        "has_price": bool(price),
-        "extracted_codes": [normalize_id(x) for x in extracted_codes[:6]],
-        "min_required_score": PRODUCT_MATCHER_MIN_SCORE,
-        "weak_min_score": PRODUCT_MATCHER_WEAK_MIN_SCORE,
-        "accepted_by_score": accepted_by_score,
-        "accepted_by_code": accepted_by_code,
-        "accepted_weak_match": accepted_weak_match,
-        "clip_available": matcher_debug.get("clip_available"),
-        "clip_loaded": matcher_debug.get("clip_loaded"),
-        "matcher_min_fusion_score": matcher_debug.get("min_fusion_score"),
-    })
+  const loadOperatorAccounts = async (businessId = selectedBusinessId) => {
+    try {
+      const business = String(businessId || '').trim();
+      const endpoint = business
+        ? `/api/v2/operators?business_id=${encodeURIComponent(business)}`
+        : '/api/v2/operators';
+      const fallback = await API.get(endpoint);
+      const rows = fallback.data || [];
+      setOperatorAccounts(rows);
+      return rows;
+    } catch {
+      setOperatorAccounts([]);
+      return [];
+    }
+  };
 
-    if not (accepted_by_score or accepted_by_code or accepted_weak_match):
-        log("Media matcher rejected by score", {
-            "top_score": round(top_score, 4),
-            "top_product_code": code,
-            "top_model_code": model,
-            "match_count": len(matches),
-            "min_required_score": PRODUCT_MATCHER_MIN_SCORE,
-            "weak_min_score": PRODUCT_MATCHER_WEAK_MIN_SCORE,
+  const updatePromptSetting = (key, value) => {
+    setPromptSettings(settings => ({ ...settings, [key]: value }));
+  };
+
+  const generatePromptSuggestion = async (field, currentPrompt, goal) => {
+    const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
+    if (goal === 'decline') {
+      setPromptGeneratorState(state => ({ ...state, [field]: {} }));
+      return;
+    }
+
+    if (!selectedBusinessId) {
+      const fallback = localPromptSuggestion(field, currentPrompt, goal);
+      setPromptGeneratorState(state => ({
+        ...state,
+        [field]: {
+          loading: false,
+          suggestedPrompt: fallback.suggested_prompt,
+          explanation: `${fallback.explanation} ${w.noBusinessLocal}`,
+        },
+      }));
+      showToast(w.promptLocal);
+      return;
+    }
+
+    setPromptGeneratorState(state => ({
+      ...state,
+      [field]: { ...(state[field] || {}), loading: true },
+    }));
+
+    try {
+      const data = await API.postJson('/api/v2/ai-prompt/generate', {
+        business_id: selectedBusinessId,
+        field,
+        current_prompt: currentPrompt || '',
+        goal,
+      });
+      setPromptGeneratorState(state => ({
+        ...state,
+        [field]: {
+          loading: false,
+          suggestedPrompt: data.suggested_prompt || data.data?.suggested_prompt || '',
+          explanation: data.explanation || data.data?.explanation || '',
+        },
+      }));
+      showToast(w.promptReady);
+    } catch (e) {
+      const fallback = localPromptSuggestion(field, currentPrompt, goal);
+      setPromptGeneratorState(state => ({
+        ...state,
+        [field]: {
+          loading: false,
+          suggestedPrompt: fallback.suggested_prompt,
+          explanation: `${fallback.explanation} ${w.backendUnavailableLocal}`,
+        },
+      }));
+      showToast(w.promptLocal);
+    }
+  };
+
+  const savePromptSettings = async () => {
+    if (!selectedBusinessId) {
+      showToast('Select a business first');
+      return;
+    }
+
+    setPromptSaving(true);
+    try {
+      const data = await API.postJson('/api/ai-prompt-settings', {
+        business_id: selectedBusinessId,
+        settings: promptSettings,
+      });
+      setPromptSettings(data.data || promptSettings);
+      showToast('AI prompt settings saved');
+    } catch (e) {
+      setApiError(e.message);
+      showToast(e.message);
+    } finally {
+      setPromptSaving(false);
+    }
+  };
+
+  const refreshWorkspace = async () => {
+    await Promise.all([
+      loadConversations({ sideLoad: false }),
+      loadStats(),
+      loadBusinesses(),
+      loadPromptSettings(selectedBusinessId, { silent: true }),
+      loadInstagramPosts(selectedBusinessId, { refresh: false, silent: true }),
+      loadGrowthAnalyzer(selectedBusinessId, { silent: true, noCache: true }),
+      loadOperatorAccounts(selectedBusinessId),
+      loadWorkspaceState(selectedBusinessId),
+      loadOperatorTasks(selectedBusinessId, { forMe: isOperator, silent: true }),
+    ]);
+    showToast('Workspace refreshed');
+  };
+
+  const rememberAiOverride = (conversationId, enabled) => {
+    setAiOverrides(prev => {
+      const next = { ...prev, [conversationId]: enabled === true };
+      writeStoredObject(AI_OVERRIDE_STORAGE_KEY, next);
+      return next;
+    });
+  };
+
+  const rememberDeletedConversation = (conversationId) => {
+    setDeletedConversations(prev => {
+      const next = { ...prev, [conversationId]: true };
+      writeStoredObject(DELETED_CONVERSATIONS_STORAGE_KEY, next);
+      return next;
+    });
+  };
+
+  const rememberedLocalOutboundMessages = (conversationId) => {
+    const now = Date.now();
+    const rows = localOutboundMessagesRef.current[conversationId] || [];
+    const fresh = rows.filter(message => (now - Number(message.sentAt || now)) <= LOCAL_OUTBOUND_TTL_MS);
+    localOutboundMessagesRef.current[conversationId] = fresh;
+    return fresh;
+  };
+
+  const rememberLocalOutboundMessage = (conversationId, message) => {
+    if (!conversationId || !message?.id) return;
+    const existing = rememberedLocalOutboundMessages(conversationId).filter(item => item.id !== message.id);
+    localOutboundMessagesRef.current[conversationId] = [...existing, message];
+  };
+
+  const updateLocalOutboundMessage = (conversationId, messageId, updates) => {
+    if (!conversationId || !messageId) return;
+    localOutboundMessagesRef.current[conversationId] = rememberedLocalOutboundMessages(conversationId).map(item => (
+      item.id === messageId ? { ...item, ...updates } : item
+    ));
+  };
+
+  const removeConversationFromUi = (conversationId) => {
+    setConversations(cs => {
+      const next = cs.filter(c => c.id !== conversationId);
+      setSelectedId(current => current === conversationId ? next[0]?.id || '' : current);
+      return next;
+    });
+    setThreads(prev => {
+      const next = { ...prev };
+      delete next[conversationId];
+      return next;
+    });
+  };
+
+  const loadConversations = async ({ sideLoad = true, silent = false, ownerEmailOverride = '' } = {}) => {
+    if (!silent) setLoading(true);
+    try {
+      if (sideLoad || !businessesRef.current.length) {
+        await loadBusinesses({ silent: true, ownerEmailOverride });
+      }
+      const data = await API.get('/api/v2/conversations?no_cache=1&fast=1', { timeoutMs: 25000 });
+      const selectedCurrent = selectedIdRef.current;
+      const ownerScoped = normalizeOwnerEmail(ownerEmailOverride || ownerEmail);
+      const allowedBusinessIds = new Set((businessesRef.current || []).map(row => row.id).filter(Boolean));
+      const next = (data.data || [])
+        .map(normalizeConversation)
+        .filter(item => {
+          if (allowedBusinessIds.size && item.businessId) return allowedBusinessIds.has(item.businessId);
+          if (!ownerScoped) return true;
+          return conversationOwnerEmail(item) === ownerScoped;
         })
-        return {}
+        .filter(item => !deletedConversationsRef.current[item.id])
+        .map(item => Object.prototype.hasOwnProperty.call(aiOverridesRef.current, item.id)
+          ? { ...item, aiOn: aiOverridesRef.current[item.id] === true }
+          : item)
+        .map(item => item.id === selectedCurrent ? clearConversationUnread(item) : item)
+        .map(item => {
+          const localMessages = rememberedLocalOutboundMessages(item.id);
+          const latestLocal = localMessages[localMessages.length - 1];
+          if (!latestLocal) return item;
+          return {
+            ...item,
+            preview: latestLocal.text,
+            lastTime: 'now',
+            lastFromMe: true,
+            kpis: { ...(item.kpis || {}), last: 'now' },
+          };
+        });
+      if (!next.length) {
+        setConversations([]);
+        setSelectedId('');
+        setLiveMode(true);
+        setApiError('');
+        return true;
+      }
+      setConversations(next);
+      setSelectedId(current => next.some(c => c.id === current) ? current : next[0].id);
+      setLiveMode(true);
+      setApiError('');
+      // Warm all threads in background so chat switches feel instant.
+      window.setTimeout(() => warmupConversationThreads(next, selectedCurrent), 0);
+      if (sideLoad) {
+        loadStats();
+        loadBusinesses({ silent: true });
+      }
+      return true;
+    } catch (e) {
+      const isAbort = /aborted|aborterror|signal is aborted/i.test(String(e?.message || ''));
+      if (silent) {
+        if (!isAbort) setApiError(`Live sync delayed: ${e.message}`);
+        return false;
+      }
+      if (isLocalDevDashboardMode()) {
+        setLiveMode(true);
+        setApiError('');
+        setConversations([]);
+        setSelectedId('');
+        return false;
+      }
+      setLiveMode(false);
+      setApiError(isAbort ? 'Loading... please wait' : `Loading... please wait (${e.message})`);
+      // Keep cached conversations visible when live sync is slow/failing.
+      if (!conversations.length) {
+        setConversations([]);
+        setSelectedId('');
+      }
+      return false;
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  };
 
-    parts = []
-    if code:
-        parts.append(f"code={code}")
-    if model:
-        parts.append(f"model={model}")
-    if price:
-        parts.append(f"price={price} {currency}".strip())
+  useEffect(() => {
+    if (!apiError) return;
+    if (!/unauthorized/i.test(String(apiError))) return;
+    onAuthExpired?.();
+  }, [apiError, onAuthExpired]);
 
-    alternatives = []
-    for item in matches[1:3]:
-        alt_code = normalize_id(item.get("product_code"))
-        alt_model = normalize_id(item.get("model_code"))
-        alt_score = _safe_score(item.get("score"))
-        if alt_code or alt_model:
-            alternatives.append(f"{alt_code or alt_model} ({alt_score:.2f})")
+  const saveOwnerEmailScope = async (value) => {
+    const clean = normalizeOwnerEmail(value);
+    if (clean) {
+      window.localStorage.setItem(OWNER_EMAIL_STORAGE_KEY, clean);
+    } else {
+      window.localStorage.removeItem(OWNER_EMAIL_STORAGE_KEY);
+    }
+    setOwnerEmail(clean);
+    setSelectedBusinessId('');
+    await loadBusinesses({ ownerEmailOverride: clean });
+    await loadConversations({ sideLoad: false, ownerEmailOverride: clean });
+    showToast(clean ? `Owner scoped to ${clean}` : 'Owner scope cleared');
+  };
 
-    context_lines = [
-        "Product media analysis (high-priority context for this customer message):",
-        f"- Top match confidence: {top_score:.2f}",
-    ]
-    if parts:
-        context_lines.append(f"- Top match details: {', '.join(parts)}")
-    if extracted_codes:
-        context_lines.append(f"- Extracted codes from media/text: {', '.join(str(x) for x in extracted_codes[:6])}")
-    if alternatives:
-        context_lines.append(f"- Alternatives: {', '.join(alternatives)}")
-    context_lines.append("- Use this to answer product/price questions for the attached media.")
+  const loadThread = async (conversationId, { silent = false, markRead = true, limit = 200, noCache = false } = {}) => {
+    if (!conversationId || !liveMode) return;
+    const inFlight = threadLoadPromisesRef.current[conversationId];
+    if (inFlight) return inFlight;
+    if (!silent) setThreadLoading(true);
+    const request = (async () => {
+      try {
+        const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?mark_read=${markRead ? '1' : '0'}&limit=${Math.max(1, Number(limit || 200))}&no_cache=${noCache ? '1' : '0'}`);
+        const normalized = (data.data || []).map(normalizeMessage);
+        setThreads(prev => ({
+          ...prev,
+          [conversationId]: {
+            updatedAt: Date.now(),
+            messages: mergeLocalOutboundMessages(
+              normalized,
+              getThreadMessages(prev[conversationId]),
+              rememberedLocalOutboundMessages(conversationId)
+            ),
+          },
+        }));
+        setConversations(rows => rows.map(item => item.id === conversationId ? clearConversationUnread(item) : item));
+        setApiError('');
+        return true;
+      } catch (e) {
+        setApiError(`${e.message} Showing cached messages.`);
+        return false;
+      } finally {
+        delete threadLoadPromisesRef.current[conversationId];
+        if (!silent) setThreadLoading(false);
+      }
+    })();
+    threadLoadPromisesRef.current[conversationId] = request;
+    return request;
+  };
 
-    return {
-        "context": "\n".join(context_lines),
-        "reply_hint": normalize_id(body.get("llm_reply")) or build_product_match_reply(code, model, price, currency, top_score),
-        "top_score": top_score,
-        "top_match_code": code,
-        "top_match_model": model,
+  const pumpThreadWarmupQueue = () => {
+    if (!liveModeRef.current) return;
+    while (
+      threadWarmupRunningRef.current < THREAD_WARMUP_CONCURRENCY &&
+      threadWarmupQueueRef.current.length > 0
+    ) {
+      const conversationId = threadWarmupQueueRef.current.shift();
+      const currentMessages = getThreadMessages(threads[conversationId]);
+      if (!conversationId || currentMessages.length > 0) continue;
+      threadWarmupRunningRef.current += 1;
+      loadThread(conversationId, { silent: true, markRead: false, limit: 120, noCache: true })
+        .catch(() => false)
+        .finally(() => {
+          threadWarmupRunningRef.current = Math.max(0, threadWarmupRunningRef.current - 1);
+          pumpThreadWarmupQueue();
+        });
+    }
+  };
+
+  const warmupConversationThreads = (rows = [], priorityId = '') => {
+    const queue = [];
+    if (priorityId) queue.push(priorityId);
+    for (const row of rows || []) {
+      if (row?.id) queue.push(row.id);
+    }
+    for (const conversationId of queue) {
+      if (!conversationId) continue;
+      const currentMessages = getThreadMessages(threads[conversationId]);
+      if (currentMessages.length > 0) continue;
+      const seen = threadWarmupSeenRef.current;
+      if (seen.has(conversationId)) continue;
+      seen.add(conversationId);
+      threadWarmupQueueRef.current.push(conversationId);
+    }
+    pumpThreadWarmupQueue();
+  };
+
+  const sendLiveMessage = async (conversation, text, options = {}) => {
+    const payload = {
+      conversation_id: conversation.apiId || conversation.id,
+      text,
+    };
+    if (options.replyToCommentId) payload.reply_to_comment_id = options.replyToCommentId;
+
+    const result = await API.postJson('/api/v2/send-message', payload);
+    const meta = result.meta || result.data || {};
+    if (result.status !== 'ok') {
+      throw new Error(apiErrorMessage(result, 200));
+    }
+    if (meta.ok === false || meta.error || meta.description) {
+      throw new Error(apiErrorMessage({ meta }, 200));
+    }
+    return result;
+  };
+
+  const sendLiveImage = async (conversation, file, caption = '') => {
+    if (!file.type.startsWith('image/')) {
+      throw new Error('Please choose an image file.');
     }
 
-
-def _instagram_media_memory_key(business_id: str, customer_id: str) -> str:
-    business_id = normalize_id(business_id)
-    customer_id = normalize_id(customer_id)
-    if not business_id or not customer_id:
-        return ""
-    return f"{business_id}:{customer_id}"
-
-
-def remember_instagram_media_match(
-    business_id: str,
-    customer_id: str,
-    context: str,
-    reply_hint: str = "",
-    top_match_code: str = "",
-    top_match_model: str = "",
-    top_match_price: str = "",
-    top_match_currency: str = "",
-    match_strategy: str = "",
-    top_score: float = 0.0,
-):
-    key = _instagram_media_memory_key(business_id, customer_id)
-    if not key or not normalize_id(context):
-        return
-    INSTAGRAM_MEDIA_MATCH_MEMORY[key] = {
-        "saved_at": time.time(),
-        "context": normalize_id(context),
-        "reply_hint": normalize_id(reply_hint),
-        "top_match_code": normalize_id(top_match_code),
-        "top_match_model": normalize_id(top_match_model),
-        "top_match_price": normalize_id(top_match_price),
-        "top_match_currency": normalize_id(top_match_currency),
-        "match_strategy": normalize_id(match_strategy),
-        "top_score": _safe_score(top_score),
+    if (file.size > 10 * 1024 * 1024) {
+      throw new Error('Image is too large. Maximum upload size is 10 MB.');
     }
 
+    const fileData = await fileToDataUrl(file);
+    const result = await API.postJson('/dashboard/send-image-file', {
+      business_id: conversation.businessId,
+      conversation_id: conversation.apiId || conversation.id,
+      platform: conversation.platform,
+      channel: conversation.channel || '',
+      customer_id: conversation.customerId || conversation.chatId,
+      chat_id: conversation.chatId || conversation.customerId,
+      caption,
+      file_data: fileData,
+      filename: file.name || 'image.jpg',
+      mime_type: file.type || 'image/jpeg',
+    });
 
-def load_recent_instagram_media_match(business_id: str, customer_id: str) -> dict:
-    key = _instagram_media_memory_key(business_id, customer_id)
-    if not key:
-        return {}
-    payload = INSTAGRAM_MEDIA_MATCH_MEMORY.get(key)
-    if not isinstance(payload, dict):
-        return {}
-    saved_at = float(payload.get("saved_at") or 0.0)
-    if (time.time() - saved_at) > PRODUCT_MATCHER_CONTEXT_TTL_SECONDS:
-        INSTAGRAM_MEDIA_MATCH_MEMORY.pop(key, None)
-        return {}
-    return payload
-
-
-DEFAULT_SIZES_PER_MESHOK = 6
-DEFAULT_ITEMS_PER_SIZE_IN_MESHOK = 10
-DEFAULT_ITEMS_PER_MESHOK = DEFAULT_SIZES_PER_MESHOK * DEFAULT_ITEMS_PER_SIZE_IN_MESHOK
-
-
-def configured_pack_size_rule(business: dict = None) -> str:
-    business = business or {}
-    direct_keys = [
-        "default_pack_size_rule",
-        "default_qop_size_rule",
-        "qop_size_rule",
-        "pack_size_rule",
-        "meshok_size_rule",
-        "telegram_bag",
-    ]
-    for key in direct_keys:
-        value = normalize_id(business.get(key))
-        if value:
-            if key == "telegram_bag":
-                lower_value = value.lower()
-                has_pack_word = any(marker in lower_value for marker in ["qop", "meshok", "мешок", "bag"])
-                has_size_word = any(marker in lower_value for marker in ["razmer", "size", "размер", "o'lcham", "olcham", "өлшем"])
-                if not (has_pack_word and has_size_word):
-                    continue
-            return value
-
-    combined = "\n".join([
-        normalize_id(business.get("knowledge")),
-        normalize_id(business.get("ai_reply_rules")),
-        normalize_id(business.get("faq")),
-    ])
-    for line in combined.splitlines():
-        clean = re.sub(r"\s+", " ", line).strip(" -")
-        lower = clean.lower()
-        if any(marker in lower for marker in ["qop", "meshok", "мешок", "bag"]) and any(marker in lower for marker in ["razmer", "size", "размер", "o'lcham", "olcham", "өлшем"]):
-            return clean
-    return ""
-
-
-def configured_items_per_meshok(business: dict = None) -> int:
-    business = business or {}
-    for key in ["items_per_meshok", "pack_total_items", "default_pack_total_items", "qop_total_items", "meshok_total_items"]:
-        raw = normalize_id(business.get(key))
-        if not raw:
-            continue
-        match = re.search(r"\d+", raw)
-        if match:
-            return max(1, int(match.group(0)))
-
-    rule = configured_pack_size_rule(business)
-    if rule:
-        total_match = re.search(r"(?:jami|total|всего|барлығы|жалпы)\D{0,24}(\d+)", rule, re.IGNORECASE)
-        if total_match:
-            return max(1, int(total_match.group(1)))
-        nums = [int(item) for item in re.findall(r"\d+", rule)]
-        if len(nums) >= 3:
-            return max(1, nums[-1])
-        if len(nums) >= 2:
-            return max(1, nums[0] * nums[1])
-
-    return DEFAULT_ITEMS_PER_MESHOK
-
-
-def default_pack_size_sentence(lang: str = "", include_model_hint: bool = False, business: dict = None) -> str:
-    configured_rule = configured_pack_size_rule(business)
-    if configured_rule:
-        if include_model_hint:
-            hint = {
-                "en": "Send the model and I will confirm the exact size run.",
-                "ru": "Отправьте модель, и я уточню размерный ряд.",
-                "kk": "Модельді жіберсеңіз, нақты өлшемдерін анықтап беремін.",
-            }.get(normalize_id(lang).lower(), "Modelni yuborsangiz, aniq razmerlarini aniqlab beraman.")
-            return f"{configured_rule.rstrip('.!?')}. {hint}"
-        return configured_rule
-
-    lang = normalize_id(lang).lower()
-    if lang == "en":
-        text = "One bag contains 6 different sizes: 10 pieces per size, 60 garments total."
-        if include_model_hint:
-            text += " Send the model and I will confirm the exact size run."
-        return text
-    if lang == "ru":
-        text = "В одном мешке 6 разных размеров: по 10 штук каждого размера, всего 60 единиц одежды."
-        if include_model_hint:
-            text += " Отправьте модель, и я уточню размерный ряд."
-        return text
-    if lang == "kk":
-        text = "1 қаптың ішінде 6 түрлі өлшем бар: әр өлшемнен 10 данадан, барлығы 60 киім болады."
-        if include_model_hint:
-            text += " Модельді жіберсеңіз, нақты өлшемдерін анықтап беремін."
-        return text
-    text = "1 qop ichida 6 xil razmer bor: har bir razmerdan 10 tadan, jami 60 ta kiyim bo'ladi."
-    if include_model_hint:
-        text += " Modelni yuborsangiz, aniq razmerlarini aniqlab beraman."
-    return text
-
-
-def default_pack_count_question(lang: str = "") -> str:
-    lang = normalize_id(lang).lower()
-    if lang == "en":
-        return "How many bags do you need?"
-    if lang == "ru":
-        return "Сколько мешков нужно?"
-    if lang == "kk":
-        return "Қанша қап керек?"
-    return "Nechta qop kerak?"
-
-
-def wants_default_pack_size_info(text: str) -> bool:
-    low = normalize_id(text).lower()
-    if not low:
-        return False
-    size_markers = [
-        "razmer", "razmeri", "razmerlar", "size", "sizes", "размер", "размеры",
-        "o'lcham", "o‘lcham", "olcham", "өлшем",
-    ]
-    pack_markers = ["qop", "meshok", "мешок", "bag", "sack", "upakovka", "упаковка", "пакет"]
-    question_markers = [
-        "ichida", "nechta", "qancha", "qanaqa", "qanday", "qaysi", "bor", "bormi",
-        "сколько", "какие", "какой", "есть", "внутри", "қанша", "қандай", "бар",
-    ]
-    if any(marker in low for marker in size_markers):
-        return True
-    return any(marker in low for marker in pack_markers) and any(marker in low for marker in question_markers)
-
-
-def default_pack_size_reply(text: str, business: dict = None) -> str:
-    if not wants_default_pack_size_info(text):
-        return ""
-    return default_pack_size_sentence(detect_customer_language(text), include_model_hint=True, business=business)
-
-
-def _parse_numeric_price(value: str) -> float | None:
-    nums = re.findall(r"\d+(?:[.,]\d+)?", normalize_id(value))
-    if not nums:
-        return None
-    try:
-        return float(nums[0].replace(",", "."))
-    except Exception:
-        return None
-
-
-def _extract_meshok_count(text: str) -> int | None:
-    low = normalize_id(text).lower()
-    match = re.search(r"(\d+)\s*(?:qop|meshok|мешок|sack|bag)\b", low)
-    if match:
-        try:
-            return max(1, int(match.group(1)))
-        except Exception:
-            return 1
-    if any(token in low for token in ["qop", "meshok", "мешок", "sack", "bag"]):
-        return 1
-    return None
-
-
-def is_local_currency_question(text: str) -> bool:
-    low = normalize_id(text).lower()
-    if not low:
-        return False
-    markers = [
-        "so'm", "som", "sum", "uzs", "o'zbek so'm", "uzbek sum", "узбек", "сум",
-    ]
-    return any(marker in low for marker in markers)
-
-
-def build_usd_only_reply(user_text: str, media_match: dict, business: dict = None) -> str:
-    currency = normalize_id(media_match.get("top_match_currency")) or "USD"
-    code = normalize_id(media_match.get("top_match_code"))
-    model = normalize_id(media_match.get("top_match_model"))
-    label = model or code or "shu model"
-    price = _parse_numeric_price(media_match.get("top_match_price", ""))
-    lang = detect_customer_language(user_text)
-    unit_str = f"{price:.1f}".rstrip("0").rstrip(".") if price is not None else ""
-    pack_info = default_pack_size_sentence(lang, business=business)
-    pack_question = default_pack_count_question(lang)
-    if lang == "en":
-        if unit_str:
-            return f"We sell in {currency} only. Model {label} price is {unit_str} {currency}. {pack_info} {pack_question}"
-        return f"We sell in {currency} only. {pack_info} {pack_question}"
-    if lang == "ru":
-        if unit_str:
-            return f"Мы продаём только в {currency}. Цена модели {label}: {unit_str} {currency}. {pack_info} {pack_question}"
-        return f"Мы продаём только в {currency}. {pack_info} {pack_question}"
-    if lang == "kk":
-        if unit_str:
-            return f"Біз тек {currency}-мен сатамыз. Model {label} бағасы {unit_str} {currency}. {pack_info} {pack_question}"
-        return f"Біз тек {currency}-мен сатамыз. {pack_info} {pack_question}"
-    if unit_str:
-        return f"Biz faqat {currency}da sotamiz. Model {label} narxi {unit_str} {currency}. {pack_info} {pack_question}"
-    return f"Biz faqat {currency}da sotamiz. {pack_info} {pack_question}"
-
-
-def build_verified_meshok_price_reply(user_text: str, media_match: dict, business: dict = None) -> str:
-    unit_price = _parse_numeric_price(media_match.get("top_match_price", ""))
-    if unit_price is None:
-        return ""
-    meshok_count = _extract_meshok_count(user_text)
-    currency = normalize_id(media_match.get("top_match_currency")) or "USD"
-    lang = detect_customer_language(user_text)
-    code = normalize_id(media_match.get("top_match_code"))
-    model = normalize_id(media_match.get("top_match_model"))
-    label = model or code or "shu model"
-    unit_str = f"{unit_price:.1f}".rstrip("0").rstrip(".")
-    pack_info = default_pack_size_sentence(lang, business=business)
-    pack_question = default_pack_count_question(lang)
-    if meshok_count is None:
-        if lang == "en":
-            return f"Model {label} price is {unit_str} {currency}. {pack_info} {pack_question}"
-        if lang == "ru":
-            return f"Цена модели {label}: {unit_str} {currency}. {pack_info} {pack_question}"
-        if lang == "kk":
-            return f"Модель {label} бағасы {unit_str} {currency}. {pack_info} {pack_question}"
-        return f"Model {label} narxi {unit_str} {currency}. {pack_info} {pack_question}"
-
-    items_per_meshok = configured_items_per_meshok(business)
-    total_items = items_per_meshok * meshok_count
-    total_price = unit_price * total_items
-    total_str = f"{total_price:.1f}".rstrip("0").rstrip(".")
-    if lang == "en":
-        if meshok_count == 1:
-            return f"Model {label} price per piece is {unit_str} {currency}. {pack_info} Total is {total_str} {currency}. {pack_question}"
-        return f"Model {label} price per piece is {unit_str} {currency}. {meshok_count} bags contain {total_items} garments total, total price {total_str} {currency}. {pack_question}"
-    if lang == "ru":
-        if meshok_count == 1:
-            return f"Для модели {label} цена за 1 штуку {unit_str} {currency}. {pack_info} Итого {total_str} {currency}. {pack_question}"
-        return f"Для модели {label} цена за 1 штуку {unit_str} {currency}. В {meshok_count} мешках всего {total_items} единиц одежды, общая сумма {total_str} {currency}. {pack_question}"
-    if lang == "kk":
-        if meshok_count == 1:
-            return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. {pack_info} Жалпы {total_str} {currency}. {pack_question}"
-        return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. {meshok_count} қапта барлығы {total_items} киім болады, жалпы баға {total_str} {currency}. {pack_question}"
-    if meshok_count == 1:
-        return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {pack_info} Jami {total_str} {currency}. {pack_question}"
-    return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {meshok_count} qopda jami {total_items} ta kiyim bo'ladi, umumiy narx {total_str} {currency}. {pack_question}"
-
-
-def is_verified_media_match(media_match: dict = None) -> bool:
-    strategy = normalize_id((media_match or {}).get("match_strategy"))
-    return strategy in {"exact_code_match", "exact_model_match"}
-
-
-def recent_outbound_memory_key(business_id: str, customer_id: str, channel: str = "dm") -> str:
-    business_id = normalize_id(business_id)
-    customer_id = normalize_id(customer_id)
-    channel = normalize_id(channel) or "dm"
-    if not business_id or not customer_id:
-        return ""
-    return f"{business_id}:{customer_id}:{channel}"
-
-
-def remember_recent_outbound_text(business_id: str, customer_id: str, text: str, channel: str = "dm") -> None:
-    key = recent_outbound_memory_key(business_id, customer_id, channel)
-    text = normalize_id(text)
-    if not key or not text:
-        return
-    INSTAGRAM_RECENT_OUTBOUND_MEMORY[key] = {"text": text, "saved_at": time.time()}
-
-
-def has_recent_outbound_memory_text(business_id: str, customer_id: str, text: str, channel: str = "dm") -> bool:
-    key = recent_outbound_memory_key(business_id, customer_id, channel)
-    text = normalize_id(text)
-    if not key or not text:
-        return False
-    payload = INSTAGRAM_RECENT_OUTBOUND_MEMORY.get(key)
-    if not isinstance(payload, dict):
-        return False
-    if (time.time() - float(payload.get("saved_at") or 0.0)) > OUTBOUND_DUPLICATE_WINDOW_SECONDS:
-        INSTAGRAM_RECENT_OUTBOUND_MEMORY.pop(key, None)
-        return False
-    return normalize_id(payload.get("text")) == text
-
-
-def _collect_instagram_payload_urls(value, url_candidates: list[str]):
-    if isinstance(value, dict):
-        for nested in value.values():
-            _collect_instagram_payload_urls(nested, url_candidates)
-        return
-    if isinstance(value, list):
-        for nested in value:
-            _collect_instagram_payload_urls(nested, url_candidates)
-        return
-    if isinstance(value, str) and value.startswith(("http://", "https://")) and value not in url_candidates:
-        url_candidates.append(value)
-
-
-def extract_instagram_media_url_from_payload(raw_payload: dict) -> tuple[str, str]:
-    raw_payload = raw_payload or {}
-    message = raw_payload.get("message") if isinstance(raw_payload.get("message"), dict) else {}
-    attachments = message.get("attachments") if isinstance(message.get("attachments"), list) else []
-    for att in attachments:
-        if not isinstance(att, dict):
-            continue
-        payload = att.get("payload") if isinstance(att.get("payload"), dict) else {}
-        url_candidates = []
-        for key in ("url", "media_url", "image_url", "video_url", "external_url", "link", "permalink", "src"):
-            direct = payload.get(key)
-            if isinstance(direct, str) and direct.startswith(("http://", "https://")) and direct not in url_candidates:
-                url_candidates.append(direct)
-        _collect_instagram_payload_urls(payload, url_candidates)
-        _collect_instagram_payload_urls(att, url_candidates)
-        media_url = normalize_id(url_candidates[0] if url_candidates else "")
-        if not media_url:
-            continue
-        att_type = normalize_id(att.get("type")).lower()
-        if att_type in {"image", "photo"}:
-            return media_url, "photo"
-        if att_type in {"video", "ig_reel", "reel"}:
-            return media_url, "video"
-        if re.search(r"\.(jpg|jpeg|png|gif|webp|bmp|heic|heif)(\?|$)", media_url.lower()):
-            return media_url, "photo"
-        if re.search(r"\.(mp4|mov|m4v|webm|avi|mkv)(\?|$)", media_url.lower()):
-            return media_url, "video"
-        return media_url, "file"
-    return "", ""
-
-
-def load_instagram_message_media_reference(business_id: str, customer_id: str, message_id: str) -> dict:
-    business_id = normalize_id(business_id)
-    customer_id = normalize_id(customer_id)
-    message_id = normalize_id(message_id)
-    if not business_id or not customer_id or not message_id:
-        return {}
-    try:
-        result = (
-            supabase.table("inbox_messages")
-            .select("media_url,media_type,raw_payload")
-            .eq("business_id", business_id)
-            .eq("platform", "instagram")
-            .eq("customer_id", customer_id)
-            .eq("external_message_id", message_id)
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
-        )
-        row = (result.data or [None])[0]
-        if not isinstance(row, dict):
-            return {}
-        media_url = normalize_id(row.get("media_url"))
-        media_type = normalize_id(row.get("media_type")).lower()
-        if not media_url:
-            media_url, payload_media_type = extract_instagram_media_url_from_payload(row.get("raw_payload") or {})
-            media_type = media_type or payload_media_type
-        if not media_url:
-            return {}
-        return {"media_url": media_url, "media_type": media_type or "photo"}
-    except Exception as exc:
-        log("Could not load Instagram reply-to media reference", str(exc))
-        return {}
-
-
-def load_recent_instagram_media_reference(
-    business_id: str,
-    customer_id: str,
-    exclude_message_id: str = "",
-) -> dict:
-    business_id = normalize_id(business_id)
-    customer_id = normalize_id(customer_id)
-    exclude_message_id = normalize_id(exclude_message_id)
-    if not business_id or not customer_id:
-        return {}
-    try:
-        result = (
-            supabase.table("inbox_messages")
-            .select("external_message_id,created_at,media_url,media_type,raw_payload")
-            .eq("business_id", business_id)
-            .eq("platform", "instagram")
-            .eq("channel", "dm")
-            .eq("customer_id", customer_id)
-            .eq("direction", "inbound")
-            .order("created_at", desc=True)
-            .limit(20)
-            .execute()
-        )
-        rows = result.data or []
-        now_utc = datetime.utcnow()
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            external_message_id = normalize_id(row.get("external_message_id"))
-            if exclude_message_id and external_message_id == exclude_message_id:
-                continue
-            created_at = normalize_id(row.get("created_at"))
-            if created_at:
-                try:
-                    dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-                    age_seconds = (now_utc - dt.replace(tzinfo=None)).total_seconds()
-                    if age_seconds > PRODUCT_MATCHER_RECENT_MEDIA_LOOKBACK_SECONDS:
-                        continue
-                except Exception:
-                    pass
-            media_url = normalize_id(row.get("media_url"))
-            media_type = normalize_id(row.get("media_type")).lower()
-            if not media_url:
-                media_url, payload_media_type = extract_instagram_media_url_from_payload(row.get("raw_payload") or {})
-                media_type = media_type or payload_media_type
-            if not media_url:
-                continue
-            if media_type not in {"photo", "video", "file"}:
-                media_type = "photo"
-            return {
-                "media_url": media_url,
-                "media_type": media_type,
-                "external_message_id": external_message_id,
-            }
-    except Exception as exc:
-        log("Could not load recent Instagram media reference", str(exc))
-    return {}
-
-
-def should_reuse_recent_media_match(user_text: str, media_type: str = "", business: dict = None) -> bool:
-    if media_type in {"photo", "video", "file"}:
-        return False
-    text = normalize_id(user_text)
-    if not text:
-        return False
-    lower = text.lower()
-    compact = re.sub(r"[^\w\s'А-Яа-яЁёЎўҚқҒғҲҳ-]+", " ", lower).strip()
-    if is_price_question(lower):
-        return True
-    if is_greeting_only(lower):
-        return True
-    if re.search(r"\b\d+\s*(qop|meshok|ta|dona|pack|quti)\b", lower):
-        return True
-    if has_strong_business_sales_context(lower, business):
-        return True
-    short_followups = {
-        "bor", "bormi", "narxi", "qancha", "nechpul", "razmer", "rang", "olaman",
-        "zakaz", "беру", "есть", "how much", "cost", "price",
+    const meta = result.meta || {};
+    if (result.status !== 'ok') {
+      throw new Error(apiErrorMessage(result, 200));
     }
-    return compact in short_followups or lower in short_followups
-
-
-def get_recent_platform_chat_history(platform: str, business: dict, customer_id: str = "", channel: str = "", limit: int = 10) -> list:
-    if not customer_id:
-        return []
-    limit = min(limit, business_memory_limit(business, default=limit))
-    if limit <= 0:
-        return []
-
-    try:
-        query = (
-            supabase.table("inbox_messages")
-            .select("role,content")
-            .eq("platform", platform)
-            .eq("customer_id", normalize_id(customer_id))
-        )
-
-        if business and business.get("id"):
-            query = query.eq("business_id", business.get("id"))
-
-        if channel:
-            query = query.eq("channel", channel)
-
-        rows = query.order("created_at", desc=True).limit(limit).execute().data or []
-        rows = list(reversed(rows))
-        return [
-            {"role": row.get("role") or "user", "content": row.get("content") or ""}
-            for row in rows
-            if row.get("content")
-        ]
-    except Exception as e:
-        log("Could not load recent chat history", str(e))
-        return []
-
-
-def get_recent_platform_message_rows(
-    platform: str,
-    business: dict,
-    customer_id: str = "",
-    channel: str = "",
-    limit: int = 20,
-) -> list:
-    platform = normalize_id(platform).lower()
-    customer_id = normalize_id(customer_id)
-    channel = normalize_id(channel)
-    if not platform or not customer_id:
-        return []
-
-    limit = min(max(1, limit), 50)
-
-    try:
-        query = (
-            supabase.table("inbox_messages")
-            .select("*")
-            .eq("platform", platform)
-            .eq("customer_id", customer_id)
-        )
-        if business and business.get("id"):
-            query = query.eq("business_id", business.get("id"))
-        if channel:
-            query = query.eq("channel", channel)
-
-        rows = query.order("created_at", desc=True).limit(limit).execute().data or []
-        return list(reversed(rows))
-    except Exception as e:
-        log("Could not load recent platform message rows", str(e))
-        return []
-
-def get_ai_reply(
-    user_text: str,
-    business: dict,
-    platform: str = "instagram",
-    customer_id: str = "",
-    channel: str = "",
-    media_context: str = "",
-    media_reply_hint: str = "",
-    lead_state: dict = None,
-):
-    try:
-        if wants_business_phone_number(user_text):
-            direct_phone_reply = sales_phone_reply(user_text, business)
-            if direct_phone_reply:
-                return direct_phone_reply
-
-        size_pack_reply = default_pack_size_reply(user_text, business)
-        if size_pack_reply:
-            return size_pack_reply
-
-        off_topic_reply = unrelated_topic_reply(user_text, business)
-        if off_topic_reply:
-            return off_topic_reply
-
-        messages = [{"role": "system", "content": build_sales_system_prompt(business, platform)}]
-        if platform == "instagram" and "comment" in normalize_id(channel).lower():
-            messages.append({
-                "role": "system",
-                "content": (
-                    "This is a public Instagram comment. Never ask for private information "
-                    "such as name, phone number, address, WhatsApp/Telegram, passport, card, "
-                    "or order contact details in the public reply. Move private details to DM."
-                ),
-            })
-        normalized_lead_state = normalize_lead_state(lead_state)
-        lead_context = build_known_customer_information_block(normalized_lead_state)
-        if lead_context:
-            messages.append({"role": "system", "content": lead_context})
-        if media_context:
-            messages.append({"role": "system", "content": media_context})
-        if media_reply_hint:
-            messages.append({
-                "role": "system",
-                "content": f"Suggested product answer from media matcher: {media_reply_hint}. Keep the answer in the customer's language and do not ask which model if the matcher already found one.",
-            })
-        messages.extend(get_recent_platform_chat_history(platform, business, customer_id, channel, limit=20))
-        language_instruction = language_instruction_for(user_text)
-        if language_instruction:
-            messages.append({"role": "system", "content": language_instruction})
-        messages.append({"role": "user", "content": user_text})
-
-        reply = call_ai_chat(
-            messages,
-            business,
-            "AI response",
-        )
-        if reply:
-            return clean_sales_reply(reply.strip(), user_text, business, normalized_lead_state)
-        if media_reply_hint:
-            return clean_sales_reply(media_reply_hint, user_text, business, normalized_lead_state)
-        lang = detect_customer_language(user_text)
-        if lang == "en":
-            return "Your message has been received."
-        if lang == "kk":
-            return "Хабарыңыз қабылданды."
-        if lang == "ru":
-            return "Ваше сообщение получено."
-        return "Xabaringiz qabul qilindi 😊"
-
-    except Exception as e:
-        log("AI error", str(e))
-        lang = detect_customer_language(user_text)
-        if lang == "en":
-            return "Your message has been received."
-        if lang == "kk":
-            return "Хабарыңыз қабылданды."
-        if lang == "ru":
-            return "Ваше сообщение получено."
-        return "Xabaringiz qabul qilindi 😊"
-
-
-# ============================================================================
-# INSTAGRAM
-# ============================================================================
-def get_business_access_token(business: dict):
-    channel_token = get_business_channel_token(
-        business,
-        ["instagram"],
-        ["page_access_token", "access_token"],
-    )
-    if channel_token:
-        return channel_token
-    return business.get("page_access_token") or business.get("access_token") or ""
-
-
-def get_messages_url(business: dict):
-    oauth_provider = business.get("oauth_provider", "")
-    page_id = business.get("facebook_page_id") or business.get("page_id")
-
-    if oauth_provider == "facebook_page" and page_id:
-        return f"{GRAPH_FACEBOOK}/{page_id}/messages"
-
-    if oauth_provider == "facebook_page":
-        return f"{GRAPH_FACEBOOK}/me/messages"
-
-    return f"{GRAPH_INSTAGRAM}/me/messages"
-
-
-def send_instagram_payload(access_token: str, business: dict, payload: dict):
-    url = get_messages_url(business)
-    res = requests.post(url, params={"access_token": access_token}, json=payload, timeout=30)
-    log("Instagram send result", {"url": url, "status": res.status_code, "body": res.text})
-    return res
-
-
-def send_dm(access_token: str, recipient_id: str, text: str, business: dict = None, message_tag: str = "", preserve_text: bool = False):
-    recipient_id = normalize_id(recipient_id)
-    if not access_token or not recipient_id or not text:
-        return None
-
-    business = business or {}
-    text = normalize_id(text)[:1000] if preserve_text else complete_sentence_reply(remove_urls(text), limit=1000)
-    if looks_like_internal_prompt_leak(text):
-        log("Prompt leak blocked at send_dm", {"reply_preview": text[:300], "recipient_id": recipient_id})
-        text = safe_outbound_leak_fallback(business)
-    if not text:
-        return None
-
-    payload = {
-        "recipient": {"id": recipient_id},
-        "message": {"text": text[:1000]},
+    if (meta.ok === false || meta.error || meta.description) {
+      throw new Error(apiErrorMessage({ meta }, 200));
     }
 
-    message_tag = normalize_id(message_tag).upper()
-    if message_tag:
-        payload["tag"] = message_tag
+    return result;
+  };
 
-    if business.get("oauth_provider") == "facebook_page":
-        payload["messaging_type"] = "MESSAGE_TAG" if message_tag else "RESPONSE"
+  const sendLiveVoice = async (conversation, file) => {
+    if (conversation.platform === 'instagram') {
+      throw new Error('Voice recording currently supports Telegram and WhatsApp. Instagram needs public media hosting first.');
+    }
 
-    return send_instagram_payload(access_token, business, payload)
+    if (!file.type.startsWith('audio/')) {
+      throw new Error('Please choose an audio file.');
+    }
 
+    if (file.size > 10 * 1024 * 1024) {
+      throw new Error('Audio is too large. Maximum upload size is 10 MB.');
+    }
 
-def send_instagram_dm(access_token: str, recipient_id: str, text: str, business: dict, message_tag: str = "", preserve_text: bool = False):
-    res = send_dm(access_token, recipient_id, text, business, message_tag=message_tag, preserve_text=preserve_text)
-    if res is None:
-        return False, {"error": "Send failed"}
-    return res.ok, safe_json(res)
+    const fileData = await fileToDataUrl(file);
+    const result = await API.postJson('/dashboard/send-voice-file', {
+      business_id: conversation.businessId,
+      conversation_id: conversation.apiId || conversation.id,
+      platform: conversation.platform,
+      channel: conversation.channel || '',
+      customer_id: conversation.customerId || conversation.chatId,
+      chat_id: conversation.chatId || conversation.customerId,
+      file_data: fileData,
+      filename: file.name || 'voice.ogg',
+      mime_type: file.type || 'audio/ogg',
+    });
 
+    const meta = result.meta || {};
+    if (result.status !== 'ok') {
+      throw new Error(apiErrorMessage(result, 200));
+    }
+    if (meta.ok === false || meta.error || meta.description) {
+      throw new Error(apiErrorMessage({ meta }, 200));
+    }
 
-def send_manual_instagram_dm(access_token: str, recipient_id: str, text: str, business: dict):
-    ok, result = send_instagram_dm(access_token, recipient_id, text, business, preserve_text=True)
-    if ok or not instagram_reply_window_closed(result or {}):
-        return ok, result
-    if not INSTAGRAM_HUMAN_AGENT_RETRY_ENABLED:
-        return ok, result
+    return result;
+  };
 
-    ok, retry_result = send_instagram_dm(
-        access_token,
-        recipient_id,
+  const updateBusinessSetting = async (businessId, settings, persist = true) => {
+    if (!businessId) {
+      showToast('Select a business first');
+      return;
+    }
+    setBusinesses(rows => rows.map(b => b.id === businessId ? { ...b, ...settings } : b));
+    if (!persist || !liveMode) return;
+    try {
+      await API.postJson('/api/business-settings', { business_id: businessId, settings });
+      showToast('Business settings saved');
+      await loadBusinesses();
+    } catch (e) {
+      setApiError(e.message);
+      showToast(e.message);
+      await loadBusinesses();
+    }
+  };
+
+  const sendMessage = async (text, options = {}) => {
+    if (!conv) return false;
+    const targetConv = conv;
+
+    if (!liveMode) {
+      const localMessage = {
+        id: `local-${Date.now()}`,
+        side: 'outbound',
+        type: 'text',
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         text,
-        business,
-        message_tag="HUMAN_AGENT",
-        preserve_text=True,
-    )
-    if not ok:
-        retry_error = retry_result.get("error") if isinstance(retry_result, dict) else {}
-        retry_message = normalize_id((retry_error or {}).get("message") if isinstance(retry_error, dict) else "")
-        if "human agent" in retry_message.lower() and "review" in retry_message.lower():
-            return False, result
-    if isinstance(retry_result, dict):
-        retry_result = {
-            **retry_result,
-            "human_agent_retry": True,
-            **({"message_tag": "HUMAN_AGENT"} if ok else {}),
-        }
-    return ok, retry_result
-
-
-def send_instagram_media(access_token: str, recipient_id: str, media_type: str, media_url: str, caption: str = "",
-                         business: dict = None):
-    recipient_id = normalize_id(recipient_id)
-    if not access_token or not recipient_id or not media_url:
-        return None
-
-    business = business or {}
-
-    payload = {
-        "recipient": {"id": recipient_id},
-        "message": {
-            "attachment": {
-                "type": "image" if media_type == "photo" else "video",
-                "payload": {"url": media_url},
-            }
-        },
-    }
-
-    if caption:
-        payload["message"]["text"] = caption[:1000]
-
-    if business.get("oauth_provider") == "facebook_page":
-        payload["messaging_type"] = "RESPONSE"
-
-    return send_instagram_payload(access_token, business, payload)
-
-
-def send_catalog_button(access_token: str, recipient_id: str, business: dict, text: str = ""):
-    recipient_id = normalize_id(recipient_id)
-    catalog_link = get_catalog_link(business)
-
-    if not access_token or not recipient_id or not catalog_link:
-        return None
-
-    payload = catalog_template_payload({"id": recipient_id}, business, text)
-
-    if business.get("oauth_provider") == "facebook_page":
-        payload["messaging_type"] = "RESPONSE"
-
-    return send_instagram_payload(access_token, business, payload)
-
-
-def send_instagram_private_reply(access_token: str, comment_id: str, text: str, business: dict = None):
-    comment_id = normalize_id(comment_id)
-    if not access_token or not comment_id or not text:
-        return None
-
-    business = business or {}
-    payload = {
-        "recipient": {"comment_id": comment_id},
-        "message": {"text": text[:1000]},
-    }
-
-    if business.get("oauth_provider") == "facebook_page":
-        payload["messaging_type"] = "RESPONSE"
-
-    return send_instagram_payload(access_token, business, payload)
-
-
-def send_catalog_private_reply(access_token: str, comment_id: str, business: dict):
-    catalog_link = get_catalog_link(business)
-    comment_id = normalize_id(comment_id)
-    if not access_token or not comment_id or not catalog_link:
-        return None
-
-    business = business or {}
-    business_name = normalize_id(business.get("business_name")) or "Bizning katalog"
-    text = f"Assalomu alaykum! {business_name} katalogi shu yerda. Qaysi mahsulotlar sizni qiziqtirmoqda?"
-    payload = catalog_template_payload({"comment_id": comment_id}, business, text)
-
-    if business.get("oauth_provider") == "facebook_page":
-        payload["messaging_type"] = "RESPONSE"
-
-    return send_instagram_payload(access_token, business, payload)
-
-
-def reply_to_comment(access_token: str, comment_id: str, text: str, business: dict = None):
-    comment_id = normalize_id(comment_id)
-    if not access_token or not comment_id or not text:
-        return None
-
-    oauth_provider = (business or {}).get("oauth_provider", "")
-
-    if oauth_provider == "facebook_page":
-        url = f"{GRAPH_FACEBOOK}/{comment_id}/comments"
-    else:
-        url = f"{GRAPH_INSTAGRAM}/{comment_id}/replies"
-
-    text = safe_public_comment_reply(text, business)[:1000]
-    if not text:
-        text = "Xabaringiz uchun rahmat 😊 Batafsil ma'lumot uchun DM yozing."
-
-    res = requests.post(url, params={"access_token": access_token, "message": text}, timeout=30)
-    log("Comment reply result", {"status": res.status_code, "body": res.text})
-    return res
-
-
-async def process_instagram_messaging_event(entry_id: str, messaging: dict):
-    log("Processing Instagram messaging event", messaging)
-
-    if "read" in messaging or "delivery" in messaging:
-        return
-
-    message = messaging.get("message") or {}
-    if not message:
-        return
-
-    sender_id = normalize_id(messaging.get("sender", {}).get("id"))
-    recipient_id = normalize_id(messaging.get("recipient", {}).get("id"))
-    message_text = message.get("text") or ""
-    message_id = normalize_id(message.get("mid") or str(messaging.get("timestamp") or ""))
-    reply_to = message.get("reply_to") if isinstance(message.get("reply_to"), dict) else {}
-    reply_to_message_id = normalize_id(reply_to.get("mid"))
-    is_echo = bool(message.get("is_echo"))
-
-    if is_echo:
-        business = find_business_for_webhook(entry_id, sender_id)
-        if business and recipient_id:
-            business_id = normalize_id(business.get("id"))
-            if not load_inbox_message_by_external_id(
-                business_id,
-                "instagram",
-                recipient_id,
-                message_id,
-                direction="outbound",
-            ):
-                save_inbox_message(
-                    business=business,
-                    platform="instagram",
-                    sender_id=sender_id or normalize_id(business.get("instagram_business_id")) or entry_id,
-                    recipient_id=recipient_id,
-                    message_text=message_text,
-                    direction="outbound",
-                    platform_message_id=message_id,
-                    raw_payload=messaging,
-                    is_read=True,
-                    channel="dm",
-                )
-            mark_customer_inbound_read(business_id, "instagram", recipient_id, "dm")
-        return
-
-    media_type = None
-    media_url = None
-    post_permalink = ""
-    post_image_url = ""
-    post_media_type = ""
-    share_asset_id = ""
-
-    attachments = message.get("attachments", [])
-    if attachments:
-        attachment_had_media = False
-        for att in attachments:
-            if not isinstance(att, dict):
-                continue
-
-            att_type = normalize_id(att.get("type")).lower()
-            payload = att.get("payload") if isinstance(att.get("payload"), dict) else {}
-
-            url_candidates = []
-
-            def collect_urls(value):
-                if isinstance(value, dict):
-                    for nested in value.values():
-                        collect_urls(nested)
-                    return
-                if isinstance(value, list):
-                    for nested in value:
-                        collect_urls(nested)
-                    return
-                if isinstance(value, str) and value.startswith(("http://", "https://")) and value not in url_candidates:
-                    url_candidates.append(value)
-
-            for key in ("url", "media_url", "image_url", "video_url", "external_url", "link", "permalink", "src"):
-                direct = payload.get(key)
-                if isinstance(direct, str) and direct.startswith(("http://", "https://")) and direct not in url_candidates:
-                    url_candidates.append(direct)
-
-            for key in ("reel_video_id", "media_id", "ig_media_id", "id"):
-                candidate_asset_id = normalize_id(payload.get(key))
-                if candidate_asset_id:
-                    share_asset_id = share_asset_id or candidate_asset_id
-
-            collect_urls(payload)
-            collect_urls(att)
-
-            att_url = url_candidates[0] if url_candidates else ""
-            att_url_l = att_url.lower()
-            unwrapped_att_url = unwrap_meta_redirect_url(att_url)
-            if is_instagram_public_link(unwrapped_att_url):
-                post_permalink = post_permalink or unwrapped_att_url
-            elif is_instagram_public_link(att_url):
-                post_permalink = post_permalink or att_url
-            try:
-                parsed_att = urlparse(att_url)
-                candidate_asset_id = normalize_id(parse_qs(parsed_att.query).get("asset_id", [""])[0])
-                if candidate_asset_id:
-                    share_asset_id = share_asset_id or candidate_asset_id
-            except Exception:
-                pass
-
-            inferred_type = None
-            if att_type in ("image", "photo"):
-                inferred_type = "photo"
-            elif att_type in ("video", "ig_reel", "reel"):
-                inferred_type = "video"
-            elif att_type in ("audio", "voice"):
-                inferred_type = "audio"
-            elif att_type in ("file", "document"):
-                inferred_type = "file"
-
-            if not inferred_type and att_url_l:
-                if re.search(r"\.(jpg|jpeg|png|gif|webp|bmp|heic|heif)(\?|$)", att_url_l):
-                    inferred_type = "photo"
-                elif re.search(r"\.(mp4|mov|m4v|webm|avi|mkv)(\?|$)", att_url_l):
-                    inferred_type = "video"
-                elif re.search(r"\.(mp3|m4a|wav|ogg|oga|aac|opus)(\?|$)", att_url_l):
-                    inferred_type = "audio"
-                elif any(token in att_url_l for token in ("/reel/", "ig_reel")):
-                    inferred_type = "video"
-
-            if not inferred_type and att_type in ("share", "ig_post", "ig_story", "story_mention", "embed", "fallback"):
-                inferred_type = "file"
-
-            if inferred_type:
-                attachment_had_media = True
-                media_type = inferred_type
-                if att_url and not is_instagram_public_link(unwrapped_att_url):
-                    media_url = att_url
-                if not message_text:
-                    if att_type in ("share", "ig_post", "ig_story", "story_mention", "ig_reel", "embed"):
-                        message_text = "🔁 Forwarded reel" if att_type in ("ig_reel", "reel") else "🔁 Forwarded post"
-                    elif media_type == "photo":
-                        message_text = "📸 Photo"
-                    elif media_type == "video":
-                        message_text = "🎥 Video"
-                    elif media_type == "audio":
-                        message_text = "🎤 Audio"
-                    else:
-                        message_text = "📎 File"
-                if media_url or post_permalink:
-                    break
-
-        if attachment_had_media and not message_text:
-            message_text = "📎 Attachment"
-
-    if not message_text and not media_type:
-        share_url = ""
-        shares = message.get("shares")
-        if isinstance(shares, list):
-            for share in shares:
-                if not isinstance(share, dict):
-                    continue
-                for key in ("link", "url", "permalink"):
-                    candidate = normalize_id(share.get(key))
-                    if candidate.startswith(("http://", "https://")):
-                        share_url = candidate
-                        decoded = unwrap_meta_redirect_url(candidate)
-                        if is_instagram_public_link(decoded):
-                            post_permalink = post_permalink or decoded
-                        elif is_instagram_public_link(candidate):
-                            post_permalink = post_permalink or candidate
-                        break
-                if share_url:
-                    break
-        if share_url:
-            lower_share = share_url.lower()
-            media_type = "video" if ("/reel/" in lower_share or re.search(r"\.(mp4|mov|m4v|webm)(\?|$)", lower_share)) else "file"
-            media_url = "" if is_instagram_public_link(unwrap_meta_redirect_url(share_url)) else share_url
-            message_text = "🔁 Forwarded post"
-
-    if attachments and not message_text and not media_type:
-        # Do not drop unknown new attachment types from Meta; keep a visible placeholder.
-        media_type = "file"
-        message_text = "📎 Attachment"
-
-    if not sender_id or not recipient_id:
-        return
-
-    if not message_text and not media_type:
-        return
-
-    if is_processed(processed_message_ids, message_id):
-        return
-
-    if message_id in processing_message_ids:
-        return
-
-    processing_message_ids.add(message_id)
-
-    try:
-        business = find_business_for_webhook(entry_id, recipient_id)
-        if not business:
-            return
-
-        access_token = get_business_access_token(business)
-        if media_type == "audio" and media_url:
-            transcript = transcribe_media_url_for_voice(media_url, access_token=access_token)
-            if transcript:
-                message_text = transcript
-                message["text"] = transcript
-        sender_profile = fetch_instagram_customer_profile(access_token, sender_id) if access_token else {}
-        customer_display_name = display_name_from_instagram_profile(sender_profile, "")
-        if sender_profile:
-            messaging = {
-                **messaging,
-                "sender_profile": sender_profile,
-            }
-        recent_lead_rows = get_recent_platform_message_rows("instagram", business, sender_id, "dm", limit=20)
-        lead_state = derive_customer_lead_state(
-            "instagram",
-            business,
-            sender_id,
-            "dm",
-            recent_rows=recent_lead_rows,
-            current_text=message_text,
-            customer_name_hint=customer_display_name,
-            message_id=message_id,
-        )
-        if share_asset_id and access_token:
-            try:
-                share_media_info = fetch_instagram_media_info(access_token, share_asset_id, business) or {}
-                resolved_permalink = normalize_id(share_media_info.get("post_permalink"))
-                if resolved_permalink:
-                    post_permalink = post_permalink or resolved_permalink
-                resolved_preview = normalize_id(share_media_info.get("post_image_url"))
-                if resolved_preview:
-                    post_image_url = resolved_preview
-                    if not media_url or "ig_messaging_cdn" in normalize_id(media_url):
-                        media_url = resolved_preview
-                resolved_media_type = normalize_id(share_media_info.get("post_media_type")).lower()
-                if resolved_media_type:
-                    post_media_type = resolved_media_type
-                    if media_type in (None, "file"):
-                        if "video" in resolved_media_type or "reel" in resolved_media_type:
-                            media_type = "video"
-                        elif "image" in resolved_media_type or "photo" in resolved_media_type:
-                            media_type = "photo"
-            except Exception as e:
-                log("Could not enrich forwarded Instagram share", str(e))
-
-        if not post_permalink and media_url:
-            maybe_link = unwrap_meta_redirect_url(media_url)
-            if is_instagram_public_link(maybe_link):
-                post_permalink = maybe_link
-
-        # Some forwarded reels arrive with only public permalink and no direct media URL.
-        # Fetch OG preview as a stable fallback so dashboard can still render preview consistently.
-        if post_permalink and (not media_url or "ig_messaging_cdn" in normalize_id(media_url)):
-            try:
-                public_preview = fetch_instagram_public_preview(post_permalink) or {}
-                if public_preview.get("post_image_url") and not post_image_url:
-                    post_image_url = normalize_id(public_preview.get("post_image_url"))
-                if public_preview.get("post_media_type") and not post_media_type:
-                    post_media_type = normalize_id(public_preview.get("post_media_type")).lower()
-                candidate_media_url = normalize_id(public_preview.get("media_url"))
-                if candidate_media_url:
-                    media_url = candidate_media_url
-                    if media_type in (None, "", "file"):
-                        media_type = "video"
-            except Exception as e:
-                log("Could not fetch public Instagram preview", str(e))
-
-        save_inbox_message(
-            business=business,
-            platform="instagram",
-            sender_id=sender_id,
-            recipient_id=recipient_id,
-            message_text=message_text,
-            direction="inbound",
-            platform_message_id=message_id,
-            raw_payload=messaging,
-            customer_name=customer_display_name,
-            is_read=False,
-            media_type=media_type,
-            media_url=media_url,
-            channel="dm",
-            post_permalink=post_permalink,
-            post_image_url=post_image_url,
-            post_media_type=post_media_type,
-        )
-        upsert_customer_lead_state(
-            business_id=business.get("id"),
-            platform="instagram",
-            customer_id=sender_id,
-            lead_state=lead_state,
-            channel="dm",
-            updated_by="instagram_bot",
-        )
-
-        if is_conversation_finished_message(message_text):
-            set_chat_ai_enabled(business.get("id"), "instagram", "dm", sender_id, False)
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="finished_by_customer")
-            mark_processed(processed_message_ids, message_id)
-            return
-
-        if not claim_instagram_message_processing(business.get("id"), message_id, sender_id, "dm"):
-            log("Instagram DM reply skipped: already claimed in database", {
-                "customer_id": sender_id,
-                "message_id": message_id,
-                "media_type": media_type,
-            })
-            mark_processed(processed_message_ids, message_id)
-            return
-
-        if not business_allows_auto_reply(business, "instagram", "dm"):
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_auto_reply_disabled")
-            mark_processed(processed_message_ids, message_id)
-            return
-
-        if not is_chat_ai_enabled("instagram", "dm", sender_id, business.get("id")):
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_ai_disabled")
-            mark_processed(processed_message_ids, message_id)
-            return
-
-        existing_inbound = load_inbox_message_by_external_id(
-            business.get("id"),
-            "instagram",
-            sender_id,
-            message_id,
-            direction="inbound",
-        )
-        if existing_inbound and has_outbound_reply_after(
-            business.get("id"),
-            "instagram",
-            sender_id,
-            normalize_id(existing_inbound.get("created_at")),
-            "dm",
-        ):
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="duplicate_skipped")
-            mark_processed(processed_message_ids, message_id)
-            return
-
-        if is_forwarded_instagram_share_placeholder(message_text):
-            log("Instagram DM forwarded share saved without auto-reply", {
-                "customer_id": sender_id,
-                "message_id": message_id,
-                "media_type": media_type,
-                "post_permalink": post_permalink,
-            })
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_forwarded_share")
-            mark_processed(processed_message_ids, message_id)
-            return
-
-        if is_low_signal_message(message_text, messaging):
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_low_signal")
-            mark_processed(processed_message_ids, message_id)
-            return
-
-        if not access_token:
-            log("Instagram DM reply skipped: missing access token", {
-                "customer_id": sender_id,
-                "message_id": message_id,
-                "media_type": media_type,
-                "post_permalink": post_permalink,
-                "has_media_url": bool(media_url),
-                "has_post_image_url": bool(post_image_url),
-            })
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_missing_access_token")
-            return
-
-        generic_wholesale_reply = ""
-        if is_generic_media_wholesale_inquiry(
-            message_text,
-            media_type=media_type or "",
-            post_permalink=post_permalink,
-            post_media_type=post_media_type,
-        ):
-            generic_wholesale_reply = build_generic_wholesale_intro_reply(message_text, business)
-
-        media_match_context = ""
-        media_reply_hint = ""
-        matcher_source_url = media_url or post_image_url
-        business_id = normalize_id(business.get("id"))
-        recent_media_context_found = False
-        force_direct_media_reply = False
-        resolved_media_match = {}
-        verified_exact_media_match = False
-
-        if matcher_source_url and media_type in {"photo", "video", "file"}:
-            log("Instagram DM media matcher request", {
-                "customer_id": sender_id,
-                "message_id": message_id,
-                "media_type": media_type,
-                "source_url_host": urlparse(matcher_source_url).netloc if matcher_source_url else "",
-            })
-            media_match = analyze_media_for_sales_reply(
-                media_url=matcher_source_url,
-                user_text=message_text or "",
-                media_type=media_type or "",
-                access_token=access_token,
-            )
-            if media_match:
-                resolved_media_match = media_match
-                verified_exact_media_match = is_verified_media_match(media_match)
-                media_match_context = media_match.get("context", "")
-                media_reply_hint = media_match.get("reply_hint", "")
-                remember_instagram_media_match(
-                    business_id=business_id,
-                    customer_id=sender_id,
-                    context=media_match_context,
-                    reply_hint=media_reply_hint,
-                    top_match_code=media_match.get("top_match_code", ""),
-                    top_match_model=media_match.get("top_match_model", ""),
-                    top_match_price=media_match.get("top_match_price", ""),
-                    top_match_currency=media_match.get("top_match_currency", ""),
-                    match_strategy=media_match.get("match_strategy", ""),
-                    top_score=media_match.get("top_score", 0.0),
-                )
-                log("Instagram DM media matcher hit", {
-                    "customer_id": sender_id,
-                    "message_id": message_id,
-                    "media_type": media_type,
-                    "top_match_code": media_match.get("top_match_code"),
-                    "top_match_model": media_match.get("top_match_model"),
-                    "top_score": media_match.get("top_score"),
-                })
-            else:
-                log("Instagram DM media matcher miss", {
-                    "customer_id": sender_id,
-                    "message_id": message_id,
-                    "media_type": media_type,
-                    "source_url_host": urlparse(matcher_source_url).netloc if matcher_source_url else "",
-                })
-        elif should_reuse_recent_media_match(message_text or "", media_type or "", business):
-            cached_match = load_recent_instagram_media_match(business_id=business_id, customer_id=sender_id)
-            if cached_match:
-                recent_media_context_found = True
-                resolved_media_match = cached_match
-                verified_exact_media_match = is_verified_media_match(cached_match)
-                cached_context = normalize_id(cached_match.get("context"))
-                if cached_context:
-                    media_match_context = (
-                        f"{cached_context}\n"
-                        "- This customer follow-up likely refers to the same previously matched product unless they ask to change model."
-                    )
-                    media_reply_hint = ""
-                    log("Instagram DM media matcher cache hit", {
-                        "customer_id": sender_id,
-                        "message_id": message_id,
-                        "top_match_code": normalize_id(cached_match.get("top_match_code")),
-                        "top_match_model": normalize_id(cached_match.get("top_match_model")),
-                        "top_score": _safe_score(cached_match.get("top_score")),
-                    })
-            elif reply_to_message_id:
-                media_ref = load_instagram_message_media_reference(
-                    business_id=business_id,
-                    customer_id=sender_id,
-                    message_id=reply_to_message_id,
-                )
-                replied_media_url = normalize_id(media_ref.get("media_url"))
-                replied_media_type = normalize_id(media_ref.get("media_type")).lower() or "photo"
-                if replied_media_url and replied_media_type in {"photo", "video", "file"}:
-                    recent_media_context_found = True
-                    log("Instagram DM reply-to media matcher request", {
-                        "customer_id": sender_id,
-                        "message_id": message_id,
-                        "reply_to_message_id": reply_to_message_id,
-                        "media_type": replied_media_type,
-                        "source_url_host": urlparse(replied_media_url).netloc,
-                    })
-                    media_match = analyze_media_for_sales_reply(
-                        media_url=replied_media_url,
-                        user_text=message_text or "",
-                        media_type=replied_media_type,
-                        access_token=access_token,
-                    )
-                    if media_match:
-                        resolved_media_match = media_match
-                        verified_exact_media_match = is_verified_media_match(media_match)
-                        media_match_context = (
-                            f"{media_match.get('context', '')}\n"
-                            "- This customer follow-up is replying directly to the matched product image."
-                        )
-                        media_reply_hint = ""
-                        remember_instagram_media_match(
-                            business_id=business_id,
-                            customer_id=sender_id,
-                            context=media_match_context,
-                            reply_hint=media_match.get("reply_hint", ""),
-                            top_match_code=media_match.get("top_match_code", ""),
-                            top_match_model=media_match.get("top_match_model", ""),
-                            top_match_price=media_match.get("top_match_price", ""),
-                            top_match_currency=media_match.get("top_match_currency", ""),
-                            match_strategy=media_match.get("match_strategy", ""),
-                            top_score=media_match.get("top_score", 0.0),
-                        )
-                        log("Instagram DM reply-to media matcher hit", {
-                            "customer_id": sender_id,
-                            "message_id": message_id,
-                            "reply_to_message_id": reply_to_message_id,
-                            "top_match_code": media_match.get("top_match_code"),
-                            "top_match_model": media_match.get("top_match_model"),
-                            "top_score": media_match.get("top_score"),
-                        })
-                    else:
-                        log("Instagram DM reply-to media matcher miss", {
-                            "customer_id": sender_id,
-                            "message_id": message_id,
-                            "reply_to_message_id": reply_to_message_id,
-                            "media_type": replied_media_type,
-                        })
-
-            if not media_match_context:
-                recent_media_ref = load_recent_instagram_media_reference(
-                    business_id=business_id,
-                    customer_id=sender_id,
-                    exclude_message_id=message_id,
-                )
-                recent_media_url = normalize_id(recent_media_ref.get("media_url"))
-                recent_media_type = normalize_id(recent_media_ref.get("media_type")).lower() or "photo"
-                if recent_media_url and recent_media_type in {"photo", "video", "file"}:
-                    recent_media_context_found = True
-                    log("Instagram DM recent-media matcher request", {
-                        "customer_id": sender_id,
-                        "message_id": message_id,
-                        "recent_media_message_id": normalize_id(recent_media_ref.get("external_message_id")),
-                        "media_type": recent_media_type,
-                        "source_url_host": urlparse(recent_media_url).netloc,
-                    })
-                    media_match = analyze_media_for_sales_reply(
-                        media_url=recent_media_url,
-                        user_text=message_text or "",
-                        media_type=recent_media_type,
-                        access_token=access_token,
-                    )
-                    if media_match:
-                        resolved_media_match = media_match
-                        verified_exact_media_match = is_verified_media_match(media_match)
-                        media_match_context = (
-                            f"{media_match.get('context', '')}\n"
-                            "- This customer follow-up likely refers to their most recent product image."
-                        )
-                        media_reply_hint = ""
-                        remember_instagram_media_match(
-                            business_id=business_id,
-                            customer_id=sender_id,
-                            context=media_match_context,
-                            reply_hint=media_match.get("reply_hint", ""),
-                            top_match_code=media_match.get("top_match_code", ""),
-                            top_match_model=media_match.get("top_match_model", ""),
-                            top_match_price=media_match.get("top_match_price", ""),
-                            top_match_currency=media_match.get("top_match_currency", ""),
-                            match_strategy=media_match.get("match_strategy", ""),
-                            top_score=media_match.get("top_score", 0.0),
-                        )
-                        log("Instagram DM recent-media matcher hit", {
-                            "customer_id": sender_id,
-                            "message_id": message_id,
-                            "top_match_code": media_match.get("top_match_code"),
-                            "top_match_model": media_match.get("top_match_model"),
-                            "top_score": media_match.get("top_score"),
-                        })
-                    else:
-                        log("Instagram DM recent-media matcher miss", {
-                            "customer_id": sender_id,
-                            "message_id": message_id,
-                            "media_type": recent_media_type,
-                        })
-
-        if media_type in {"photo", "video", "file"} and not normalize_id(message_text):
-            log("Instagram DM cached media without immediate reply", {
-                "customer_id": sender_id,
-                "message_id": message_id,
-                "media_type": media_type,
-                "has_verified_match": bool(normalize_id((resolved_media_match or {}).get("top_match_code"))),
-            })
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="cached_media_waiting_for_text")
-            mark_processed(processed_message_ids, message_id)
-            return
-
-        needs_photo_fallback = (
-            (media_type in {"photo", "video", "file"} or recent_media_context_found)
-            and not media_match_context
-            and not media_reply_hint
-        )
-
-        quantity_followup = _extract_meshok_count(message_text) is not None
-
-        media_match_strategy = normalize_id((resolved_media_match or {}).get("match_strategy"))
-
-        if verified_exact_media_match and is_local_currency_question(message_text):
-            usd_only_reply = build_usd_only_reply(message_text, resolved_media_match, business)
-            if usd_only_reply:
-                media_reply_hint = usd_only_reply
-                force_direct_media_reply = True
-
-        if media_match_strategy == "exact_model_ambiguous_price" and (is_price_question(message_text) or quantity_followup):
-            media_reply_hint = normalize_id((resolved_media_match or {}).get("reply_hint"))
-            if media_reply_hint:
-                force_direct_media_reply = True
-
-        if verified_exact_media_match and (is_price_question(message_text) or quantity_followup):
-            verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match, business)
-            if verified_meshok_reply:
-                media_reply_hint = verified_meshok_reply
-                force_direct_media_reply = True
-
-        if needs_photo_fallback:
-            if recent_media_context_found and (is_price_question(message_text) or quantity_followup):
-                verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match, business)
-                if verified_meshok_reply:
-                    media_reply_hint = verified_meshok_reply
-                    media_match_context = (
-                        "The customer is asking about bag/meshok pricing for a verified matched product. "
-                        f"Use the verified unit price and the configured {configured_items_per_meshok(business)} pieces per meshok to answer directly."
-                    )
-                else:
-                    media_reply_hint = product_media_price_fallback_reply(message_text, business)
-                    media_match_context = (
-                        "The customer is asking the price for their recent product photo, "
-                        "but the product matcher did not return a verified catalog match. "
-                        "Answer with a short price-confirmation fallback and do not ask for name or phone."
-                    )
-                force_direct_media_reply = True
-            elif media_type in {"photo", "video", "file"}:
-                media_reply_hint = replacement_for_forbidden_product_photo_question(message_text or "photo", business)
-                media_match_context = (
-                    "The customer sent product media, but the product matcher did not return a verified catalog match. "
-                    "Acknowledge the media briefly and do not ask for name or phone."
-                )
-                force_direct_media_reply = True
-            else:
-                log("Instagram DM skipped auto-reply: no verified media match", {
-                    "customer_id": sender_id,
-                    "message_id": message_id,
-                    "media_type": media_type,
-                    "source_url_host": urlparse(matcher_source_url).netloc if matcher_source_url else "",
-                })
-                mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_no_verified_match")
-                mark_processed(processed_message_ids, message_id)
-                return
-
-        if force_direct_media_reply:
-            log("Instagram DM media fallback reply", {
-                "customer_id": sender_id,
-                "message_id": message_id,
-                "reason": "media_match_missing",
-            })
-
-        use_direct_matcher_reply = bool(generic_wholesale_reply) or force_direct_media_reply or verified_exact_media_match or (bool(media_reply_hint) and (
-            is_auto_media_placeholder_message(message_text)
-            or not normalize_id(message_text)
-            or (media_type in {"photo", "video"} and not message.get("text"))
-        ))
-        if generic_wholesale_reply:
-            reply_text = clean_sales_reply(generic_wholesale_reply, message_text or "photo", business, lead_state)
-        elif force_direct_media_reply:
-            reply_text = clean_sales_reply(media_reply_hint, message_text or "photo", business, lead_state)
-        elif use_direct_matcher_reply:
-            reply_text = clean_sales_reply(media_reply_hint, message_text or "photo", business, lead_state)
-        else:
-            reply_text = get_ai_reply(
-                message_text or "Photo/Video received",
-                business,
-                "instagram",
-                sender_id,
-                "dm",
-                media_context=media_match_context,
-                media_reply_hint=media_reply_hint,
-                lead_state=lead_state,
-            )
-
-        reply_text = complete_sentence_reply(remove_urls(reply_text), limit=1000)
-        if has_recent_outbound_memory_text(business.get("id"), sender_id, reply_text, "dm"):
-            log("Instagram DM duplicate outbound suppressed from memory", {
-                "customer_id": sender_id,
-                "message_id": message_id,
-                "reply_preview": reply_text[:180],
-            })
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="duplicate_outbound_memory_suppressed")
-            mark_processed(processed_message_ids, message_id)
-            return
-        if has_recent_outbound_text(
-            business.get("id"),
-            "instagram",
-            sender_id,
-            reply_text,
-            "dm",
-        ):
-            log("Instagram DM duplicate outbound suppressed", {
-                "customer_id": sender_id,
-                "message_id": message_id,
-                "reply_preview": reply_text[:180],
-            })
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="duplicate_outbound_suppressed")
-            mark_processed(processed_message_ids, message_id)
-            return
-
-        should_send_catalog = (
-            bool(get_catalog_link(business))
-            and wants_catalog(message_text)
-            and not is_price_question(message_text)
-            and not is_greeting_only(message_text)
-            and not is_auto_media_placeholder_message(message_text)
-            and not (media_type in {"photo", "video", "file", "audio"})
-            and not bool(media_match_context)
-            and not bool(media_reply_hint)
-        )
-        if should_send_catalog:
-            send_result = send_catalog_button(access_token, sender_id, business, reply_text)
-            saved_reply_text = clean_ai_reply_for_catalog(reply_text, business) + "\n[Catalog button sent]"
-        else:
-            send_result = send_dm(access_token, sender_id, reply_text, business)
-            saved_reply_text = reply_text
-
-        raw_result = safe_json(send_result) if send_result is not None else {}
-
-        if send_result is not None and send_result.ok:
-            remember_recent_outbound_text(business.get("id"), sender_id, reply_text, "dm")
-            save_inbox_message(
-                business=business,
-                platform="instagram",
-                sender_id=recipient_id,
-                recipient_id=sender_id,
-                message_text=saved_reply_text,
-                direction="outbound",
-                platform_message_id=raw_result.get("message_id", ""),
-                raw_payload=raw_result,
-                is_read=True,
-                channel="dm",
-            )
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="processed")
-            mark_processed(processed_message_ids, message_id)
-        elif send_result is not None:
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="failed_send")
-            log("Instagram DM send failed", {
-                "customer_id": sender_id,
-                "message_id": message_id,
-                "media_type": media_type,
-                "reply_preview": reply_text[:180],
-                "result": raw_result,
-            })
-
-    except Exception as e:
-        log("Instagram DM processing error", str(e))
-    finally:
-        processing_message_ids.discard(message_id)
-
-
-async def process_instagram_comment_event(entry_id: str, change: dict):
-    value = change.get("value", {})
-    comment_id = normalize_id(value.get("comment_id") or value.get("id"))
-    from_user = value.get("from") or {}
-    commenter_id = normalize_id(from_user.get("id"))
-    commenter_username = normalize_id(from_user.get("username"))
-    post_id = extract_instagram_comment_post_id(value)
-    comment_text = value.get("message") or value.get("text") or ""
-
-    if not comment_id or not comment_text:
-        return
-
-    if already_processed(processed_comment_ids, comment_id):
-        return
-
-    business = find_business_for_webhook(entry_id)
-    if not business:
-        return
-
-    # Prevent self-echo loops and duplicate self threads.
-    if is_own_instagram_comment_actor(business, entry_id, commenter_id, commenter_username):
-        mark_processed(processed_comment_ids, comment_id)
-        return
-
-    access_token = get_business_access_token(business)
-    media_info = fetch_instagram_media_info(access_token, post_id, business) if access_token and post_id else {}
-
-    inbound_payload = dict(value)
-    inbound_payload["post_id"] = post_id
-    if not inbound_payload.get("post_permalink"):
-        inbound_payload["post_permalink"] = media_info.get("post_permalink") or (f"https://www.instagram.com/p/{post_id}/" if post_id else "")
-    if not inbound_payload.get("post_image_url"):
-        inbound_payload["post_image_url"] = media_info.get("post_image_url") or ""
-    if not inbound_payload.get("post_media_type"):
-        inbound_payload["post_media_type"] = normalize_id(media_info.get("post_media_type")).lower()
-
-    save_inbox_message(
-        business=business,
-        platform="instagram",
-        sender_id=commenter_id or comment_id,
-        recipient_id=entry_id,
-        message_text=comment_text,
-        direction="inbound",
-        platform_message_id=comment_id,
-        raw_payload=inbound_payload,
-        customer_name=commenter_username or f"IG User {str(commenter_id or comment_id)[-4:]}",
-        is_read=False,
-        channel="instagram_comment",
-    )
-
-    if is_conversation_finished_message(comment_text):
-        comment_scope = encode_comment_scope("", post_id) if post_id else (commenter_id or comment_id)
-        set_chat_ai_enabled(business.get("id"), "instagram", "instagram_comment", comment_scope, False)
-        mark_processed(processed_comment_ids, comment_id)
-        return
-
-    if not business_allows_auto_reply(business, "instagram", "instagram_comment"):
-        mark_processed(processed_comment_ids, comment_id)
-        return
-
-    comment_scope = encode_comment_scope("", post_id) if post_id else (commenter_id or comment_id)
-    ai_enabled = is_chat_ai_enabled("instagram", "instagram_comment", comment_scope, business.get("id"))
-    # Backward compatibility with old per-customer comment settings.
-    if ai_enabled and comment_scope != (commenter_id or comment_id):
-        ai_enabled = is_chat_ai_enabled("instagram", "instagram_comment", commenter_id or comment_id, business.get("id"))
-    if not ai_enabled:
-        mark_processed(processed_comment_ids, comment_id)
-        return
-
-    if not access_token:
-        mark_processed(processed_comment_ids, comment_id)
-        return
-
-    reaction_reply = reaction_only_reply_text(comment_text)
-    if reaction_reply:
-        reply_text = reaction_reply
-    elif wants_catalog(comment_text):
-        catalog_link = get_catalog_link(business)
-        dm_result = send_catalog_private_reply(access_token, comment_id, business)
-        dm_raw_result = safe_json(dm_result) if dm_result is not None else {}
-        if dm_result is not None and dm_result.ok:
-            save_inbox_message(
-                business=business,
-                platform="instagram",
-                sender_id=entry_id,
-                recipient_id=commenter_id or comment_id,
-                message_text=f"Katalog: {catalog_link}",
-                direction="outbound",
-                platform_message_id=normalize_id(dm_raw_result.get("message_id") or dm_raw_result.get("id")) if isinstance(dm_raw_result, dict) else "",
-                raw_payload=dm_raw_result if isinstance(dm_raw_result, dict) else {},
-                customer_name=commenter_username or f"IG User {str(commenter_id or comment_id)[-4:]}",
-                is_read=True,
-                channel="dm",
-            )
-            reply_text = "Katalog DM orqali yuborildi."
-        else:
-            log("Instagram catalog private reply failed", {"comment_id": comment_id, "result": dm_raw_result})
-            reply_text = "Katalogni DM orqali yuborish uchun bizga xabar yozing."
-    else:
-        reply_text = get_ai_reply(comment_text, business, "instagram", commenter_id or comment_id, "instagram_comment")
-        reply_text = safe_public_comment_reply(reply_text, business)
-
-    reply_text = safe_public_comment_reply(reply_text, business)
-    send_result = reply_to_comment(access_token, comment_id, reply_text, business)
-    raw_result = safe_json(send_result) if send_result is not None else {}
-    if send_result is not None and send_result.ok:
-        outbound_payload = dict(raw_result) if isinstance(raw_result, dict) else {}
-        outbound_payload["post_id"] = post_id
-        if not outbound_payload.get("post_permalink"):
-            outbound_payload["post_permalink"] = inbound_payload.get("post_permalink", "")
-        if not outbound_payload.get("post_image_url"):
-            outbound_payload["post_image_url"] = inbound_payload.get("post_image_url", "")
-        if not outbound_payload.get("post_media_type"):
-            outbound_payload["post_media_type"] = normalize_id(inbound_payload.get("post_media_type")).lower()
-        save_inbox_message(
-            business=business,
-            platform="instagram",
-            sender_id=entry_id,
-            recipient_id=commenter_id or comment_id,
-            message_text=reply_text,
-            direction="outbound",
-            platform_message_id=normalize_id(raw_result.get("id")) if isinstance(raw_result, dict) else "",
-            raw_payload=outbound_payload,
-            customer_name=commenter_username or f"IG User {str(commenter_id or comment_id)[-4:]}",
-            is_read=True,
-            channel="instagram_comment",
-        )
-
-    mark_processed(processed_comment_ids, comment_id)
-
-
-# ============================================================================
-# WHATSAPP
-# ============================================================================
-def get_whatsapp_access_token(business: dict = None):
-    if business:
-        channel_token = get_business_channel_token(
-            business,
-            ["whatsapp"],
-            ["access_token", "whatsapp_access_token"],
-        )
-        if channel_token:
-            return channel_token
-        return business.get("whatsapp_access_token") or WHATSAPP_ACCESS_TOKEN
-    return WHATSAPP_ACCESS_TOKEN
-
-
-def get_whatsapp_phone_number_id(business: dict = None):
-    if business:
-        channel_phone = get_business_channel_token(
-            business,
-            ["whatsapp"],
-            ["phone_number_id", "whatsapp_phone_number_id", "external_account_id"],
-        )
-        if channel_phone:
-            return channel_phone
-        return business.get("whatsapp_phone_number_id") or WHATSAPP_PHONE_NUMBER_ID
-    return WHATSAPP_PHONE_NUMBER_ID
-
-
-def get_telegram_bot_token(business: dict = None):
-    if business:
-        token = get_business_channel_token(
-            business,
-            ["telegram", "telegram_bot"],
-            ["telegram_bot_token", "bot_token", "access_token"],
-        )
-        if token:
-            return token
-    return os.getenv("TELEGRAM_BOT_TOKEN", "")
-
-
-def send_whatsapp_text(to: str, text: str, business: dict = None):
-    token = get_whatsapp_access_token(business)
-    phone_number_id = get_whatsapp_phone_number_id(business)
-
-    if not token or not phone_number_id:
-        return None
-
-    url = f"{GRAPH_FACEBOOK}/{phone_number_id}/messages"
-
-    res = requests.post(
-        url,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "messaging_product": "whatsapp",
-            "to": normalize_id(to),
-            "type": "text",
-            "text": {"body": text[:4000]},
-        },
-        timeout=30,
-    )
-
-    log("WhatsApp send text", {"status": res.status_code, "body": res.text})
-    return res
-
-
-def send_whatsapp_image_upload(to: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = "",
-                               business: dict = None):
-    token = get_whatsapp_access_token(business)
-    phone_number_id = get_whatsapp_phone_number_id(business)
-
-    if not token or not phone_number_id:
-        return False, {"error": "Missing WhatsApp access token or phone number id"}, ""
-
-    upload_res = requests.post(
-        f"{GRAPH_FACEBOOK}/{phone_number_id}/media",
-        headers={"Authorization": f"Bearer {token}"},
-        data={
-            "messaging_product": "whatsapp",
-            "type": mime_type or "image/jpeg",
-        },
-        files={"file": (filename or "image.jpg", file_bytes, mime_type or "image/jpeg")},
-        timeout=60,
-    )
-
-    upload_result = safe_json(upload_res)
-    log("WhatsApp media upload", {"status": upload_res.status_code, "body": upload_result})
-
-    if not upload_res.ok:
-        return False, upload_result, ""
-
-    media_id = upload_result.get("id", "")
-    if not media_id:
-        return False, {"error": "WhatsApp media upload returned no media id", "meta": upload_result}, ""
-
-    send_res = requests.post(
-        f"{GRAPH_FACEBOOK}/{phone_number_id}/messages",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "messaging_product": "whatsapp",
-            "to": normalize_id(to),
-            "type": "image",
-            "image": {
-                "id": media_id,
-                **({"caption": caption[:1024]} if caption else {}),
-            },
-        },
-        timeout=30,
-    )
-
-    send_result = safe_json(send_res)
-    log("WhatsApp image send", {"status": send_res.status_code, "body": send_result})
-    return send_res.ok, send_result, media_id
-
-
-def send_whatsapp_audio_upload(to: str, file_bytes: bytes, filename: str, mime_type: str, business: dict = None):
-    token = get_whatsapp_access_token(business)
-    phone_number_id = get_whatsapp_phone_number_id(business)
-
-    if not token or not phone_number_id:
-        return False, {"error": "Missing WhatsApp access token or phone number id"}, ""
-
-    upload_res = requests.post(
-        f"{GRAPH_FACEBOOK}/{phone_number_id}/media",
-        headers={"Authorization": f"Bearer {token}"},
-        data={
-            "messaging_product": "whatsapp",
-            "type": mime_type or "audio/ogg",
-        },
-        files={"file": (filename or "voice.ogg", file_bytes, mime_type or "audio/ogg")},
-        timeout=60,
-    )
-
-    upload_result = safe_json(upload_res)
-    log("WhatsApp audio upload", {"status": upload_res.status_code, "body": upload_result})
-
-    if not upload_res.ok:
-        return False, upload_result, ""
-
-    media_id = upload_result.get("id", "")
-    if not media_id:
-        return False, {"error": "WhatsApp audio upload returned no media id", "meta": upload_result}, ""
-
-    send_res = requests.post(
-        f"{GRAPH_FACEBOOK}/{phone_number_id}/messages",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "messaging_product": "whatsapp",
-            "to": normalize_id(to),
-            "type": "audio",
-            "audio": {"id": media_id},
-        },
-        timeout=30,
-    )
-
-    send_result = safe_json(send_res)
-    log("WhatsApp audio send", {"status": send_res.status_code, "body": send_result})
-    return send_res.ok, send_result, media_id
-
-
-def send_telegram_bot_photo_upload(chat_id: str, file_bytes: bytes, filename: str, mime_type: str, caption: str = "", business: dict = None):
-    token = get_telegram_bot_token(business)
-
-    if not token:
-        return None
-
-    data = {"chat_id": chat_id}
-    if caption:
-        data["caption"] = caption[:1024]
-
-    return requests.post(
-        f"https://api.telegram.org/bot{token}/sendPhoto",
-        data=data,
-        files={"photo": (filename or "image.jpg", file_bytes, mime_type or "image/jpeg")},
-        timeout=60,
-    )
-
-
-def send_telegram_bot_voice_upload(chat_id: str, file_bytes: bytes, filename: str, mime_type: str, business: dict = None):
-    token = get_telegram_bot_token(business)
-
-    if not token:
-        return None
-
-    return requests.post(
-        f"https://api.telegram.org/bot{token}/sendVoice",
-        data={"chat_id": chat_id},
-        files={"voice": (filename or "voice.ogg", file_bytes, mime_type or "audio/ogg")},
-        timeout=60,
-    )
-
-
-def get_whatsapp_media_proxy_url(media_id: str):
-    return f"{PUBLIC_BASE_URL}/api/whatsapp/media/{media_id}"
-
-
-def cleanup_whatsapp_chat_memory(ttl_seconds: int = 24 * 60 * 60):
-    now = time.time()
-    expired = [
-        phone
-        for phone, data in WHATSAPP_CHAT_MEMORY.items()
-        if now - float((data or {}).get("last_seen", 0)) > ttl_seconds
-    ]
-    for phone in expired:
-        WHATSAPP_CHAT_MEMORY.pop(phone, None)
-
-
-def get_whatsapp_chat(phone: str):
-    phone = normalize_id(phone)
-    cleanup_whatsapp_chat_memory()
-
-    if phone not in WHATSAPP_CHAT_MEMORY:
-        WHATSAPP_CHAT_MEMORY[phone] = {
-            "intro_sent": False,
-            "messages": [],
-            "last_seen": time.time(),
-        }
-
-    WHATSAPP_CHAT_MEMORY[phone]["last_seen"] = time.time()
-    return WHATSAPP_CHAT_MEMORY[phone]
-
-
-def add_whatsapp_memory(phone: str, role: str, content: str, limit: int = 12):
-    if not content:
-        return
-    chat = get_whatsapp_chat(phone)
-    chat["messages"].append({"role": role, "content": content})
-    chat["messages"] = chat["messages"][-limit:]
-
-
-def first_whatsapp_intro_message(business: dict = None):
-    settings = get_ai_prompt_settings((business or {}).get("id", ""))
-    business_name = normalize_id((business or {}).get("business_name")) or "bizning kompaniya"
-    return settings.get("opening_message") or f"Assalomu alaykum. Men {business_name} vakiliman. Qanday yordam bera olaman?"
-
-
-def build_whatsapp_system_prompt(business: dict, intro_sent: bool):
-    prompt = build_platform_prompt("whatsapp", business)
-    return f"""
-{prompt}
-
-WhatsApp opening state:
-- intro_sent = {str(bool(intro_sent)).lower()}.
-- If intro_sent is false, use the configured opening message and lead collection rules.
-- If intro_sent is true, do not repeat the opening information request unless the customer asks.
-
-Fallback catalog link:
-{get_catalog_link(business) or WHATSAPP_CATALOG_LINK}
-"""
-
-
-def get_whatsapp_ai_reply(phone: str, user_text: str, business: dict, media_context: str = "", media_reply_hint: str = "") -> str:
-    chat = get_whatsapp_chat(phone)
-
-    off_topic_reply = unrelated_topic_reply(user_text, business)
-    if off_topic_reply:
-        add_whatsapp_memory(phone, "user", user_text)
-        add_whatsapp_memory(phone, "assistant", off_topic_reply)
-        return off_topic_reply
-
-    if not chat.get("intro_sent"):
-        chat["intro_sent"] = True
-        intro = first_whatsapp_intro_message(business)
-        add_whatsapp_memory(phone, "assistant", intro)
-        return intro
-
-    messages = [{"role": "system", "content": build_whatsapp_system_prompt(business, True)}]
-    if media_context:
-        messages.append({"role": "system", "content": media_context})
-    if media_reply_hint:
-        messages.append({
-            "role": "system",
-            "content": f"Suggested product answer from media matcher: {media_reply_hint}. Keep the answer in the customer's language and do not ask which model if the matcher already found one.",
-        })
-    messages.extend(chat.get("messages", []))
-    messages.append({"role": "user", "content": user_text})
-
-    try:
-        business_with_fallback_model = dict(business or {})
-        business_with_fallback_model.setdefault("ai_model", WHATSAPP_FALLBACK_MODEL)
-        reply = call_ai_chat(messages, business_with_fallback_model, "WhatsApp AI response")
-        if reply:
-            return clean_sales_reply(reply[:1500], user_text, business)
-        return "Xabaringiz qabul qilindi 😊 Qanday yordam kerak?"
-    except Exception as e:
-        log("WhatsApp AI error", str(e))
-        return "Xabaringiz qabul qilindi 😊 Qanday yordam kerak?"
-
-
-async def process_whatsapp_message(change: dict):
-    value = change.get("value", {})
-    messages = value.get("messages", []) or []
-    contacts = value.get("contacts", []) or []
-    metadata = value.get("metadata", {}) or {}
-
-    phone_number_id = normalize_id(metadata.get("phone_number_id") or WHATSAPP_PHONE_NUMBER_ID)
-
-    business = get_business_by_whatsapp_phone_number_id(phone_number_id) or get_active_whatsapp_business()
-
-    if not business:
-        log("WhatsApp skipped: no business found", {"phone_number_id": phone_number_id})
-        return
-
-    customer_name = ""
-    if contacts:
-        customer_name = contacts[0].get("profile", {}).get("name", "") or ""
-
-    for msg in messages:
-        message_id = normalize_id(msg.get("id"))
-        sender_id = normalize_id(msg.get("from"))
-        msg_type = msg.get("type")
-
-        if not message_id or not sender_id:
-            continue
-
-        if is_processed(processed_message_ids, message_id):
-            continue
-
-        if message_id in processing_message_ids:
-            continue
-
-        processing_message_ids.add(message_id)
-
-        try:
-            text = ""
-            media_type = None
-            media_url = None
-            whatsapp_media_id = None
-            mime_type = None
-            file_name = None
-
-            if msg_type == "text":
-                text = msg.get("text", {}).get("body", "")
-
-            elif msg_type in ["image", "video", "audio", "document", "sticker"]:
-                media = msg.get(msg_type, {}) or {}
-                whatsapp_media_id = media.get("id")
-                mime_type = media.get("mime_type")
-                file_name = media.get("filename")
-
-                media_type = {
-                    "image": "photo",
-                    "video": "video",
-                    "audio": "audio",
-                    "document": "file",
-                    "sticker": "photo",
-                }.get(msg_type, "file")
-
-                default_text = {
-                    "image": "📸 Photo",
-                    "video": "🎥 Video",
-                    "audio": "🎤 Audio",
-                    "document": "📎 Document",
-                    "sticker": "🖼 Sticker",
-                }.get(msg_type, "📎 File")
-
-                text = media.get("caption") or default_text
-
-                if whatsapp_media_id:
-                    media_url = get_whatsapp_media_proxy_url(whatsapp_media_id)
-
-            elif msg_type == "button":
-                text = msg.get("button", {}).get("text", "")
-
-            elif msg_type == "interactive":
-                interactive = msg.get("interactive", {}) or {}
-                if interactive.get("type") == "button_reply":
-                    text = interactive.get("button_reply", {}).get("title", "")
-                elif interactive.get("type") == "list_reply":
-                    text = interactive.get("list_reply", {}).get("title", "")
-                else:
-                    text = "Interactive message"
-
-            else:
-                text = f"Unsupported WhatsApp message type: {msg_type}"
-
-            save_inbox_message(
-                business=business,
-                platform="whatsapp",
-                sender_id=sender_id,
-                recipient_id=phone_number_id,
-                message_text=text,
-                direction="inbound",
-                platform_message_id=message_id,
-                raw_payload=msg,
-                customer_name=customer_name,
-                is_read=False,
-                media_type=media_type,
-                media_url=media_url,
-                channel="whatsapp",
-                file_name=file_name,
-                mime_type=mime_type,
-                whatsapp_media_id=whatsapp_media_id,
-            )
-
-            if not business_allows_auto_reply(business, "whatsapp", "whatsapp"):
-                mark_processed(processed_message_ids, message_id)
-                continue
-
-            if not is_chat_ai_enabled("whatsapp", "whatsapp", sender_id, business.get("id")):
-                mark_processed(processed_message_ids, message_id)
-                continue
-
-            add_whatsapp_memory(sender_id, "user", text or f"Customer sent {msg_type}")
-
-            if msg_type == "text":
-                reply_text = get_whatsapp_ai_reply(sender_id, text, business)
-            elif media_type:
-                media_match_context = ""
-                media_reply_hint = ""
-                if media_url and media_type in {"photo", "file"}:
-                    media_match = analyze_media_for_sales_reply(
-                        media_url=media_url,
-                        user_text=text or "",
-                        media_type=media_type,
-                        access_token=get_whatsapp_access_token(business),
-                    )
-                    if media_match:
-                        media_match_context = media_match.get("context", "")
-                        media_reply_hint = media_match.get("reply_hint", "")
-                reply_text = get_whatsapp_ai_reply(
-                    sender_id,
-                    text or "Customer sent a media message.",
-                    business,
-                    media_context=media_match_context,
-                    media_reply_hint=media_reply_hint,
-                )
-            else:
-                reply_text = get_whatsapp_ai_reply(sender_id, text, business)
-
-            send_result = send_whatsapp_text(sender_id, reply_text, business)
-            raw_result = safe_json(send_result) if send_result is not None else {}
-
-            if send_result is not None and send_result.ok:
-                add_whatsapp_memory(sender_id, "assistant", reply_text)
-                save_inbox_message(
-                    business=business,
-                    platform="whatsapp",
-                    sender_id=phone_number_id,
-                    recipient_id=sender_id,
-                    message_text=reply_text,
-                    direction="outbound",
-                    platform_message_id=raw_result.get("messages", [{}])[0].get("id", ""),
-                    raw_payload=raw_result,
-                    is_read=True,
-                    channel="whatsapp",
-                )
-                mark_processed(processed_message_ids, message_id)
-            else:
-                log("WhatsApp reply failed; not marking processed", raw_result)
-
-        except Exception as e:
-            log("WhatsApp processing error", str(e))
-        finally:
-            processing_message_ids.discard(message_id)
-
-
-# ============================================================================
-# OAUTH
-# ============================================================================
-def exchange_instagram_code_for_token(code: str):
-    res = requests.post(
-        "https://api.instagram.com/oauth/access_token",
-        data={
-            "client_id": META_APP_ID,
-            "client_secret": META_APP_SECRET,
-            "grant_type": "authorization_code",
-            "redirect_uri": INSTAGRAM_REDIRECT_URI,
-            "code": code,
-        },
-        timeout=30,
-    )
-    log("Instagram short-lived token exchange", {"status": res.status_code, "body": res.text})
-    res.raise_for_status()
-    return res.json()
-
-
-def exchange_for_long_lived_token(short_lived_token: str) -> str:
-    res = requests.get(
-        "https://graph.instagram.com/access_token",
-        params={
-            "grant_type": "ig_exchange_token",
-            "client_secret": META_APP_SECRET,
-            "access_token": short_lived_token,
-        },
-        timeout=30,
-    )
-    if not res.ok:
-        return short_lived_token
-    return res.json().get("access_token") or short_lived_token
-
-
-def get_instagram_user(access_token: str):
-    res = requests.get(
-        f"{GRAPH_INSTAGRAM}/me",
-        params={"fields": "id,username,account_type", "access_token": access_token},
-        timeout=30,
-    )
-    return res.json() if res.ok else {}
-
-
-def encode_oauth_state(owner_email: str = "") -> str:
-    payload = {
-        "owner_email": normalize_email(owner_email),
-        "nonce": secrets.token_urlsafe(10),
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
-
-
-def decode_oauth_state(state: str) -> dict:
-    try:
-        if not state:
-            return {}
-        padded = state + ("=" * (-len(state) % 4))
-        raw = base64.urlsafe_b64decode(padded.encode()).decode()
-        data = json.loads(raw)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
-def exchange_facebook_code_for_user_token(code: str) -> str:
-    res = requests.get(
-        f"{GRAPH_FACEBOOK}/oauth/access_token",
-        params={
-            "client_id": META_APP_ID,
-            "client_secret": META_APP_SECRET,
-            "redirect_uri": FACEBOOK_REDIRECT_URI,
-            "code": code,
-        },
-        timeout=30,
-    )
-    log("Facebook short-lived token exchange", {"status": res.status_code, "body": res.text})
-    res.raise_for_status()
-    return normalize_id((res.json() or {}).get("access_token"))
-
-
-def exchange_facebook_long_lived_token(short_lived_token: str) -> str:
-    if not short_lived_token:
-        return ""
-    try:
-        res = requests.get(
-            f"{GRAPH_FACEBOOK}/oauth/access_token",
-            params={
-                "grant_type": "fb_exchange_token",
-                "client_id": META_APP_ID,
-                "client_secret": META_APP_SECRET,
-                "fb_exchange_token": short_lived_token,
-            },
-            timeout=30,
-        )
-        if not res.ok:
-            return short_lived_token
-        return normalize_id((res.json() or {}).get("access_token")) or short_lived_token
-    except Exception:
-        return short_lived_token
-
-
-def get_facebook_user_profile(user_token: str) -> dict:
-    if not user_token:
-        return {}
-    try:
-        res = requests.get(
-            f"{GRAPH_FACEBOOK}/me",
-            params={"fields": "id,name,email", "access_token": user_token},
-            timeout=30,
-        )
-        return res.json() if res.ok else {}
-    except Exception:
-        return {}
-
-
-def get_facebook_pages_with_instagram(user_token: str):
-    if not user_token:
-        return []
-    res = requests.get(
-        f"{GRAPH_FACEBOOK}/me/accounts",
-        params={
-            "fields": "id,name,access_token,instagram_business_account{id,username}",
-            "access_token": user_token,
-        },
-        timeout=30,
-    )
-    log("Facebook pages fetch", {"status": res.status_code, "body": res.text})
-    if not res.ok:
-        return []
-    data = res.json() or {}
-    return data.get("data", []) if isinstance(data, dict) else []
-
-
-def subscribe_page_to_webhooks(page_id: str, page_access_token: str):
-    page_id = normalize_id(page_id)
-    if not page_id or not page_access_token:
-        return False, {"error": "Missing page_id or page_access_token"}
-    try:
-        res = requests.post(
-            f"{GRAPH_FACEBOOK}/{page_id}/subscribed_apps",
-            params={"subscribed_fields": "messages,messaging_postbacks,comments", "access_token": page_access_token},
-            timeout=30,
-        )
-        body = safe_json(res)
-        log("Page webhook subscribe", {"page_id": page_id, "status": res.status_code, "body": body})
-        return res.ok, body
-    except Exception as exc:
-        return False, {"error": str(exc)}
-
-
-def subscribe_whatsapp_waba_to_webhooks(waba_id: str, access_token: str):
-    waba_id = normalize_id(waba_id)
-    access_token = normalize_id(access_token)
-    if not waba_id or not access_token:
-        return False, {"error": "Missing waba_id or access_token"}
-    try:
-        res = requests.post(
-            f"{GRAPH_FACEBOOK}/{waba_id}/subscribed_apps",
-            params={"access_token": access_token},
-            timeout=30,
-        )
-        body = safe_json(res)
-        log("WhatsApp WABA webhook subscribe", {"waba_id": waba_id, "status": res.status_code, "body": body})
-        return res.ok, body
-    except Exception as exc:
-        return False, {"error": str(exc)}
-
-
-def get_whatsapp_waba_phone_numbers(waba_id: str, access_token: str):
-    waba_id = normalize_id(waba_id)
-    access_token = normalize_id(access_token)
-    if not waba_id or not access_token:
-        return []
-    try:
-        res = requests.get(
-            f"{GRAPH_FACEBOOK}/{waba_id}/phone_numbers",
-            params={"fields": "id,display_phone_number,verified_name,quality_rating", "access_token": access_token},
-            timeout=30,
-        )
-        body = safe_json(res)
-        log("WhatsApp WABA phone numbers", {"waba_id": waba_id, "status": res.status_code, "body": body})
-        if not res.ok:
-            return []
-        return body.get("data", []) if isinstance(body, dict) else []
-    except Exception as exc:
-        log("WhatsApp phone number fetch failed", str(exc))
-        return []
-
-
-def persist_whatsapp_embedded_business(owner_email: str, waba_id: str, phone_number_id: str, access_token: str):
-    phone_number_id = normalize_id(phone_number_id)
-    if not phone_number_id:
-        return None
-
-    existing = get_business_by_whatsapp_phone_number_id(phone_number_id)
-    payload = {
-        "instagram_business_id": f"whatsapp_{phone_number_id}",
-        "business_name": "WhatsApp Business",
-        "business_type": "WhatsApp Business",
-        "oauth_provider": "whatsapp_embedded",
-        "whatsapp_business_account_id": normalize_id(waba_id) or None,
-        "whatsapp_phone_number_id": phone_number_id,
-        "whatsapp_access_token": normalize_id(access_token),
-        "token_preview": safe_token(access_token),
-        "bot_enabled": True,
-        "auto_reply_dms": True,
-        "auto_reply_comments": True,
-        "human_takeover_enabled": True,
-        "telegram_bot_enabled": True,
-        "whatsapp_enabled": True,
-        "analytics_enabled": True,
-        "automation_mode": "FULL_AUTO",
-        "bot_language_mode": "auto",
-        "memory_enabled": True,
-        "memory_limit": 8,
-        "language": "uz",
-    }
-
-    optional = set(payload.keys())
-    for _ in range(len(optional) + 1):
-        try:
-            if existing:
-                result = supabase.table("businesses").update(payload).eq("id", existing["id"]).execute()
-                business_id = existing["id"]
-            else:
-                result = supabase.table("businesses").upsert(
-                    payload,
-                    on_conflict="instagram_business_id",
-                ).execute()
-                rows = result.data or []
-                business_id = rows[0].get("id") if rows else ""
-            if owner_email and business_id:
-                assign_business_owner(owner_email, business_id)
-            return result.data
-        except Exception as exc:
-            message = str(exc)
-            match = re.search(r"Could not find the '([^']+)' column", message)
-            missing_column = match.group(1) if match else ""
-            if missing_column and missing_column in payload:
-                payload.pop(missing_column, None)
-                continue
-            raise
-    return None
-
-
-def assign_business_owner(user_email: str, business_id: str, role: str = "owner"):
-    clean_email = normalize_email(user_email)
-    business_id = normalize_id(business_id)
-    if not clean_email or not business_id:
-        return
-    try:
-        supabase.table("business_users").upsert(
-            {"user_email": clean_email, "business_id": business_id, "role": role},
-            on_conflict="user_email,business_id",
-        ).execute()
-    except Exception as e:
-        log("business_users upsert failed", str(e))
-
-
-def upsert_business(
-        instagram_business_id: str,
-        username: str,
-        access_token: str,
-        oauth_provider: str = "instagram_direct",
-        facebook_page_id: str = "",
-        facebook_page_name: str = "",
-        page_access_token: str = "",
-):
-    instagram_business_id = normalize_id(instagram_business_id)
-    facebook_page_id = normalize_id(facebook_page_id)
-    existing = get_business(instagram_business_id)
-
-    update_data = {
-        "instagram_business_id": instagram_business_id,
-        "business_name": username or f"instagram_{instagram_business_id}",
-        "access_token": access_token or "",
-        "page_access_token": page_access_token or None,
-        "token_preview": safe_token(access_token),
-        "oauth_provider": oauth_provider,
-        "facebook_page_id": facebook_page_id or None,
-        "facebook_page_name": facebook_page_name or None,
-        "bot_enabled": True,
-        "auto_reply_dms": True,
-        "auto_reply_comments": True,
-        "human_takeover_enabled": True,
-        "telegram_bot_enabled": True,
-        "whatsapp_enabled": False,
-        "analytics_enabled": True,
-        "automation_mode": "FULL_AUTO",
-        "bot_language_mode": "auto",
-        "memory_enabled": True,
-        "memory_limit": 8,
-    }
-
-    if existing:
-        return supabase.table("businesses").update(update_data).eq("id", existing["id"]).execute().data
-
-    insert_data = {
-        **update_data,
-        "business_type": "Instagram Business",
-        "language": "uz",
-        "tone": "friendly, polite, sales-focused",
-        "knowledge": "",
-        "products": "",
-        "prices": "",
-        "delivery_info": "",
-        "working_hours": "",
-        "faq": "",
-        "catalog_link": "",
-        "sales_phone": "",
-        "telegram_single": "",
-        "telegram_package": "",
-        "telegram_bag": "",
-        "ai_reply_rules": "",
-    }
-
-    return supabase.table("businesses").upsert(insert_data, on_conflict="instagram_business_id").execute().data
-
-
-# ============================================================================
-# API ROUTES - HOME & HEALTH
-# ============================================================================
-@app.head("/")
-async def head_home():
-    return PlainTextResponse("", status_code=200)
-
-
-@app.get("/", response_class=HTMLResponse)
-async def home():
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>InsaAgent</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-    </head>
-    <body style="font-family: Arial; padding:40px;">
-        <h1>InsaAgent</h1>
-        <p>AI-powered Instagram, Telegram and WhatsApp automation platform for businesses.</p>
-        <p>Status: Online</p>
-        <p><a href="/privacy">Privacy Policy</a> | <a href="/terms">Terms</a></p>
-    </body>
-    </html>
-    """
-
-
-@app.get("/api/health")
-async def api_health():
-    return {
-        "status": "ok",
-        "version": "5.1.0-telegram-voice",
-        "ffmpeg": bool(shutil.which("ffmpeg")),
-        "product_matcher_enabled": PRODUCT_MATCHER_ENABLED,
-        "product_matcher_local_enabled": PRODUCT_MATCHER_LOCAL_ENABLED,
-        "product_matcher_local_only": PRODUCT_MATCHER_LOCAL_ONLY,
-        "product_matcher_local_catalog_table": PRODUCT_MATCHER_LOCAL_CATALOG_TABLE,
-        "product_matcher_catalog_database": normalize_id(CATALOG_SUPABASE_URL).split("//")[-1].split(".")[0] if CATALOG_SUPABASE_URL else "",
-        "product_matcher_urls": PRODUCT_MATCHER_API_URLS,
-        "product_matcher_context_ttl_seconds": PRODUCT_MATCHER_CONTEXT_TTL_SECONDS,
-    }
-
-
-@app.post("/api/v2/video-analyzer/analyze")
-async def api_video_analyzer_analyze(request: Request):
-    try:
-        body = await request.json()
-        if not isinstance(body, dict):
-            return JSONResponse({"status": "error", "message": "Invalid JSON body"}, status_code=400)
-        report, model = analyze_video_content(body)
-        return {"status": "ok", "ok": True, "data": {"provider": "gemini", "model": model, "report": report}}
-    except Exception as exc:
-        if VideoAnalyzerError is not None and isinstance(exc, VideoAnalyzerError):
-            return JSONResponse({"status": "error", "message": exc.message}, status_code=exc.status_code)
-        return JSONResponse({"status": "error", "message": f"Video analyzer error: {exc}"}, status_code=500)
-
-
-@app.get("/api/catalog/embeddings/status")
-async def api_catalog_embeddings_status():
-    if catalog_matcher_module is None:
+      };
+      setThreads(prev => {
+        const existing = prev[targetConv.id]?.messages || prev[targetConv.id] || [];
         return {
-            "status": "unavailable",
-            "error": str(globals().get("CATALOG_MATCHER_IMPORT_ERROR", "catalog_matcher not loaded")),
-        }
-    try:
-        return {"status": "ok", "embedding_status": catalog_matcher_module.get_embedding_status()}
-    except Exception as exc:
-        return {"status": "error", "error": str(exc)}
-
-
-@app.post("/api/catalog/embeddings/sync")
-async def api_catalog_embeddings_sync(force: bool = True):
-    if catalog_matcher_module is None:
-        return {
-            "status": "unavailable",
-            "error": str(globals().get("CATALOG_MATCHER_IMPORT_ERROR", "catalog_matcher not loaded")),
-        }
-    try:
-        return {"status": "ok", "result": catalog_matcher_module.sync_catalog_embeddings(force=bool(force))}
-    except Exception as exc:
-        return {"status": "error", "error": str(exc)}
-
-
-@app.get("/api/health/deep")
-async def api_health_deep(
-        token: str = "",
-        x_dashboard_secret: str = Header(default=""),
-):
-    if require_dashboard_media_secret(token, x_dashboard_secret):
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    checks = {}
-
-    try:
-        supabase.table("businesses").select("id").limit(1).execute()
-        checks["supabase"] = "ok"
-    except Exception as exc:
-        checks["supabase"] = f"error: {exc}"
-
-    checks["telegram_bot_token"] = "ok" if os.getenv("TELEGRAM_BOT_TOKEN", "") else "missing"
-    checks["telegram_user_client"] = "configured" if (
-        os.getenv("TELEGRAM_API_ID", "")
-        and os.getenv("TELEGRAM_API_HASH", "")
-        and os.getenv("TELEGRAM_USER_SESSION", "")
-    ) else "missing_env"
-    checks["whatsapp_access_token"] = "ok" if WHATSAPP_ACCESS_TOKEN else "missing"
-    checks["product_matcher_enabled"] = "ok" if PRODUCT_MATCHER_ENABLED else "disabled"
-    checks["product_matcher_local_enabled"] = "ok" if PRODUCT_MATCHER_LOCAL_ENABLED else "disabled"
-    checks["product_matcher_local_catalog_rows_cached"] = len(
-        PRODUCT_MATCHER_LOCAL_CATALOG_CACHE.get("rows", []) if isinstance(PRODUCT_MATCHER_LOCAL_CATALOG_CACHE, dict) else []
-    )
-    checks["product_matcher_url_count"] = len(PRODUCT_MATCHER_API_URLS)
-    if PRODUCT_MATCHER_ENABLED and PRODUCT_MATCHER_API_URLS:
-        matcher_url = product_matcher_health_url(PRODUCT_MATCHER_API_URLS[0])
-        try:
-            matcher_res = requests.get(matcher_url, timeout=min(PRODUCT_MATCHER_TIMEOUT_SECONDS, 10))
-            checks["product_matcher_health"] = "ok" if matcher_res.ok else f"error_http_{matcher_res.status_code}"
-        except Exception as exc:
-            checks["product_matcher_health"] = f"error: {exc}"
-    elif PRODUCT_MATCHER_ENABLED:
-        checks["product_matcher_health"] = "missing_url"
-
-    healthy = (
-        checks["supabase"] == "ok"
-        and checks["telegram_bot_token"] == "ok"
-    )
-
-    return {
-        "status": "ok" if healthy else "degraded",
-        "version": "5.1.1-telegram-media-fallback",
-        "checks": checks,
+          ...prev,
+          [targetConv.id]: {
+            updatedAt: Date.now(),
+            messages: [...existing, localMessage],
+          },
+        };
+      });
+      return true;
     }
 
-
-# ============================================================================
-# API ROUTES - V2 (REACT UI)
-# ============================================================================
-
-@app.post("/api/v2/auth/login")
-async def dashboard_login(payload: DashboardLoginRequest):
-    email = normalize_email(payload.email)
-    password = str(payload.password or "")
-    if not email or not password:
-        return JSONResponse({"status": "error", "error": "Email and password are required."}, status_code=400)
-
-    if is_local_dashboard_demo_mode():
-        token = create_dashboard_auth_token(email=email, is_admin=True, role="super_admin")
-        return {
-            "status": "ok",
-            "data": {
-                "user": {
-                    "id": "localdev-user",
-                    "email": email,
-                    "is_admin": True,
-                    "role": "super_admin",
-                },
-                "token": token,
-                "businesses": [build_local_dashboard_demo_business(email)],
-            },
-        }
-
-    try:
-        user_result = (
-            supabase.table("dashboard_users")
-            .select("*")
-            .eq("email", email)
-            .eq("is_active", True)
-            .limit(1)
-            .execute()
-        )
-        users = user_result.data or []
-        if not users:
-            return JSONResponse({"status": "error", "error": "Invalid email or password."}, status_code=401)
-
-        user = users[0]
-        if not verify_dashboard_password(password, user.get("password_hash", "")):
-            return JSONResponse({"status": "error", "error": "Invalid email or password."}, status_code=401)
-
-        businesses = []
-        links = []
-        if is_super_admin_email(email):
-            businesses = (supabase.table("businesses").select("*").order("created_at", desc=True).execute().data or [])
-        else:
-            links = (
-                supabase.table("business_users")
-                .select("business_id,role")
-                .eq("user_email", email)
-                .execute()
-                .data
-                or []
-            )
-            business_ids = [row.get("business_id") for row in links if row.get("business_id")]
-            if business_ids:
-                businesses = (
-                    supabase.table("businesses")
-                    .select("*")
-                    .in_("id", business_ids)
-                    .order("created_at", desc=True)
-                    .execute()
-                    .data
-                    or []
-                )
-
-        is_admin = is_super_admin_email(email)
-        role_from_user = normalize_id(user.get("role") or "").lower()
-        if is_admin:
-            role = "super_admin"
-        else:
-            # Prefer per-business role to avoid stale global role in dashboard_users.
-            role = pick_user_business_role(email) or role_from_user or "operator"
-        token = create_dashboard_auth_token(email=email, is_admin=is_admin, role=role)
-        return {
-            "status": "ok",
-            "data": {
-                "user": {
-                    "id": user.get("id"),
-                    "email": email,
-                    "is_admin": is_admin,
-                    "role": role or "operator",
-                },
-                "token": token,
-                "businesses": businesses,
-            },
-        }
-    except Exception as exc:
-        return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
-
-
-@app.post("/api/v2/auth/signup")
-async def dashboard_signup(payload: DashboardSignupRequest):
-    email = normalize_email(payload.email)
-    password = str(payload.password or "")
-    role = normalize_id(payload.role or "operator").lower()
-    business_id = normalize_id(payload.business_id)
-
-    if not email or not password:
-        return JSONResponse({"status": "error", "error": "Email/ID and password are required."}, status_code=400)
-    if len(password) < 6:
-        return JSONResponse({"status": "error", "error": "Password must be at least 6 characters."}, status_code=400)
-    if role not in {"owner", "admin", "operator"}:
-        return JSONResponse({"status": "error", "error": "Role must be owner, admin or operator."}, status_code=400)
-    if role == "operator" and not business_id:
-        return JSONResponse({"status": "error", "error": "Operator sign-up requires business_id."}, status_code=400)
-
-    if is_local_dashboard_demo_mode():
-        effective_role = "admin" if role == "admin" else "operator"
-        token = create_dashboard_auth_token(email=email, is_admin=(effective_role == "admin"), role=effective_role)
-        return {
-            "status": "ok",
-            "data": {
-                "user": {
-                    "id": "localdev-signup-user",
-                    "email": email,
-                    "is_admin": effective_role == "admin",
-                    "role": effective_role,
-                },
-                "token": token,
-                "businesses": [build_local_dashboard_demo_business(email)],
-            },
-        }
-
-    try:
-        existing = (
-            supabase.table("dashboard_users")
-            .select("id,email")
-            .eq("email", email)
-            .limit(1)
-            .execute()
-            .data
-            or []
-        )
-        if existing:
-            return JSONResponse({"status": "error", "error": "This ID already exists."}, status_code=409)
-
-        supabase.table("dashboard_users").insert(
-            {
-                "email": email,
-                "password_hash": hash_dashboard_password(password),
-                "is_active": True,
-            }
-        ).execute()
-
-        if business_id:
-            supabase.table("business_users").upsert(
-                {
-                    "user_email": email,
-                    "business_id": business_id,
-                    "role": role,
-                    "full_name": normalize_id(payload.full_name),
-                },
-                on_conflict="user_email,business_id",
-            ).execute()
-
-        is_admin = is_super_admin_email(email)
-        effective_role = "super_admin" if is_admin else role
-        token = create_dashboard_auth_token(email=email, is_admin=is_admin, role=effective_role)
-        return {
-            "status": "ok",
-            "data": {
-                "user": {
-                    "email": email,
-                    "is_admin": is_admin,
-                    "role": effective_role,
-                },
-                "token": token,
-            },
-        }
-    except Exception as exc:
-        return JSONResponse({"status": "error", "error": str(exc)}, status_code=500)
-
-
-@app.get("/api/v2/operators")
-async def list_operators_v2(
-    business_id: str = "",
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    business_id = normalize_id(business_id)
-    if business_id and not can_access_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    try:
-        query = supabase.table("business_users").select("user_email,role,business_id").eq("role", "operator")
-        if business_id:
-            query = query.eq("business_id", business_id)
-        elif not access.get("is_admin"):
-            allowed = access.get("business_ids") or []
-            if not allowed:
-                return {"status": "ok", "data": []}
-            query = query.in_("business_id", allowed)
-        rows = query.execute().data or []
-        return {
-            "status": "ok",
-            "data": [
-                {
-                    "login_id": normalize_email(row.get("user_email")),
-                    "role": row.get("role") or "operator",
-                    "business_id": row.get("business_id"),
-                }
-                for row in rows
-            ],
-        }
-    except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-
-@app.post("/api/v2/operators")
-async def create_operator_v2(
-    body: OperatorCreateRequest,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-    role = normalize_id(access.get("role", "")).lower()
-    if not access.get("is_admin") and role not in BUSINESS_ADMIN_ROLES:
-        return JSONResponse({"status": "error", "message": "Only admin can create operator accounts"}, status_code=403)
-
-    business_id = normalize_id(body.business_id)
-    login_id = normalize_email(body.login_id)
-    password = str(body.password or "")
-    if not business_id:
-        return JSONResponse({"status": "error", "message": "Missing business_id"}, status_code=400)
-    if not login_id:
-        return JSONResponse({"status": "error", "message": "Operator ID is required"}, status_code=400)
-    if len(password) < 6:
-        return JSONResponse({"status": "error", "message": "Password must be at least 6 characters"}, status_code=400)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    try:
-        existing = (
-            supabase.table("dashboard_users")
-            .select("id,email")
-            .eq("email", login_id)
-            .limit(1)
-            .execute()
-            .data
-            or []
-        )
-        user_payload = {
-            "email": login_id,
-            "password_hash": hash_dashboard_password(password),
-            "is_active": True,
-        }
-        if existing:
-            supabase.table("dashboard_users").update(user_payload).eq("email", login_id).execute()
-        else:
-            supabase.table("dashboard_users").insert(user_payload).execute()
-
-        supabase.table("business_users").upsert(
-            {
-                "user_email": login_id,
-                "business_id": business_id,
-                "role": "operator",
-            },
-            on_conflict="user_email,business_id",
-        ).execute()
-        return {"status": "ok", "data": {"login_id": login_id, "role": "operator", "business_id": business_id}}
-    except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-
-@app.post("/api/v2/operator-tasks")
-async def create_operator_task_v2(
-    body: OperatorTaskCreateRequest,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    business_id = normalize_id(body.business_id)
-    text = normalize_id(body.text)
-    assign_mode = normalize_id(body.assign_mode).lower() or "all"
-
-    if not business_id:
-        return JSONResponse({"status": "error", "message": "Missing business_id"}, status_code=400)
-    if not text:
-        return JSONResponse({"status": "error", "message": "Task text is required"}, status_code=400)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    # Only owners/admins/super_admin can assign tasks.
-    role = normalize_id(access.get("role", "")).lower()
-    if role not in BUSINESS_ADMIN_ROLES and not access.get("is_admin"):
-        return JSONResponse({"status": "error", "message": "Only admin can assign tasks"}, status_code=403)
-
-    try:
-        task = append_operator_task(
-            business_id=business_id,
-            text=text,
-            recipients=body.recipients or [],
-            assign_mode=assign_mode,
-            created_by=access.get("email", ""),
-        )
-        if not task:
-            return JSONResponse({"status": "error", "message": "Could not create task"}, status_code=500)
-        return {"status": "ok", "data": task}
-    except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-
-@app.get("/api/v2/operator-tasks")
-async def list_operator_tasks_v2(
-    business_id: str = "",
-    for_me: bool = True,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    business_id = normalize_id(business_id)
-    if not business_id:
-        return JSONResponse({"status": "error", "message": "Missing business_id"}, status_code=400)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    try:
-        items = merged_operator_task_items(get_workspace_state(business_id))
-        scoped = scope_operator_tasks_for_access(items, access) if for_me else items
-        normalized = []
-        for item in scoped:
-            recipients = item.get("recipients") if isinstance(item.get("recipients"), list) else ["*"]
-            normalized.append(
-                {
-                    "id": item.get("id"),
-                    "text": normalize_id(item.get("text")),
-                    "recipients": recipients,
-                    "assign_mode": normalize_id(item.get("assign_mode", "all")) or "all",
-                    "created_by": normalize_email(item.get("created_by")),
-                    "created_at": item.get("created_at"),
-                }
-            )
-
-        normalized.sort(key=lambda item: normalize_id(item.get("created_at")), reverse=True)
-        return {"status": "ok", "count": len(normalized), "data": normalized}
-    except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-
-@app.post("/api/v2/businesses")
-async def create_business_v2(
-    body: BusinessCreateRequest,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-    if not access.get("is_admin"):
-        return JSONResponse({"status": "error", "message": "Only super admin can create businesses"}, status_code=403)
-
-    business_name = normalize_id(body.business_name)
-    owner_email = normalize_email(body.owner_email)
-    if not business_name or not owner_email:
-        return JSONResponse({"status": "error", "message": "business_name and owner_email are required"}, status_code=400)
-
-    try:
-        created = (
-            supabase.table("businesses")
-            .insert(
-                {
-                    "business_name": business_name,
-                    "owner_email": owner_email,
-                    "business_type": normalize_id(body.business_type),
-                    "language": normalize_id(body.language) or "uz",
-                    "tone": normalize_id(body.tone) or "friendly",
-                    "bot_enabled": True,
-                }
-            )
-            .execute()
-            .data
-            or []
-        )
-        if not created:
-            return JSONResponse({"status": "error", "message": "Failed to create business"}, status_code=500)
-
-        business_id = normalize_id(created[0].get("id"))
-        supabase.table("business_users").upsert(
-            {
-                "user_email": owner_email,
-                "business_id": business_id,
-                "role": "owner",
-            },
-            on_conflict="user_email,business_id",
-        ).execute()
-        return {"status": "ok", "data": created[0]}
-    except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-
-@app.post("/api/v2/businesses/{business_id}/admins")
-async def create_business_admin_v2(
-    business_id: str,
-    body: BusinessAdminCreateRequest,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-    if not access.get("is_admin") and access.get("role") not in {"owner", "admin"}:
-        return JSONResponse({"status": "error", "message": "Only owner/admin can create business admins"}, status_code=403)
-
-    clean_business_id = normalize_id(business_id)
-    email = normalize_email(body.email)
-    password = str(body.password or "")
-    role = normalize_id(body.role or "admin").lower()
-    if role not in {"owner", "admin", "operator"}:
-        return JSONResponse({"status": "error", "message": "Invalid role"}, status_code=400)
-    if not clean_business_id or not email or len(password) < 6:
-        return JSONResponse({"status": "error", "message": "business_id, email and password(>=6) are required"}, status_code=400)
-
-    try:
-        existing = (
-            supabase.table("dashboard_users")
-            .select("id,email")
-            .eq("email", email)
-            .limit(1)
-            .execute()
-            .data
-            or []
-        )
-        user_payload = {"email": email, "password_hash": hash_dashboard_password(password), "is_active": True}
-        if existing:
-            supabase.table("dashboard_users").update(user_payload).eq("email", email).execute()
-        else:
-            supabase.table("dashboard_users").insert(user_payload).execute()
-
-        supabase.table("business_users").upsert(
-            {
-                "user_email": email,
-                "business_id": clean_business_id,
-                "role": role,
-                "full_name": normalize_id(body.full_name),
-            },
-            on_conflict="user_email,business_id",
-        ).execute()
-        return {"status": "ok", "data": {"email": email, "business_id": clean_business_id, "role": role}}
-    except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-
-@app.get("/api/v2/conversations")
-async def get_conversations_v2(
-        platform: str = "all",
-        search: str = "",
-        business_id: str = "",
-        include_raw: bool = False,
-        fast: bool = False,
-        no_cache: bool = False,
-        authorization: str = Header(default=""),
-        x_dashboard_secret: str = Header(default=""),
-):
-    """Get all conversations in React UI format"""
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    if is_local_dashboard_demo_mode():
-        return {
-            "status": "ok",
-            "count": 0,
-            "data": [],
-        }
-
-    try:
-        clean_business_id = normalize_id(business_id)
-        allowed_ids = access.get("business_ids") or []
-        cache_key = json.dumps(
-            {
-                "admin": bool(access.get("is_admin")),
-                "email": normalize_email(access.get("email", "")),
-                "allowed": sorted([normalize_id(x) for x in allowed_ids]),
-                "platform": normalize_id(platform).lower(),
-                "business_id": clean_business_id,
-                "search": normalize_id(search).strip().lower(),
-                "include_raw": bool(include_raw),
-                "fast": bool(fast),
-            },
-            sort_keys=True,
-        )
-        now_ts = time.time()
-        cached = _conversations_cache.get(cache_key)
-        if (not no_cache) and cached and (now_ts - cached[0]) <= CONVERSATIONS_CACHE_TTL_SECONDS:
-            return cached[1]
-
-        # Keep payload slim on hot path; this endpoint is polled frequently.
-        fields = (
-            "business_id,platform,channel,customer_id,chat_id,customer_name,"
-            "content,created_at,direction,is_read,external_message_id"
-        )
-        if include_raw:
-            fields = f"{fields},raw_payload"
-        query = supabase.table("inbox_messages").select(fields)
-        if clean_business_id:
-            if not can_access_business(access, clean_business_id):
-                return {"status": "ok", "count": 0, "data": []}
-            query = query.eq("business_id", clean_business_id)
-        elif not access.get("is_admin"):
-            allowed = access.get("business_ids") or []
-            if not allowed:
-                return {"status": "ok", "count": 0, "data": []}
-            query = query.in_("business_id", allowed)
-
-        if platform != "all":
-            query = query.eq("platform", platform)
-
-        if fast:
-            recent_cutoff = (datetime.utcnow() - timedelta(days=CONVERSATIONS_FAST_LOOKBACK_DAYS)).strftime("%Y-%m-%dT00:00:00Z")
-            query = query.gte("created_at", recent_cutoff)
-            target_rows = CONVERSATIONS_FAST_FETCH_LIMIT
-        else:
-            target_rows = CONVERSATIONS_MAX_FETCH_ROWS
-
-        query = query.order("created_at", desc=True)
-
-        rows = []
-        offset = 0
-        while len(rows) < target_rows:
-            remaining = target_rows - len(rows)
-            page_size = min(CONVERSATIONS_FETCH_BATCH_SIZE, remaining)
-            page = query.range(offset, offset + page_size - 1).execute().data or []
-            if not page:
-                break
-            rows.extend(page)
-            if len(page) < page_size:
-                break
-            offset += len(page)
-
-        conversations_map = {}
-        for row in rows:
-            business_id = row.get("business_id")
-            platform_name = normalize_id(row.get("platform", "instagram")).lower() or "instagram"
-            channel = standard_channel(platform_name, row.get("channel", ""))
-            customer_id = str(row.get("customer_id") or "").strip()
-            chat_id = str(row.get("chat_id") or "").strip()
-            scope = conversation_scope(platform_name, channel, customer_id, chat_id)
-            if include_raw and platform_name == "instagram" and "comment" in channel:
-                post_id = extract_instagram_comment_post_id(row)
-                scope = encode_comment_scope(customer_id, post_id)
-
-            if not business_id or not scope:
-                continue
-
-            # Merge Telegram rows of the same real chat even if legacy channel values differ.
-            if platform_name == "telegram":
-                if channel == "telegram_user_private":
-                    key_channel = "telegram_user_private"
-                else:
-                    key_channel = "telegram_bot_group" if str(scope).startswith("-") else "telegram_bot_private"
-                key = f"{platform_name}::{business_id}::{key_channel}::{scope}"
-            else:
-                key = f"{platform_name}::{business_id}::{channel}::{scope}"
-
-            if key not in conversations_map:
-                conversations_map[key] = []
-
-            conversations_map[key].append(row)
-
-        conversations = []
-        business_lookup = {}
-        for key, conv_rows in conversations_map.items():
-            key_parts = key.split("::")
-            row_business_id = key_parts[1] if len(key_parts) > 1 else ""
-            if row_business_id and row_business_id not in business_lookup:
-                business_lookup[row_business_id] = get_business_by_id(row_business_id)
-            conv = transform_conversation_to_react(
-                key,
-                sorted(conv_rows, key=lambda x: x.get('created_at', '')),
-                business=business_lookup.get(row_business_id) or {},
-                ai_lookup_enabled=(not fast),
-            )
-            if conv:
-                conversations.append(conv)
-
-        if search.strip():
-            q = search.lower().strip()
-            conversations = [
-                c for c in conversations
-                if q in f"{c['name']} {c['handle']} {c['preview']}".lower()
-            ]
-
-        response = {
-            'status': 'ok',
-            'count': len(conversations),
-            'data': conversations
-        }
-        if not no_cache:
-            _conversations_cache[cache_key] = (time.time(), response)
-            if len(_conversations_cache) > 120:
-                for key in sorted(_conversations_cache, key=lambda item: _conversations_cache[item][0])[:40]:
-                    _conversations_cache.pop(key, None)
-        return response
-
-    except Exception as e:
-        log("Error fetching conversations", str(e))
-        return JSONResponse(
-            {"status": "error", "message": str(e)},
-            status_code=500
-        )
-
-
-@app.get("/api/v2/conversation/{conversation_id}/messages")
-async def get_conversation_messages_v2(
-        conversation_id: str,
-        background_tasks: BackgroundTasks,
-        limit: int = 200,
-        mark_read: bool = True,
-        include_raw: bool = False,
-        no_cache: bool = False,
-        authorization: str = Header(default=""),
-        x_dashboard_secret: str = Header(default=""),
-):
-    """Get all messages for a conversation"""
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    try:
-        parts = conversation_id.split("::")
-        if len(parts) != 4:
-            return JSONResponse(
-                {"error": "Invalid conversation ID format"},
-                status_code=400
-            )
-
-        platform, business_id, channel, customer_scope = parts
-        if not can_access_business(access, business_id):
-            return JSONResponse({"error": "Forbidden"}, status_code=403)
-        platform = normalize_id(platform).lower()
-        channel = standard_channel(platform, channel)
-        customer_id = customer_scope
-        post_id = ""
-        if platform == "instagram" and "comment" in channel:
-            customer_id, post_id = decode_comment_scope(customer_scope)
-
-        limit = max(1, min(int(limit or 200), 300))
-        cache_key = json.dumps(
-            {
-                "conversation_id": conversation_id,
-                "limit": limit,
-                "include_raw": bool(include_raw),
-            },
-            sort_keys=True,
-        )
-        now_ts = time.time()
-        cached = _conversation_messages_cache.get(cache_key)
-        if (not no_cache) and cached and (now_ts - cached[0]) <= CONVERSATION_MESSAGES_CACHE_TTL_SECONDS:
-            if mark_read:
-                def mark_read_cached_task():
-                    try:
-                        mark_query = (
-                            supabase.table("inbox_messages")
-                            .update({"is_read": True})
-                            .eq("platform", platform)
-                            .eq("business_id", business_id)
-                            .eq("direction", "inbound")
-                            .eq("is_read", False)
-                        )
-                        if platform == "telegram" and channel in ("telegram_bot_group", "telegram_bot_private"):
-                            mark_query = mark_query.or_(f"chat_id.eq.{customer_id},customer_id.eq.{customer_id}")
-                        elif platform == "instagram" and "comment" in channel:
-                            if channel:
-                                mark_query = mark_query.eq("channel", channel)
-                            if post_id:
-                                mark_query = mark_query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
-                            elif customer_id:
-                                mark_query = mark_query.eq("customer_id", str(customer_id))
-                        else:
-                            mark_query = mark_query.eq("customer_id", str(customer_id))
-                            if channel:
-                                mark_query = mark_query.eq("channel", channel)
-                        mark_query.execute()
-                    except Exception:
-                        pass
-
-                if background_tasks is not None:
-                    background_tasks.add_task(mark_read_cached_task)
-                else:
-                    mark_read_cached_task()
-            return cached[1]
-
-        base_fields = (
-            "id,direction,role,created_at,media_type,content,platform,channel,customer_id,"
-            "external_message_id,media_url,post_permalink,post_image_url,post_media_type,raw_payload"
-        )
-        select_fields = base_fields
-
-        query = (
-            supabase.table("inbox_messages")
-            .select(select_fields)
-            .eq("platform", platform)
-            .eq("business_id", business_id)
-        )
-
-        if platform == "telegram" and channel in ("telegram_bot_group", "telegram_bot_private"):
-            query = query.or_(f"chat_id.eq.{customer_id},customer_id.eq.{customer_id}")
-        elif platform == "instagram" and "comment" in channel:
-            if channel:
-                query = query.eq("channel", channel)
-            if post_id:
-                query = query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
-            elif customer_id:
-                query = query.eq("customer_id", str(customer_id))
-        else:
-            query = query.or_(f"customer_id.eq.{customer_id},chat_id.eq.{customer_id}")
-            if platform == "instagram" and channel in ("dm", "instagram_dm", "instagram_private"):
-                query = query.in_("channel", ["dm", "instagram_dm", "instagram_private", ""])
-            elif channel:
-                query = query.eq("channel", channel)
-
-        result = query.order("created_at", desc=True).limit(limit).execute()
-        rows = list(reversed(result.data or []))
-
-        # Some legacy Instagram rows were saved with inconsistent channel values.
-        # If strict channel filtering returns no history, fall back to customer-wide DM lookup.
-        if not rows and platform == "instagram" and channel in ("dm", "instagram_dm", "instagram_private"):
-            fallback_query = (
-                supabase.table("inbox_messages")
-                .select(select_fields)
-                .eq("platform", platform)
-                .eq("business_id", business_id)
-                .or_(f"customer_id.eq.{customer_id},chat_id.eq.{customer_id}")
-                .order("created_at", desc=True)
-                .limit(limit)
-            )
-            rows = list(reversed(fallback_query.execute().data or []))
-
-        # Backfill old forwarded Instagram messages that were saved without preview URLs.
-        # This keeps forwarded reels stable in UI (no random "NO PREVIEW" regressions).
-        if platform == "instagram" and rows:
-            update_rows = []
-            for row in rows:
-                media_type = normalize_id(row.get("media_type")).lower()
-                if media_type not in ("video", "file", "photo", "image"):
-                    continue
-                if normalize_id(row.get("media_url")):
-                    continue
-
-                post_permalink = normalize_id(
-                    row.get("post_permalink")
-                    or (row.get("raw_payload") or {}).get("post_permalink")
-                    or extract_instagram_permalink_from_payload(row.get("raw_payload") or {})
-                )
-                if not post_permalink:
-                    continue
-
-                preview = fetch_instagram_public_preview(post_permalink) or {}
-                preview_media_url = normalize_id(preview.get("media_url"))
-                preview_image_url = normalize_id(preview.get("post_image_url"))
-                preview_media_type = normalize_id(preview.get("post_media_type")).lower()
-
-                changed = False
-                if preview_media_url:
-                    row["media_url"] = preview_media_url
-                    changed = True
-                if preview_image_url and not normalize_id(row.get("post_image_url")):
-                    row["post_image_url"] = preview_image_url
-                    changed = True
-                if post_permalink and not normalize_id(row.get("post_permalink")):
-                    row["post_permalink"] = post_permalink
-                    changed = True
-                if preview_media_type and media_type in ("", "file"):
-                    row["media_type"] = "video" if "video" in preview_media_type else ("photo" if "image" in preview_media_type else media_type)
-                    changed = True
-
-                if changed and normalize_id(row.get("id")):
-                    update_rows.append({
-                        "id": normalize_id(row.get("id")),
-                        "media_url": normalize_id(row.get("media_url")),
-                        "post_image_url": normalize_id(row.get("post_image_url")),
-                        "post_permalink": normalize_id(row.get("post_permalink")),
-                        "post_media_type": normalize_id(preview_media_type or row.get("post_media_type")).lower(),
-                    })
-
-            if update_rows:
-                def persist_preview_backfill(rows_to_update: list[dict]):
-                    for item in rows_to_update:
-                        try:
-                            supabase.table("inbox_messages").update({
-                                "media_url": item.get("media_url") or None,
-                                "post_image_url": item.get("post_image_url") or None,
-                                "post_permalink": item.get("post_permalink") or None,
-                                "post_media_type": item.get("post_media_type") or None,
-                            }).eq("id", item.get("id")).execute()
-                        except Exception:
-                            pass
-
-                if background_tasks is not None:
-                    background_tasks.add_task(persist_preview_backfill, update_rows)
-                else:
-                    persist_preview_backfill(update_rows)
-
-        messages = [transform_message_to_react(row) for row in rows]
-
-        if mark_read:
-            def mark_read_task():
-                try:
-                    mark_query = (
-                        supabase.table("inbox_messages")
-                        .update({"is_read": True})
-                        .eq("platform", platform)
-                        .eq("business_id", business_id)
-                        .eq("direction", "inbound")
-                        .eq("is_read", False)
-                    )
-                    if platform == "telegram" and channel in ("telegram_bot_group", "telegram_bot_private"):
-                        mark_query = mark_query.or_(f"chat_id.eq.{customer_id},customer_id.eq.{customer_id}")
-                    elif platform == "instagram" and "comment" in channel:
-                        if channel:
-                            mark_query = mark_query.eq("channel", channel)
-                        if post_id:
-                            mark_query = mark_query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
-                        elif customer_id:
-                            mark_query = mark_query.eq("customer_id", str(customer_id))
-                    else:
-                        mark_query = mark_query.or_(f"customer_id.eq.{customer_id},chat_id.eq.{customer_id}")
-                        if channel:
-                            mark_query = mark_query.eq("channel", channel)
-                    mark_query.execute()
-                except Exception:
-                    pass
-
-            if background_tasks is not None:
-                background_tasks.add_task(mark_read_task)
-            else:
-                mark_read_task()
-
-        response_payload = {
-            'status': 'ok',
-            'count': len(messages),
-            'data': messages
-        }
-        if not no_cache:
-            _conversation_messages_cache[cache_key] = (time.time(), response_payload)
-            if len(_conversation_messages_cache) > 500:
-                for stale_key in sorted(_conversation_messages_cache, key=lambda item: _conversation_messages_cache[item][0])[:150]:
-                    _conversation_messages_cache.pop(stale_key, None)
-        return response_payload
-
-    except Exception as e:
-        log("Error fetching conversation messages", str(e))
-        return JSONResponse(
-            {"status": "error", "message": str(e)},
-            status_code=500
-        )
-
-
-@app.post("/api/v2/send-message")
-async def send_message_v2(
-        request: Request,
-        authorization: str = Header(default=""),
-        x_dashboard_secret: str = Header(default=""),
-):
-    """Send a message via the React UI"""
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    try:
-        payload = await request.json()
-        conversation_id = payload.get("conversation_id")
-        text = payload.get("text", "").strip()
-        reply_to_comment_id = normalize_id(payload.get("reply_to_comment_id") or payload.get("comment_id"))
-
-        if not conversation_id or not text:
-            return JSONResponse(
-                {"error": "Missing conversation_id or text"},
-                status_code=400
-            )
-
-        parts = conversation_id.split("::")
-        if len(parts) != 4:
-            return JSONResponse(
-                {"error": "Invalid conversation ID format"},
-                status_code=400
-            )
-
-        platform, business_id, channel, customer_scope = parts
-        if not can_access_business(access, business_id):
-            return JSONResponse({"error": "Forbidden"}, status_code=403)
-        platform = normalize_id(platform).lower()
-        channel = standard_channel(platform, channel)
-        target_id = customer_scope
-        post_id = ""
-        if platform == "instagram" and "comment" in channel:
-            target_id, post_id = decode_comment_scope(customer_scope)
-
-        business = get_business_by_id(business_id)
-        if not business:
-            return JSONResponse(
-                {"error": "Business not found"},
-                status_code=404
-            )
-
-        ok = False
-        result = {}
-
-        if platform == "instagram":
-            access_token = get_business_access_token(business)
-            if not access_token:
-                return JSONResponse(
-                    {"error": "Instagram access token not configured"},
-                    status_code=400
-                )
-
-            if "comment" in channel:
-                if reply_to_comment_id:
-                    anchor = get_instagram_comment_anchor_by_comment_id(
-                        business_id=business_id,
-                        comment_id=reply_to_comment_id,
-                        post_id=post_id,
-                    )
-                else:
-                    anchor = get_latest_instagram_comment_anchor(
-                        business_id=business_id,
-                        commenter_id=target_id,
-                        post_id=post_id,
-                    )
-                if not target_id:
-                    target_id = normalize_id(anchor.get("customer_id"))
-                comment_id = reply_to_comment_id or normalize_id(
-                    anchor.get("external_message_id")
-                    or (anchor.get("raw_payload") or {}).get("id")
-                )
-                if reply_to_comment_id and not comment_id:
-                    comment_id = reply_to_comment_id
-                if not comment_id:
-                    return JSONResponse(
-                        {"error": "Comment anchor not found for this thread"},
-                        status_code=400,
-                    )
-
-                send_result = reply_to_comment(access_token, comment_id, text, business)
-                ok = bool(send_result and send_result.ok)
-                result = safe_json(send_result) if send_result is not None else {"error": "Send failed"}
-            else:
-                ok, result = send_manual_instagram_dm(access_token, target_id, text, business)
-
-        elif platform == "telegram":
-            if channel == "telegram_user_private":
-                ok, result = await send_telegram_user_message(customer_id=target_id, text=text)
-            else:
-                res = send_telegram_bot_message(target_id, text)
-                if res:
-                    ok = res.ok
-                    result = safe_json(res)
-                else:
-                    result = {"error": "Send failed"}
-
-        elif platform == "whatsapp":
-            res = send_whatsapp_text(target_id, text, business)
-            if res:
-                ok = res.ok
-                try:
-                    result = res.json()
-                except Exception:
-                    result = {"text": res.text}
-            else:
-                result = {"error": "Send failed"}
-
-        else:
-            return JSONResponse(
-                {"error": "Unknown platform"},
-                status_code=400
-            )
-
-        if not ok:
-            log("Message send failed", result)
-            return send_failure_response(result)
-
-        save_inbox_message(
-            business=business,
-            platform=platform,
-            sender_id=business_id,
-            recipient_id=target_id,
-            message_text=text,
-            direction="outbound",
-            platform_message_id=normalize_id(result.get("message_id") or result.get("id") or result.get("messages", [{}])[0].get("id", "")),
-            raw_payload={**(result or {}), **({"post_id": post_id} if post_id else {}), **({"reply_to_comment_id": reply_to_comment_id} if reply_to_comment_id else {})},
-            channel=channel,
-        )
-
-        return {'status': 'ok', 'data': result}
-
-    except Exception as e:
-        log("Error sending message", str(e))
-        return JSONResponse(
-            {"status": "error", "message": str(e)},
-            status_code=500
-        )
-
-
-@app.post("/api/v2/message/edit")
-async def edit_message_v2(
-        request: Request,
-        authorization: str = Header(default=""),
-        x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    try:
-        payload = await request.json()
-        message_id = payload.get("message_id")
-        text = str(payload.get("text") or "").strip()
-        if not text:
-            return JSONResponse({"error": "Message text is required"}, status_code=400)
-
-        row, error = get_inbox_message_for_dashboard(message_id, access)
-        if error:
-            return error
-
-        platform = normalize_id(row.get("platform")).lower()
-        if platform != "telegram":
-            return unsupported_message_mutation_response(platform, "editing")
-
-        if row.get("media_type"):
-            return JSONResponse({"error": "Only text messages can be edited"}, status_code=400)
-
-        business = get_business_by_id(row.get("business_id"))
-        ok, result = await mutate_delivered_telegram_message(row, business, "edit", text=text)
-        if not ok:
-            return send_failure_response(result, "Could not edit message on Telegram")
-
-        existing_payload = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
-        supabase.table("inbox_messages").update({
-            "content": text,
-            "raw_payload": {
-                **existing_payload,
-                "dashboard_edited": True,
-                "dashboard_edited_at": datetime.utcnow().isoformat(),
-            },
-        }).eq("id", row.get("id")).execute()
-        clear_inbox_caches()
-
-        return {"status": "ok", "data": result}
-
-    except Exception as e:
-        log("Error editing dashboard message", str(e))
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-
-
-@app.post("/api/v2/message/delete")
-async def delete_message_v2(
-        request: Request,
-        authorization: str = Header(default=""),
-        x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    try:
-        payload = await request.json()
-        row, error = get_inbox_message_for_dashboard(payload.get("message_id"), access)
-        if error:
-            return error
-
-        platform = normalize_id(row.get("platform")).lower()
-        if platform != "telegram":
-            return unsupported_message_mutation_response(platform, "deletion")
-
-        business = get_business_by_id(row.get("business_id"))
-        ok, result = await mutate_delivered_telegram_message(row, business, "delete")
-        if not ok:
-            return send_failure_response(result, "Could not delete message on Telegram")
-
-        supabase.table("inbox_messages").delete().eq("id", row.get("id")).execute()
-        clear_inbox_caches()
-
-        return {"status": "ok", "data": result}
-
-    except Exception as e:
-        log("Error deleting dashboard message", str(e))
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-
-
-@app.post("/api/v2/conversation/{conversation_id}/ai-toggle")
-async def toggle_ai_v2(
-        conversation_id: str,
-        request: Request,
-        authorization: str = Header(default=""),
-        x_dashboard_secret: str = Header(default=""),
-):
-    """Toggle AI for a specific conversation"""
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    try:
-        parts = conversation_id.split("::")
-        if len(parts) != 4:
-            return JSONResponse(
-                {"error": "Invalid conversation ID format"},
-                status_code=400
-            )
-
-        platform, business_id, channel, customer_scope = parts
-        if not can_access_business(access, business_id):
-            return JSONResponse({"error": "Forbidden"}, status_code=403)
-        if not can_manage_business(access, business_id):
-            return JSONResponse({"error": "Only owner/admin can turn bots on or off"}, status_code=403)
-        platform = normalize_id(platform).lower()
-        channel = standard_channel(platform, channel)
-        customer_id = customer_scope
-        if platform == "instagram" and "comment" in channel:
-            legacy_customer_id, post_id = decode_comment_scope(customer_scope)
-            customer_id = encode_comment_scope("", post_id) if post_id else legacy_customer_id
-
-        payload = await request.json()
-        enabled = payload.get("enabled", True)
-
-        set_chat_ai_enabled(
-            business_id=business_id,
-            platform=platform,
-            channel=channel or "",
-            customer_id=customer_id,
-            enabled=bool(enabled)
-        )
-
-        return {
-            'status': 'ok',
-            'conversation_id': conversation_id,
-            'ai_enabled': enabled
-        }
-
-    except Exception as e:
-        log("Error toggling AI", str(e))
-        return JSONResponse(
-            {"status": "error", "message": str(e)},
-            status_code=500
-        )
-
-
-@app.delete("/api/v2/conversation/{conversation_id}")
-async def delete_conversation_v2(
-        conversation_id: str,
-        authorization: str = Header(default=""),
-        x_dashboard_secret: str = Header(default=""),
-):
-    """Delete a dashboard conversation from inbox_messages only."""
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    try:
-        parts = conversation_id.split("::")
-        if len(parts) != 4:
-            return JSONResponse(
-                {"error": "Invalid conversation ID format"},
-                status_code=400
-            )
-
-        platform, business_id, channel, customer_scope = parts
-        if not can_access_business(access, business_id):
-            return JSONResponse({"error": "Forbidden"}, status_code=403)
-        platform = normalize_id(platform).lower()
-        channel = standard_channel(platform, channel)
-        customer_id = customer_scope
-        post_id = ""
-        if platform == "instagram" and "comment" in channel:
-            customer_id, post_id = decode_comment_scope(customer_scope)
-
-        query = (
-            supabase.table("inbox_messages")
-            .delete()
-            .eq("platform", platform)
-            .eq("business_id", business_id)
-        )
-
-        if platform == "telegram" and channel in ("telegram_bot_group", "telegram_bot_private"):
-            query = query.or_(f"chat_id.eq.{customer_id},customer_id.eq.{customer_id}")
-        elif platform == "instagram" and "comment" in channel:
-            if channel:
-                query = query.eq("channel", channel)
-            if post_id:
-                query = query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
-            elif customer_id:
-                query = query.eq("customer_id", str(customer_id))
-        else:
-            query = query.eq("customer_id", str(customer_id))
-            if channel:
-                query = query.eq("channel", channel)
-
-        result = query.execute()
-        deleted = len(result.data or [])
-        clear_inbox_caches()
-
-        return {
-            "status": "ok",
-            "conversation_id": conversation_id,
-            "deleted_messages": deleted,
-            "note": "Deleted from dashboard database only.",
-        }
-
-    except Exception as e:
-        log("Error deleting conversation", str(e))
-        return JSONResponse(
-            {"status": "error", "message": str(e)},
-            status_code=500
-        )
-
-
-@app.get("/api/v2/conversation/{conversation_id}")
-async def get_conversation_details_v2(
-        conversation_id: str,
-        authorization: str = Header(default=""),
-        x_dashboard_secret: str = Header(default=""),
-):
-    """Get full conversation details"""
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    try:
-        parts = conversation_id.split("::")
-        if len(parts) != 4:
-            return JSONResponse(
-                {"error": "Invalid conversation ID format"},
-                status_code=400
-            )
-
-        platform, business_id, channel, customer_scope = parts
-        if not can_access_business(access, business_id):
-            return JSONResponse({"error": "Forbidden"}, status_code=403)
-        platform = normalize_id(platform).lower()
-        channel = standard_channel(platform, channel)
-        customer_id = customer_scope
-        post_id = ""
-        if platform == "instagram" and "comment" in channel:
-            customer_id, post_id = decode_comment_scope(customer_scope)
-
-        business = get_business_by_id(business_id)
-
-        query = (
-            supabase.table("inbox_messages")
-            .select("*")
-            .eq("platform", platform)
-            .eq("business_id", business_id)
-        )
-
-        if platform == "instagram" and "comment" in channel:
-            if channel:
-                query = query.eq("channel", channel)
-            if post_id:
-                query = query.or_(f"raw_payload->media->>id.eq.{post_id},raw_payload->>post_id.eq.{post_id}")
-            elif customer_id:
-                query = query.eq("customer_id", str(customer_id))
-        else:
-            query = query.eq("customer_id", str(customer_id))
-            if channel:
-                query = query.eq("channel", channel)
-
-        result = query.order("created_at", desc=False).execute()
-        rows = result.data or []
-
-        conv = transform_conversation_to_react(
-            conversation_id,
-            sorted(rows, key=lambda x: x.get('created_at', '')),
-            business
-        )
-
-        if not conv:
-            return JSONResponse(
-                {"error": "Conversation not found"},
-                status_code=404
-            )
-
-        conv['messages'] = [transform_message_to_react(row) for row in rows]
-
-        return {
-            'status': 'ok',
-            'data': conv
-        }
-
-    except Exception as e:
-        log("Error fetching conversation details", str(e))
-        return JSONResponse(
-            {"status": "error", "message": str(e)},
-            status_code=500
-        )
-
-
-@app.get("/api/v2/stats")
-async def get_stats_v2(
-        authorization: str = Header(default=""),
-        x_dashboard_secret: str = Header(default=""),
-):
-    """Get dashboard statistics"""
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    if is_local_dashboard_demo_mode():
-        return {
-            "status": "ok",
-            "data": build_local_dashboard_demo_stats(),
-        }
-
-    try:
-        if access.get("is_admin"):
-            scoped_ids = []
-            cache_key = "admin"
-        else:
-            scoped_ids = access.get("business_ids") or []
-            cache_key = f"user:{','.join(sorted(scoped_ids))}"
-
-        now = time.time()
-        cached = STATS_CACHE.get(cache_key)
-        if cached and (now - float(cached.get("ts", 0))) < STATS_CACHE_TTL_SECONDS:
-            return {'status': 'ok', 'data': cached.get("data", {})}
-
-        if access.get("is_admin"):
-            businesses = get_all_businesses()
-        else:
-            businesses = []
-            if scoped_ids:
-                businesses = (
-                    supabase.table("businesses")
-                    .select("id,bot_enabled")
-                    .in_("id", scoped_ids)
-                    .order("created_at", desc=True)
-                    .execute()
-                    .data
-                    or []
-                )
-
-        payload = {
-            'total_messages': get_message_count(business_ids=scoped_ids) if not access.get("is_admin") else get_message_count(),
-            'total_accounts': len(businesses),
-            'active_accounts': sum(1 for b in businesses if b.get("bot_enabled")),
-            'instagram_messages': get_message_count('instagram', scoped_ids) if not access.get("is_admin") else get_message_count('instagram'),
-            'telegram_messages': get_message_count('telegram', scoped_ids) if not access.get("is_admin") else get_message_count('telegram'),
-            'whatsapp_messages': get_message_count('whatsapp', scoped_ids) if not access.get("is_admin") else get_message_count('whatsapp'),
-            'active_conversations': 0,
-            'needing_human': 0,
-        }
-        STATS_CACHE[cache_key] = {"ts": now, "data": payload}
-        return {'status': 'ok', 'data': payload}
-
-    except Exception as e:
-        log("Error getting stats", str(e))
-        return JSONResponse(
-            {"status": "error", "message": str(e)},
-            status_code=500
-        )
-
-
-@app.get("/api/v2/workspace-state")
-async def get_workspace_state_v2(
-    business_id: str = "",
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    business_id = normalize_id(business_id)
-    if not business_id:
-        return JSONResponse({"error": "Missing business_id"}, status_code=400)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
-
-    data = get_workspace_state(business_id)
-    task_items = scope_operator_tasks_for_access(merged_operator_task_items(data), access)
-    data["operator_admin_notes"] = {"items": task_items}
-    data["operator_tasks"] = {"items": task_items}
-    return {"status": "ok", "data": data}
-
-
-@app.get("/api/v2/operator-deals/report.pdf")
-async def get_operator_deals_report_pdf(
-    business_id: str = "",
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    business_id = normalize_id(business_id)
-    if not business_id:
-        return JSONResponse({"error": "Missing business_id"}, status_code=400)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
-
-    role = normalize_id(access.get("role", "")).lower()
-    if role not in BUSINESS_ADMIN_ROLES and not access.get("is_admin"):
-        return JSONResponse({"error": "Only owner/admin can download operator reports"}, status_code=403)
-
-    report = build_operator_deal_report_data(business_id)
-    pdf_bytes = build_operator_deal_report_pdf(report)
-    filename = f"operator-deals-{business_id}-{datetime.utcnow().strftime('%Y%m%d')}.pdf"
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-@app.post("/api/v2/workspace-state")
-async def update_workspace_state_v2(
-    request: Request,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-
-    try:
-        payload = await request.json()
-        business_id = normalize_id(payload.get("business_id"))
-        if not business_id:
-            return JSONResponse({"error": "Missing business_id"}, status_code=400)
-        if not can_access_business(access, business_id):
-            return JSONResponse({"error": "Forbidden"}, status_code=403)
-
-        allowed_keys = {
-            "lead_stages",
-            "lead_prices",
-            "manual_clients",
-            "manual_leads",
-            "client_owners",
-            "operator_deals",
-            "operator_admin_notes",
-            "operator_tasks",
-        }
-        state = payload.get("state") or {}
-        if not isinstance(state, dict):
-            return JSONResponse({"error": "state must be an object"}, status_code=400)
-
-        updated_keys = []
-        for key, value in state.items():
-            if key not in allowed_keys:
-                continue
-            upsert_workspace_state(
-                business_id=business_id,
-                state_key=key,
-                state_value=value,
-                updated_by=access.get("email", ""),
-            )
-            updated_keys.append(key)
-
-        return {"status": "ok", "updated_keys": updated_keys}
-    except Exception as e:
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-
-
-@app.get("/api/settings/{business_id}")
-async def api_get_combined_settings(
-    business_id: str,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    business = get_business_by_id(business_id)
-    if not business:
-        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-
-    workspace_state = get_workspace_state(business_id)
-    task_items = scope_operator_tasks_for_access(merged_operator_task_items(workspace_state), access)
-    workspace_state["operator_admin_notes"] = {"items": task_items}
-    workspace_state["operator_tasks"] = {"items": task_items}
-    return {
-        "status": "ok",
-        "data": {
-            "business": sanitize_business_row(business),
-            "ai_prompt_settings": get_ai_prompt_settings(business_id),
-            "workspace_state": workspace_state,
+    const optimisticId = `optimistic-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const optimisticMessage = {
+      id: optimisticId,
+      side: 'outbound',
+      type: 'text',
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      text,
+      local: true,
+      pending: true,
+      sentAt: Date.now(),
+    };
+    rememberLocalOutboundMessage(targetConv.id, optimisticMessage);
+    setThreads(prev => {
+      const existing = prev[targetConv.id]?.messages || prev[targetConv.id] || [];
+      return {
+        ...prev,
+        [targetConv.id]: {
+          updatedAt: Date.now(),
+          messages: [...existing, optimisticMessage],
         },
-    }
+      };
+    });
+    setConversations(rows => rows.map(item => item.id === targetConv.id ? {
+      ...item,
+      preview: text,
+      lastTime: 'now',
+      lastFromMe: true,
+      kpis: { ...(item.kpis || {}), last: 'now' },
+    } : item));
 
-
-@app.post("/api/settings/{business_id}")
-async def api_update_combined_settings(
-    business_id: str,
-    request: Request,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    business = get_business_by_id(business_id)
-    if not business:
-        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-
-    payload = await request.json()
-    updated = {}
-
-    business_settings = clean_business_settings(payload.get("business_settings") or {})
-    if business_settings:
-        if not can_manage_business(access, business_id):
-            return JSONResponse({"status": "error", "message": "Only owner/admin can update bot settings"}, status_code=403)
-        update_business(business_id, business_settings)
-        updated["business_settings"] = list(business_settings.keys())
-
-    ai_prompt_settings = payload.get("ai_prompt_settings") or {}
-    if isinstance(ai_prompt_settings, dict) and ai_prompt_settings:
-        if not can_manage_business(access, business_id):
-            return JSONResponse({"status": "error", "message": "Only owner/admin can update AI prompt settings"}, status_code=403)
-        upsert_ai_prompt_settings(business_id, ai_prompt_settings)
-        updated["ai_prompt_settings"] = [
-            key for key in ai_prompt_settings.keys() if key in AI_PROMPT_SETTING_FIELDS
-        ]
-
-    workspace_state = payload.get("workspace_state") or {}
-    allowed_workspace_keys = {
-        "lead_stages",
-        "lead_prices",
-        "manual_clients",
-        "manual_leads",
-        "client_owners",
-        "operator_deals",
-        "operator_admin_notes",
-        "operator_tasks",
-    }
-    if isinstance(workspace_state, dict) and workspace_state:
-        updated_workspace = []
-        for key, value in workspace_state.items():
-            if key not in allowed_workspace_keys:
-                continue
-            upsert_workspace_state(
-                business_id=business_id,
-                state_key=key,
-                state_value=value,
-                updated_by=access.get("email", ""),
-            )
-            updated_workspace.append(key)
-        updated["workspace_state"] = updated_workspace
-
-    return {"status": "ok", "updated": updated}
-
-
-# ============================================================================
-# WEBHOOK ROUTES
-# ============================================================================
-@app.get("/webhook")
-async def verify_webhook(request: Request):
-    mode = request.query_params.get("hub.mode")
-    token = request.query_params.get("hub.verify_token")
-    challenge = request.query_params.get("hub.challenge")
-
-    log("Webhook verification", {"mode": mode, "token": token, "challenge": challenge})
-
-    if mode == "subscribe" and token == VERIFY_TOKEN and challenge:
-        return PlainTextResponse(challenge, status_code=200)
-
-    return PlainTextResponse("Verification failed", status_code=403)
-
-
-@app.post("/webhook")
-async def receive_webhook(request: Request):
-    try:
-        data = await request.json()
-        log("WEBHOOK RECEIVED", data)
-
-        object_type = data.get("object")
-        remember_webhook_event({
-            "object": object_type,
-            "entry_count": len(data.get("entry", []) or []),
-            "summary": [
-                {
-                    "id": normalize_id(entry.get("id")),
-                    "messaging": len(entry.get("messaging", []) or []),
-                    "changes": [
-                        {
-                            "field": change.get("field"),
-                            "message_count": len(((change.get("value") or {}).get("messages") or [])),
-                            "status_count": len(((change.get("value") or {}).get("statuses") or [])),
-                            "phone_number_id": normalize_id(((change.get("value") or {}).get("metadata") or {}).get("phone_number_id")),
-                        }
-                        for change in (entry.get("changes", []) or [])
-                    ],
-                }
-                for entry in (data.get("entry", []) or [])
-            ],
-        })
-
-        if object_type == "whatsapp_business_account":
-            for entry in data.get("entry", []):
-                for change in entry.get("changes", []):
-                    if change.get("field") == "messages":
-                        await process_whatsapp_message(change)
-            return JSONResponse({"status": "ok"}, status_code=200)
-
-        for entry in data.get("entry", []):
-            entry_id = normalize_id(entry.get("id"))
-
-            for messaging in entry.get("messaging", []):
-                await process_instagram_messaging_event(entry_id, messaging)
-
-            for change in entry.get("changes", []):
-                field = change.get("field")
-
-                if field in ["comments", "feed"]:
-                    await process_instagram_comment_event(entry_id, change)
-                elif field == "messages":
-                    value = change.get("value", {})
-                    fake_messaging = {
-                        "sender": value.get("sender", {}),
-                        "recipient": value.get("recipient", {}),
-                        "timestamp": value.get("timestamp"),
-                        "message": value.get("message", {}),
-                    }
-                    await process_instagram_messaging_event(entry_id, fake_messaging)
-
-        return JSONResponse({"status": "ok"}, status_code=200)
-
-    except Exception as e:
-        log("Webhook error", str(e))
-        remember_webhook_event({"object": "error", "error": str(e)})
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-
-
-@app.get("/debug/webhook-last")
-async def debug_webhook_last(x_dashboard_secret: str = Header(default="")):
-    if DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    return {
-        "status": "ok",
-        "count": len(LAST_WEBHOOK_EVENTS),
-        "events": LAST_WEBHOOK_EVENTS,
-        "webhook_url": f"{PUBLIC_BASE_URL.rstrip('/')}/webhook",
-        "verify_token_configured": bool(VERIFY_TOKEN),
-        "graph_version": GRAPH_VERSION,
-    }
-
-
-@app.get("/api/whatsapp/media/{media_id}")
-async def get_whatsapp_media(
-        media_id: str,
-        token: str = "",
-        x_dashboard_secret: str = Header(default=""),
-):
-    if require_dashboard_media_secret(token, x_dashboard_secret):
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    token = WHATSAPP_ACCESS_TOKEN
-    if not token:
-        return JSONResponse({"error": "Missing WHATSAPP_ACCESS_TOKEN"}, status_code=400)
-
-    meta_res = requests.get(
-        f"{GRAPH_FACEBOOK}/{media_id}",
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=30,
-    )
-
-    if not meta_res.ok:
-        return JSONResponse({"error": meta_res.text}, status_code=meta_res.status_code)
-
-    media_url = meta_res.json().get("url")
-    if not media_url:
-        return JSONResponse({"error": "No media URL returned"}, status_code=404)
-
-    file_res = requests.get(
-        media_url,
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=60,
-    )
-
-    if not file_res.ok:
-        return JSONResponse({"error": file_res.text}, status_code=file_res.status_code)
-
-    return Response(
-        content=file_res.content,
-        media_type=file_res.headers.get("Content-Type", "application/octet-stream"),
-    )
-
-
-@app.get("/api/telegram-bot-media/{file_id}")
-async def get_telegram_bot_media(
-        file_id: str,
-        token: str = "",
-        x_dashboard_secret: str = Header(default=""),
-):
-    if require_dashboard_media_secret(token, x_dashboard_secret):
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    if not TELEGRAM_BOT_TOKEN:
-        return JSONResponse({"status": "error", "message": "Missing TELEGRAM_BOT_TOKEN"}, status_code=400)
-
-    try:
-        meta_res = requests.get(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
-            params={"file_id": file_id},
-            timeout=30,
-        )
-        if not meta_res.ok:
-            return JSONResponse({"status": "error", "message": meta_res.text}, status_code=meta_res.status_code)
-
-        file_path = (meta_res.json().get("result") or {}).get("file_path")
-        if not file_path:
-            return JSONResponse({"status": "error", "message": "file_path not found"}, status_code=404)
-
-        file_res = requests.get(
-            f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}",
-            timeout=60,
-        )
-        if not file_res.ok:
-            return JSONResponse({"status": "error", "message": file_res.text}, status_code=file_res.status_code)
-
-        return Response(
-            content=file_res.content,
-            media_type=file_res.headers.get("Content-Type", "application/octet-stream"),
-            headers={
-                "Cache-Control": "private, max-age=3600",
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(len(file_res.content)),
+    (async () => {
+      try {
+        await sendLiveMessage(targetConv, text, options);
+        updateLocalOutboundMessage(targetConv.id, optimisticId, { pending: false, failed: false, error: '' });
+        setThreads(prev => {
+          const existing = prev[targetConv.id]?.messages || prev[targetConv.id] || [];
+          const nextMessages = existing.map(item => (
+            item.id === optimisticId
+              ? { ...item, pending: false, failed: false, error: '' }
+              : item
+          ));
+          return {
+            ...prev,
+            [targetConv.id]: {
+              updatedAt: Date.now(),
+              messages: nextMessages,
             },
-        )
-    except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
+          };
+        });
+        window.setTimeout(() => {
+          loadThread(targetConv.id, { silent: true, limit: 300, noCache: true });
+          loadConversations({ silent: true, sideLoad: false });
+        }, 1500);
+        showToast('Message sent');
+      } catch (e) {
+        updateLocalOutboundMessage(targetConv.id, optimisticId, { pending: false, failed: true, error: e.message });
+        setThreads(prev => {
+          const existing = prev[targetConv.id]?.messages || prev[targetConv.id] || [];
+          const nextMessages = existing.map(item => (
+            item.id === optimisticId
+              ? { ...item, pending: false, failed: true, error: e.message }
+              : item
+          ));
+          return {
+            ...prev,
+            [targetConv.id]: {
+              updatedAt: Date.now(),
+              messages: nextMessages,
+            },
+          };
+        });
+        setApiError(e.message);
+        showToast(e.message);
+      }
+    })();
 
+    return true;
+  };
 
-# ============================================================================
-# OAUTH ROUTES
-# ============================================================================
-@app.get("/connect")
-async def connect():
-    return RedirectResponse("/connect-facebook")
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        await loadConversations();
+      } finally {
+        if (!cancelled) setBooting(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
+  useEffect(() => {
+    businessesRef.current = businesses;
+  }, [businesses]);
 
-@app.get("/connect-instagram")
-async def connect_instagram():
-    # Keep legacy route for older frontend buttons, but route through Facebook OAuth.
-    # Meta app-review/business onboarding needs Facebook Page selection (pages_show_list).
-    return RedirectResponse("/connect-facebook")
+  useEffect(() => {
+    if (selectedBusinessId) loadPromptSettings(selectedBusinessId, { silent: true });
+  }, [selectedBusinessId]);
 
+  useEffect(() => {
+    if (!selectedBusinessId || !liveMode || activeView !== 'insights') return;
+    loadGrowthAnalyzer(selectedBusinessId, { silent: true });
+  }, [selectedBusinessId, activeView, liveMode]);
 
-@app.get("/auth/instagram/callback")
-async def instagram_callback(request: Request):
-    code = request.query_params.get("code")
-    if not code:
-        return PlainTextResponse("Missing Instagram code", status_code=400)
+  useEffect(() => {
+    if (!selectedBusinessId || !liveMode || activeView !== 'posts') return;
+    loadInstagramPosts(selectedBusinessId, { refresh: false, silent: true });
+  }, [selectedBusinessId, activeView, liveMode]);
 
-    try:
-        token_data = exchange_instagram_code_for_token(code)
-        short_lived_token = token_data.get("access_token")
-        user_id = normalize_id(token_data.get("user_id"))
+  useEffect(() => {
+    if (liveMode) loadOperatorAccounts(selectedBusinessId);
+  }, [selectedBusinessId, liveMode]);
 
-        if not short_lived_token or not user_id:
-            raise ValueError("Missing access_token or user_id")
+  useEffect(() => {
+    if (!selectedBusinessId || !liveMode) return;
+    workspaceStateHydratedRef.current = false;
+    loadWorkspaceState(selectedBusinessId);
+  }, [selectedBusinessId, liveMode]);
 
-        access_token = exchange_for_long_lived_token(short_lived_token)
-        user_info = get_instagram_user(access_token)
-        username = user_info.get("username") or f"instagram_{user_id}"
+  useEffect(() => {
+    if (!selectedBusinessId || !liveMode) return;
+    loadOperatorTasks(selectedBusinessId, { forMe: isOperator, silent: true });
+  }, [selectedBusinessId, liveMode, isOperator]);
 
-        upsert_business(user_id, username, access_token, oauth_provider="instagram_direct")
+  useEffect(() => {
+    const cached = getThreadMessages(threads[selectedId]);
+    loadThread(selectedId, { silent: cached.length > 0, limit: 300, noCache: true });
+  }, [selectedId, liveMode]);
 
-        return RedirectResponse(f"{DASHBOARD_URL}?connected=success")
+  useEffect(() => {
+    if (!liveMode) return undefined;
 
-    except Exception as e:
-        log("Instagram OAuth error", str(e))
-        return PlainTextResponse(f"Instagram OAuth error: {str(e)}", status_code=500)
+    const pollThread = async () => {
+      const currentId = selectedIdRef.current;
+      if (!currentId || threadPollBusy.current) return;
+      threadPollBusy.current = true;
+      try {
+        await loadThread(currentId, { silent: true, noCache: true });
+      } finally {
+        threadPollBusy.current = false;
+      }
+    };
 
+    const pollInbox = async () => {
+      if (inboxPollBusy.current) return;
+      inboxPollBusy.current = true;
+      try {
+        await loadConversations({ sideLoad: false, silent: true });
+      } finally {
+        inboxPollBusy.current = false;
+      }
+    };
 
-@app.get("/connect-facebook")
-async def connect_facebook(owner_email: str = ""):
-    state = encode_oauth_state(owner_email)
-    params = {
-        "client_id": META_APP_ID,
-        "redirect_uri": FACEBOOK_REDIRECT_URI,
-        "scope": "pages_show_list,pages_read_engagement,pages_manage_metadata,pages_messaging,instagram_basic,instagram_manage_messages,instagram_manage_comments,email",
-        "response_type": "code",
-        "state": state,
+    const pollStats = async () => {
+      if (statsPollBusy.current) return;
+      statsPollBusy.current = true;
+      try {
+        await loadStats();
+      } finally {
+        statsPollBusy.current = false;
+      }
+    };
+
+    const syncVisible = () => {
+      if (document.hidden || !liveModeRef.current) return;
+      pollThread();
+      pollInbox();
+      pollStats();
+    };
+
+    const threadTimer = window.setInterval(() => {
+      if (!document.hidden) pollThread();
+    }, THREAD_POLL_MS);
+    const inboxTimer = window.setInterval(() => {
+      if (!document.hidden) pollInbox();
+    }, INBOX_POLL_MS);
+    const statsTimer = window.setInterval(() => {
+      if (!document.hidden) pollStats();
+    }, STATS_POLL_MS);
+
+    document.addEventListener('visibilitychange', syncVisible);
+    syncVisible();
+
+    return () => {
+      window.clearInterval(threadTimer);
+      window.clearInterval(inboxTimer);
+      window.clearInterval(statsTimer);
+      document.removeEventListener('visibilitychange', syncVisible);
+    };
+  }, [liveMode]);
+
+  const toggleAi = async () => {
+    if (!conv) return;
+    if (isOperator) {
+      showToast('Only owner/admin can turn bots on or off');
+      return;
     }
-    auth_url = f"https://www.facebook.com/{GRAPH_VERSION}/dialog/oauth?" + urlencode(params)
-    return RedirectResponse(auth_url)
-
-
-@app.get("/auth/whatsapp/embedded/start")
-async def whatsapp_embedded_start(owner_email: str = "", redirect_uri: str = ""):
-    """
-    Start WhatsApp Embedded Signup (Facebook Login for Business flow).
-    """
-    target_redirect = normalize_id(redirect_uri) or WHATSAPP_EMBEDDED_REDIRECT_URI
-    state = build_whatsapp_embedded_state(owner_email)
-    params = {
-        "client_id": META_APP_ID,
-        "redirect_uri": target_redirect,
-        "response_type": "code",
-        "scope": ",".join([
-            "business_management",
-            "whatsapp_business_management",
-            "whatsapp_business_messaging",
-        ]),
-        "state": state,
+    const nextEnabled = !conv.aiOn;
+    rememberAiOverride(selectedId, nextEnabled);
+    setConversations(cs => cs.map(c => c.id === selectedId ? { ...c, aiOn: nextEnabled, needsHuman: nextEnabled ? false : c.needsHuman } : c));
+    setMoreOpen(false);
+    if (!liveMode) {
+      showToast(nextEnabled ? 'AI replies enabled locally' : 'AI replies paused locally');
+      return;
     }
-    auth_url = f"https://www.facebook.com/{GRAPH_VERSION}/dialog/oauth?" + urlencode(params)
-    return {"status": "ok", "auth_url": auth_url, "state": state, "redirect_uri": target_redirect}
+    try {
+      await API.postJson(`/api/v2/conversation/${encodeURIComponent(conv.apiId || conv.id)}/ai-toggle`, {
+        enabled: nextEnabled,
+      });
+      showToast(nextEnabled ? 'AI replies enabled' : 'AI replies paused');
+    } catch (e) {
+      rememberAiOverride(selectedId, !nextEnabled);
+      setConversations(cs => cs.map(c => c.id === selectedId ? { ...c, aiOn: !nextEnabled } : c));
+      setApiError(e.message);
+      showToast(e.message);
+    }
+  };
 
+  const pinConversation = () => {
+    if (!conv) return;
+    const nextPinned = !conv.pinned;
+    setConversations(cs => cs.map(c => c.id === selectedId ? {
+      ...c,
+      pinned: nextPinned,
+      tags: nextPinned ? Array.from(new Set(['Pinned', ...(c.tags || [])])) : (c.tags || []).filter(tag => tag !== 'Pinned'),
+    } : c));
+    setMoreOpen(false);
+    showToast(nextPinned ? 'Conversation pinned' : 'Conversation unpinned');
+  };
 
-@app.get("/auth/whatsapp/embedded/callback")
-async def whatsapp_embedded_callback(
-    request: Request,
-    redirect_uri: str = "",
-):
-    """
-    Callback endpoint for embedded signup code exchange.
-    """
-    code = normalize_id(request.query_params.get("code"))
-    state = normalize_id(request.query_params.get("state"))
-    error = normalize_id(request.query_params.get("error") or request.query_params.get("error_description"))
-    if error:
-        return JSONResponse({"status": "error", "message": error}, status_code=400)
-    if not code:
-        return JSONResponse({"status": "error", "message": "Missing code"}, status_code=400)
+  const archiveConversation = () => {
+    if (!conv) return;
+    const archivedId = conv.id;
+    setConversations(cs => {
+      const next = cs.filter(c => c.id !== archivedId);
+      setSelectedId(next[0]?.id || '');
+      return next;
+    });
+    setMoreOpen(false);
+    showToast('Conversation archived locally');
+  };
 
-    target_redirect = normalize_id(redirect_uri) or WHATSAPP_EMBEDDED_REDIRECT_URI
-    try:
-        token_res = requests.get(
-            f"{GRAPH_FACEBOOK}/oauth/access_token",
-            params={
-                "client_id": META_APP_ID,
-                "client_secret": META_APP_SECRET,
-                "redirect_uri": target_redirect,
-                "code": code,
-            },
-            timeout=30,
-        )
-        token_body = safe_json(token_res)
-        if not token_res.ok:
-            return JSONResponse(
-                {"status": "error", "message": "Code exchange failed", "details": token_body},
-                status_code=400,
-            )
+  const deleteConversation = async () => {
+    if (!conv) return;
+    const target = conv;
+    setMoreOpen(false);
 
-        access_token = normalize_id(token_body.get("access_token"))
-        waba_id = normalize_id(request.query_params.get("waba_id") or os.getenv("WHATSAPP_WABA_ID", ""))
-        phone_number_id = normalize_id(request.query_params.get("phone_number_id") or os.getenv("WHATSAPP_PHONE_NUMBER_ID", ""))
-        if waba_id and not phone_number_id:
-            phone_numbers = get_whatsapp_waba_phone_numbers(waba_id, access_token)
-            if phone_numbers:
-                phone_number_id = normalize_id(phone_numbers[0].get("id"))
-
-        subscribe_ok, subscribe_body = subscribe_whatsapp_waba_to_webhooks(waba_id, access_token) if waba_id else (False, {"error": "Missing waba_id"})
-        data = {
-            "access_token": access_token,
-            "token_type": token_body.get("token_type", ""),
-            "expires_in": token_body.get("expires_in", 0),
-            "state": state,
-            "owner_email": normalize_email(parse_whatsapp_embedded_state(state).get("owner_email")),
-            "waba_id": waba_id,
-            "phone_number_id": phone_number_id,
-            "webhook_subscribe_ok": subscribe_ok,
-            "webhook_subscribe_result": subscribe_body,
-            "received_at": int(time.time()),
-        }
-        if state:
-            WHATSAPP_EMBEDDED_SESSIONS[state] = data
-        if phone_number_id and access_token:
-            persist_whatsapp_embedded_business(data["owner_email"], waba_id, phone_number_id, access_token)
-
-        return {
-            "status": "ok",
-            "state": state,
-            "owner_email": data["owner_email"],
-            "waba_id": data["waba_id"],
-            "phone_number_id": data["phone_number_id"],
-            "webhook_subscribe_ok": subscribe_ok,
-            "webhook_subscribe_result": subscribe_body,
-            "has_access_token": bool(access_token),
-            "expires_in": data["expires_in"],
-        }
-    except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-
-@app.get("/auth/whatsapp/embedded/status")
-async def whatsapp_embedded_status(state: str = ""):
-    session = WHATSAPP_EMBEDDED_SESSIONS.get(normalize_id(state), {}) if state else {}
-    if not session:
-        return {"status": "empty", "state": normalize_id(state)}
-    return {
-        "status": "ok",
-        "state": normalize_id(state),
-        "owner_email": session.get("owner_email", ""),
-        "waba_id": session.get("waba_id", ""),
-        "phone_number_id": session.get("phone_number_id", ""),
-        "has_access_token": bool(session.get("access_token")),
-        "received_at": session.get("received_at", 0),
+    if (!window.confirm('Delete this chat from the dashboard database? This will not delete it from Instagram, Telegram, or WhatsApp.')) {
+      return;
     }
 
-
-@app.post("/auth/whatsapp/embedded/subscribe")
-async def whatsapp_embedded_subscribe(
-    waba_id: str = "",
-    access_token: str = "",
-    state: str = "",
-):
-    session = WHATSAPP_EMBEDDED_SESSIONS.get(normalize_id(state), {}) if state else {}
-    resolved_waba_id = normalize_id(waba_id) or normalize_id(session.get("waba_id")) or normalize_id(os.getenv("WHATSAPP_WABA_ID", ""))
-    resolved_token = normalize_id(access_token) or normalize_id(session.get("access_token")) or normalize_id(os.getenv("WHATSAPP_ACCESS_TOKEN", ""))
-    ok, body = subscribe_whatsapp_waba_to_webhooks(resolved_waba_id, resolved_token)
-    return JSONResponse(
-        {"status": "ok" if ok else "error", "waba_id": resolved_waba_id, "result": body},
-        status_code=200 if ok else 400,
-    )
-
-
-@app.get("/auth/whatsapp/embedded/phone-numbers")
-async def whatsapp_embedded_phone_numbers(
-    waba_id: str = "",
-    access_token: str = "",
-    state: str = "",
-):
-    session = WHATSAPP_EMBEDDED_SESSIONS.get(normalize_id(state), {}) if state else {}
-    resolved_waba_id = normalize_id(waba_id) or normalize_id(session.get("waba_id")) or normalize_id(os.getenv("WHATSAPP_WABA_ID", ""))
-    resolved_token = normalize_id(access_token) or normalize_id(session.get("access_token")) or normalize_id(os.getenv("WHATSAPP_ACCESS_TOKEN", ""))
-    rows = get_whatsapp_waba_phone_numbers(resolved_waba_id, resolved_token)
-    return {"status": "ok", "waba_id": resolved_waba_id, "count": len(rows), "data": rows}
-
-
-@app.post("/api/whatsapp/embedded/send-message")
-async def whatsapp_embedded_send_message(payload: EmbeddedWhatsAppSendMessage):
-    to = normalize_id(payload.to).replace("+", "").replace(" ", "")
-    text = normalize_id(payload.text)
-    phone_number_id = normalize_id(payload.phone_number_id) or normalize_id(os.getenv("WHATSAPP_PHONE_NUMBER_ID", ""))
-    access_token = normalize_id(payload.access_token) or normalize_id(os.getenv("WHATSAPP_ACCESS_TOKEN", ""))
-
-    if not to or not text:
-        return JSONResponse({"status": "error", "message": "Missing to or text"}, status_code=400)
-    if not phone_number_id:
-        return JSONResponse({"status": "error", "message": "Missing phone_number_id"}, status_code=400)
-    if not access_token:
-        return JSONResponse({"status": "error", "message": "Missing access_token"}, status_code=400)
-
-    try:
-        res = requests.post(
-            f"{GRAPH_FACEBOOK}/{phone_number_id}/messages",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "messaging_product": "whatsapp",
-                "to": to,
-                "type": "text",
-                "text": {"preview_url": True, "body": text[:4096]},
-            },
-            timeout=30,
-        )
-        body = safe_json(res)
-        return JSONResponse(
-            {"status": "ok" if res.ok else "error", "http_status": res.status_code, "result": body},
-            status_code=200 if res.ok else 400,
-        )
-    except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-
-@app.get("/auth/facebook/callback")
-async def facebook_callback(request: Request):
-    code = request.query_params.get("code", "")
-    if not code:
-        error = request.query_params.get("error_description") or request.query_params.get("error") or "Missing code"
-        return PlainTextResponse(f"Facebook OAuth error: {error}", status_code=400)
-
-    state_data = decode_oauth_state(request.query_params.get("state", ""))
-    state_owner_email = normalize_email(state_data.get("owner_email"))
-
-    try:
-        short_lived = exchange_facebook_code_for_user_token(code)
-        if not short_lived:
-            raise ValueError("Could not exchange Facebook code for token")
-
-        user_token = exchange_facebook_long_lived_token(short_lived)
-        profile = get_facebook_user_profile(user_token)
-        profile_email = normalize_email(profile.get("email"))
-        owner_email = state_owner_email or profile_email or normalize_email(ADMIN_EMAIL)
-
-        pages = get_facebook_pages_with_instagram(user_token)
-        created = []
-        for page in pages:
-            page_id = normalize_id(page.get("id"))
-            page_name = page.get("name") or ""
-            page_access_token = normalize_id(page.get("access_token"))
-            ig = page.get("instagram_business_account") or {}
-            ig_id = normalize_id(ig.get("id"))
-            ig_username = ig.get("username") or f"instagram_{ig_id}" if ig_id else ""
-
-            if not ig_id:
-                continue
-
-            saved = upsert_business(
-                instagram_business_id=ig_id,
-                username=ig_username,
-                access_token=user_token,
-                oauth_provider="facebook_page",
-                facebook_page_id=page_id,
-                facebook_page_name=page_name,
-                page_access_token=page_access_token,
-            )
-
-            saved_row = (saved or [{}])[0] if isinstance(saved, list) else (saved or {})
-            business_id = normalize_id(saved_row.get("id"))
-            if owner_email and business_id:
-                assign_business_owner(owner_email, business_id, role="owner")
-
-            subscribe_page_to_webhooks(page_id, page_access_token)
-            created.append({"business_id": business_id, "instagram_id": ig_id, "page_id": page_id})
-
-        if not created:
-            return RedirectResponse(f"{DASHBOARD_URL}?connected=facebook_no_instagram")
-
-        return RedirectResponse(f"{DASHBOARD_URL}?connected=facebook_success&count={len(created)}")
-
-    except Exception as e:
-        log("Facebook OAuth error", str(e))
-        return PlainTextResponse(f"Facebook OAuth error: {str(e)}", status_code=500)
-
-
-# ============================================================================
-# DASHBOARD ROUTES (LEGACY + V2)
-# ============================================================================
-@app.post("/dashboard/send-whatsapp-message")
-async def dashboard_send_whatsapp_message(
-        payload: ManualWhatsAppReply,
-        x_dashboard_secret: str = Header(default=""),
-):
-    if require_dashboard_secret(x_dashboard_secret):
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    business = get_business_by_id(payload.business_id) if payload.business_id else get_active_whatsapp_business()
-    if not business:
-        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-
-    text = payload.text.strip()
-    customer_id = normalize_id(payload.customer_id)
-
-    if not text or not customer_id:
-        return JSONResponse({"status": "error", "message": "Missing customer_id or text"}, status_code=400)
-
-    res = send_whatsapp_text(customer_id, text, business)
-    result = safe_json(res) if res is not None else {"error": "Send failed"}
-
-    if res is None or not res.ok:
-        return JSONResponse({"status": "error", "meta": result}, status_code=400)
-
-    save_inbox_message(
-        business=business,
-        platform="whatsapp",
-        sender_id=get_whatsapp_phone_number_id(business),
-        recipient_id=customer_id,
-        message_text=text,
-        direction="outbound",
-        platform_message_id=result.get("messages", [{}])[0].get("id", ""),
-        raw_payload=result,
-        is_read=True,
-        channel="whatsapp",
-    )
-
-    return JSONResponse({"status": "ok", "meta": result}, status_code=200)
-
-
-@app.post("/dashboard/send-telegram-user-message")
-async def dashboard_send_telegram_user_message(
-        payload: ManualTelegramMessage,
-        x_dashboard_secret: str = Header(default=""),
-):
-    if require_dashboard_secret(x_dashboard_secret):
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    business = get_business_by_id(payload.business_id) if payload.business_id else get_active_business()
-    if not business:
-        return JSONResponse({"status": "error", "message": "No active business"}, status_code=404)
-
-    customer_id = normalize_id(payload.customer_id)
-    text = (payload.text or "").strip()
-
-    if not customer_id or not text:
-        return JSONResponse({"status": "error", "message": "Missing customer_id or text"}, status_code=400)
-
-    ok, result = await send_telegram_user_message(
-        customer_id=customer_id,
-        text=text,
-    )
-
-    if ok:
-        save_telegram_message(
-            business=business,
-            customer_id=customer_id,
-            text=text,
-            direction="outbound",
-            message_id=result.get("message_id", ""),
-            raw_payload=result,
-            channel="telegram_user_private",
-            customer_name=result.get("customer_name", customer_id),
-            chat_id=result.get("chat_id", payload.chat_id or customer_id),
-        )
-
-    return JSONResponse(
-        {"status": "ok" if ok else "error", "meta": result},
-        status_code=200 if ok else 400,
-    )
-
-
-@app.post("/dashboard/send-image-file")
-async def dashboard_send_image_file(
-        payload: DashboardImageFile,
-        authorization: str = Header(default=""),
-        x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    clean_business_id = normalize_id(payload.business_id)
-    if clean_business_id and not can_access_business(access, clean_business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    if not str(payload.mime_type or "").startswith("image/"):
-        return JSONResponse({"status": "error", "message": "Only image files are supported right now"}, status_code=400)
-
-    try:
-        file_bytes = decode_upload_data(payload.file_data)
-    except ValueError as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
-
-    business = get_business_by_id(clean_business_id) if clean_business_id else get_active_business()
-    if not business:
-        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-    if not can_access_business(access, normalize_id(business.get("id"))):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    customer_id = normalize_id(payload.customer_id)
-    chat_id = normalize_id(payload.chat_id or payload.customer_id)
-    caption = (payload.caption or "").strip()
-    platform = normalize_id(payload.platform).lower()
-    channel = normalize_id(payload.channel)
-
-    if not customer_id:
-        return JSONResponse({"status": "error", "message": "Missing customer_id"}, status_code=400)
-
-    if platform == "telegram" and channel == "telegram_user_private":
-        ok, result = await send_telegram_user_file(
-            customer_id=customer_id,
-            file_bytes=file_bytes,
-            filename=payload.filename,
-            caption=caption,
-        )
-
-        if ok:
-            save_telegram_message(
-                business=business,
-                customer_id=customer_id,
-                text=caption or "📸 Photo",
-                direction="outbound",
-                message_id=result.get("message_id", ""),
-                raw_payload=result,
-                channel="telegram_user_private",
-                customer_name=result.get("customer_name", customer_id),
-                chat_id=result.get("chat_id", chat_id),
-                media_type="photo",
-            )
-
-        return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
-
-    if platform == "telegram":
-        res = send_telegram_bot_photo_upload(
-            chat_id=chat_id,
-            file_bytes=file_bytes,
-            filename=payload.filename,
-            mime_type=payload.mime_type,
-            caption=caption,
-            business=business,
-        )
-        result = safe_json(res) if res is not None else {"error": "Send failed — no bot token configured"}
-        ok = res is not None and res.ok
-
-        if ok:
-            photos = result.get("result", {}).get("photo", []) if isinstance(result, dict) else []
-            media_file_id = photos[-1].get("file_id", "") if photos else ""
-            save_telegram_message(
-                business=business,
-                customer_id=customer_id,
-                text=caption or "📸 Photo",
-                direction="outbound",
-                message_id=result.get("result", {}).get("message_id", ""),
-                raw_payload=result,
-                channel=channel or "telegram_bot_private",
-                customer_name=customer_id,
-                chat_id=chat_id,
-                media_type="photo",
-                media_file_id=media_file_id,
-            )
-
-        return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
-
-    if platform == "whatsapp":
-        ok, result, media_id = send_whatsapp_image_upload(
-            to=customer_id,
-            file_bytes=file_bytes,
-            filename=payload.filename,
-            mime_type=payload.mime_type,
-            caption=caption,
-            business=business,
-        )
-
-        if ok:
-            save_inbox_message(
-                business=business,
-                platform="whatsapp",
-                sender_id=get_whatsapp_phone_number_id(business),
-                recipient_id=customer_id,
-                message_text=caption or "📸 Photo",
-                direction="outbound",
-                platform_message_id=result.get("messages", [{}])[0].get("id", ""),
-                raw_payload=result,
-                is_read=True,
-                media_type="photo",
-                media_url=get_whatsapp_media_proxy_url(media_id) if media_id else None,
-                channel=channel or "whatsapp",
-                file_name=payload.filename,
-                mime_type=payload.mime_type,
-                whatsapp_media_id=media_id,
-            )
-
-        return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
-
-    if platform == "instagram":
-        return JSONResponse(
-            {
-                "status": "error",
-                "message": "Instagram image uploads need public media hosting. Add Supabase Storage/S3, then send the public URL through Instagram DM.",
-            },
-            status_code=400,
-        )
-
-    return JSONResponse({"status": "error", "message": "Unknown platform"}, status_code=400)
-
-
-@app.post("/dashboard/send-voice-file")
-async def dashboard_send_voice_file(
-        payload: DashboardVoiceFile,
-        authorization: str = Header(default=""),
-        x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    clean_business_id = normalize_id(payload.business_id)
-    if clean_business_id and not can_access_business(access, clean_business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    if not str(payload.mime_type or "").startswith("audio/"):
-        return JSONResponse({"status": "error", "message": "Only audio files are supported for voice notes"}, status_code=400)
-
-    try:
-        file_bytes = decode_upload_data(payload.file_data)
-    except ValueError as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
-
-    business = get_business_by_id(clean_business_id) if clean_business_id else get_active_business()
-    if not business:
-        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-    if not can_access_business(access, normalize_id(business.get("id"))):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    customer_id = normalize_id(payload.customer_id)
-    chat_id = normalize_id(payload.chat_id or payload.customer_id)
-    platform = normalize_id(payload.platform).lower()
-    channel = normalize_id(payload.channel)
-
-    if not customer_id:
-        return JSONResponse({"status": "error", "message": "Missing customer_id"}, status_code=400)
-
-    if platform == "telegram" and channel == "telegram_user_private":
-        ok, result = await send_telegram_user_voice_file(
-            customer_id=customer_id,
-            file_bytes=file_bytes,
-            filename=payload.filename,
-        )
-
-        if ok:
-            save_telegram_message(
-                business=business,
-                customer_id=customer_id,
-                text="🎤 Voice message",
-                direction="outbound",
-                message_id=result.get("message_id", ""),
-                raw_payload=result,
-                channel="telegram_user_private",
-                customer_name=result.get("customer_name", customer_id),
-                chat_id=result.get("chat_id", chat_id),
-                media_type="voice",
-            )
-
-        return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
-
-    if platform == "telegram":
-        res = send_telegram_bot_voice_upload(
-            chat_id=chat_id,
-            file_bytes=file_bytes,
-            filename=payload.filename,
-            mime_type=payload.mime_type,
-            business=business,
-        )
-        result = safe_json(res) if res is not None else {"error": "Send failed — no bot token configured"}
-        ok = res is not None and res.ok
-
-        if ok:
-            body = result.get("result", {}) if isinstance(result, dict) else {}
-            media_file_id = (
-                body.get("voice", {}).get("file_id")
-                or body.get("audio", {}).get("file_id")
-                or ""
-            )
-            save_telegram_message(
-                business=business,
-                customer_id=customer_id,
-                text="🎤 Voice message",
-                direction="outbound",
-                message_id=body.get("message_id", ""),
-                raw_payload=result,
-                channel=channel or "telegram_bot_private",
-                customer_name=customer_id,
-                chat_id=chat_id,
-                media_type="voice",
-                media_file_id=media_file_id,
-            )
-
-        return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
-
-    if platform == "whatsapp":
-        ok, result, media_id = send_whatsapp_audio_upload(
-            to=customer_id,
-            file_bytes=file_bytes,
-            filename=payload.filename,
-            mime_type=payload.mime_type,
-            business=business,
-        )
-
-        if ok:
-            save_inbox_message(
-                business=business,
-                platform="whatsapp",
-                sender_id=get_whatsapp_phone_number_id(business),
-                recipient_id=customer_id,
-                message_text="🎤 Voice message",
-                direction="outbound",
-                platform_message_id=result.get("messages", [{}])[0].get("id", ""),
-                raw_payload=result,
-                is_read=True,
-                media_type="voice",
-                media_url=get_whatsapp_media_proxy_url(media_id) if media_id else None,
-                channel=channel or "whatsapp",
-                file_name=payload.filename,
-                mime_type=payload.mime_type,
-                whatsapp_media_id=media_id,
-            )
-
-        return JSONResponse({"status": "ok" if ok else "error", "meta": result}, status_code=200 if ok else 400)
-
-    if platform == "instagram":
-        return JSONResponse(
-            {
-                "status": "error",
-                "message": "Instagram voice uploads need public media hosting and a supported attachment URL.",
-            },
-            status_code=400,
-        )
-
-    return JSONResponse({"status": "error", "message": "Unknown platform"}, status_code=400)
-
-
-@app.get("/api/businesses")
-async def api_get_businesses(
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    if is_local_dashboard_demo_mode():
-        demo = build_local_dashboard_demo_business(access.get("email", ""))
-        return {"status": "ok", "count": 1, "data": [demo]}
-
-    query = supabase.table("businesses").select("*").order("created_at", desc=True)
-    if not access.get("is_admin"):
-        allowed = access.get("business_ids") or []
-        if not allowed:
-            return {"status": "ok", "count": 0, "data": []}
-        query = query.in_("id", allowed)
-    result = query.execute()
-    rows = [sanitize_business_row(row) for row in (result.data or [])]
-    return {"status": "ok", "count": len(rows), "data": rows}
-
-
-@app.get("/api/businesses/{business_id}/channels")
-async def api_get_business_channels(
-    business_id: str,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    if is_local_dashboard_demo_mode():
-        return {"status": "ok", "count": 0, "data": []}
-
-    rows = (
-        supabase.table("business_channels")
-        .select("*")
-        .eq("business_id", normalize_id(business_id))
-        .order("created_at", desc=True)
-        .execute()
-        .data
-        or []
-    )
-    clean = [sanitize_channel_row(row) for row in rows]
-    return {"status": "ok", "count": len(clean), "data": clean}
-
-
-@app.post("/api/businesses/{business_id}/channels")
-async def api_upsert_business_channel(
-    business_id: str,
-    payload: BusinessChannelPayload,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    row = {
-        "business_id": normalize_id(business_id),
-        "platform": normalize_id(payload.platform).lower(),
-        "account_label": normalize_id(payload.account_label),
-        "account_external_id": normalize_id(payload.account_external_id),
-        "is_active": bool(payload.is_active),
-        "config": payload.config or {},
+    if (!liveMode) {
+      rememberDeletedConversation(target.id);
+      removeConversationFromUi(target.id);
+      showToast('Chat deleted locally');
+      return;
     }
-    result = (
-        supabase.table("business_channels")
-        .upsert(row, on_conflict="business_id,platform,account_external_id")
-        .execute()
-    )
-    data = [sanitize_channel_row(x) for x in (result.data or [])]
-    return {"status": "ok", "data": data}
 
-
-@app.delete("/api/business-channels/{channel_id}")
-async def api_delete_business_channel(
-    channel_id: str,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-    if not access.get("is_admin"):
-        row = (
-            supabase.table("business_channels")
-            .select("business_id")
-            .eq("id", normalize_id(channel_id))
-            .limit(1)
-            .execute()
-            .data
-            or []
-        )
-        business_id = normalize_id(row[0].get("business_id")) if row else ""
-        if not can_access_business(access, business_id):
-            return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-    supabase.table("business_channels").delete().eq("id", normalize_id(channel_id)).execute()
-    return {"status": "ok"}
-
-
-@app.get("/api/conversations")
-async def api_get_conversations(platform: str = "all", search: str = "", x_dashboard_secret: str = Header(default="")):
-    if require_dashboard_secret(x_dashboard_secret):
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    try:
-        query = supabase.table("inbox_messages").select("*").order("created_at", desc=True).limit(900)
-
-        if platform != "all":
-            query = query.eq("platform", platform)
-
-        rows = query.execute().data or []
-        conversations = {}
-
-        for row in rows:
-            business_id = row.get("business_id")
-            plat = normalize_id(row.get("platform", "instagram")).lower() or "instagram"
-            channel = standard_channel(plat, row.get("channel", ""))
-            customer_id = str(row.get("customer_id") or "").strip()
-
-            if not business_id or not customer_id:
-                continue
-
-            key = f"{plat}::{business_id}::{channel}::{customer_id}"
-
-            if key not in conversations:
-                conversations[key] = {
-                    "id": key,
-                    "business_id": business_id,
-                    "platform": plat,
-                    "channel": channel,
-                    "customer_id": customer_id,
-                    "chat_id": str(row.get("chat_id") or customer_id),
-                    "customer_name": row.get("customer_name") or f"Client {str(customer_id)[-4:]}",
-                    "last_message": row.get("content", ""),
-                    "last_message_at": row.get("created_at", ""),
-                    "unread_count": 0,
-                    "total_messages": 0,
-                    "media_type": row.get("media_type"),
-                    "media_url": row.get("media_url"),
-                }
-
-            conversations[key]["total_messages"] += 1
-
-            if row.get("direction") == "inbound" and not bool(row.get("is_read", False)):
-                conversations[key]["unread_count"] += 1
-
-        results = list(conversations.values())
-
-        if search.strip():
-            q = search.lower().strip()
-            results = [
-                c for c in results
-                if q in f"{c.get('customer_id', '')} {c.get('customer_name', '')} {c.get('last_message', '')}".lower()
-            ]
-
-        return {"status": "ok", "count": len(results), "data": results}
-
-    except Exception as e:
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-
-
-@app.get("/api/conversation/{conversation_id}")
-async def api_get_conversation_messages(conversation_id: str, limit: int = 250,
-                                        x_dashboard_secret: str = Header(default="")):
-    if require_dashboard_secret(x_dashboard_secret):
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    try:
-        parts = conversation_id.split("::")
-        if len(parts) != 4:
-            return JSONResponse({"status": "error", "message": "Invalid conversation ID"}, status_code=400)
-
-        platform, business_id, channel, customer_id = parts
-        platform = normalize_id(platform).lower()
-        channel = standard_channel(platform, channel)
-
-        query = (
-            supabase.table("inbox_messages")
-            .select("*")
-            .eq("platform", platform)
-            .eq("business_id", business_id)
-            .eq("customer_id", str(customer_id))
-        )
-
-        if channel:
-            query = query.eq("channel", channel)
-
-        messages = query.order("created_at", desc=False).limit(limit).execute().data or []
-
-        try:
-            mark_conversation_read_in_db(conversation_id)
-        except Exception as exc:
-            log("Could not mark conversation read", str(exc))
-
-        return {"status": "ok", "count": len(messages), "data": messages}
-
-    except Exception as e:
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-
-
-@app.post("/api/conversation/{conversation_id}/read")
-async def api_mark_conversation_read(
-        conversation_id: str,
-        x_dashboard_secret: str = Header(default=""),
-):
-    if require_dashboard_secret(x_dashboard_secret):
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    try:
-        mark_conversation_read_in_db(conversation_id)
-        return {"status": "ok"}
-    except ValueError as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
-    except Exception as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-
-@app.post("/api/send-message")
-async def api_send_message(
-        conversation_id: str,
-        text: str,
-        business_id: str = "",
-        x_dashboard_secret: str = Header(default=""),
-):
-    if require_dashboard_secret(x_dashboard_secret):
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    try:
-        platform, biz_id, channel, customer_id = conversation_id.split("::")
-        platform = normalize_id(platform).lower()
-        channel = standard_channel(platform, channel)
-        business = get_business_by_id(biz_id)
-
-        if not business:
-            return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-
-        ok = False
-        result = {}
-
-        if platform == "instagram":
-            ok, result = send_manual_instagram_dm(
-                access_token=get_business_access_token(business),
-                recipient_id=customer_id,
-                text=text,
-                business=business,
-            )
-        elif platform == "telegram":
-            if channel == "telegram_user_private":
-                ok, result = await send_telegram_user_message(customer_id=customer_id, text=text)
-            else:
-                # send_telegram_bot_message returns a requests.Response object, not a tuple
-                res = send_telegram_bot_message(chat_id=customer_id, text=text)
-                if res is not None:
-                    ok = res.ok
-                    result = safe_json(res)
-                else:
-                    ok = False
-                    result = {"error": "Send failed — no bot token configured"}
-        elif platform == "whatsapp":
-            res = send_whatsapp_text(customer_id, text, business)
-            ok = res is not None and res.ok
-            result = safe_json(res) if res is not None else {"error": "Send failed"}
-        else:
-            return JSONResponse({"status": "error", "message": "Unknown platform"}, status_code=400)
-
-        if ok:
-            save_inbox_message(
-                business=business,
-                platform=platform,
-                sender_id=biz_id,
-                recipient_id=customer_id,
-                message_text=text,
-                direction="outbound",
-                platform_message_id=(
-                            result.get("message_id") or result.get("messages", [{}])[0].get("id", "")) if isinstance(
-                    result, dict) else "",
-                raw_payload=result,
-                is_read=True,
-                channel=channel,
-            )
-
-        if not ok:
-            return send_failure_response(result)
-
-        return {"status": "ok", "meta": result}
-
-    except Exception as e:
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-
-
-@app.post("/api/chat-ai-toggle")
-async def api_toggle_chat_ai(
-        business_id: str,
-        platform: str,
-        channel: str,
-        customer_id: str,
-        enabled: bool,
-        authorization: str = Header(default=""),
-        x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-    if not can_manage_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Only owner/admin can turn bots on or off"}, status_code=403)
-
-    set_chat_ai_enabled(business_id, platform, channel, customer_id, enabled)
-    return {"status": "ok", "enabled": enabled}
-
-
-@app.post("/api/business-settings")
-async def api_update_business_settings(
-    body: BusinessSettingsUpdate,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-    if not can_access_business(access, body.business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-    if not can_manage_business(access, body.business_id):
-        return JSONResponse({"status": "error", "message": "Only owner/admin can update bot settings"}, status_code=403)
-
-    business = get_business_by_id(body.business_id)
-    if not business:
-        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-
-    settings = clean_business_settings(body.settings)
-    if not settings:
-        return JSONResponse({"status": "error", "message": "No valid settings to update"}, status_code=400)
-
-    update_business(body.business_id, settings)
-    return {"status": "ok", "message": "Settings updated"}
-
-
-@app.get("/api/ai-prompt-settings/{business_id}")
-async def api_get_ai_prompt_settings(
-    business_id: str,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-    if not can_access_business(access, business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-
-    business = get_business_by_id(business_id)
-    if not business:
-        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-
-    return {"status": "ok", "data": get_ai_prompt_settings(business_id)}
-
-
-@app.post("/api/v2/ai-prompt/generate")
-async def api_generate_ai_prompt(
-    body: AIPromptGenerateRequest,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-    if not can_access_business(access, body.business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-    if not can_manage_business(access, body.business_id):
-        return JSONResponse({"status": "error", "message": "Only owner/admin can generate AI prompts"}, status_code=403)
-
-    business = get_business_by_id(body.business_id)
-    if not business:
-        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-
-    try:
-        result = generate_ai_prompt_suggestion(
-            business=business,
-            field=body.field,
-            current_prompt=body.current_prompt,
-            goal=body.goal,
-        )
-        return {
-            "ok": True,
-            "suggested_prompt": result["suggested_prompt"],
-            "explanation": result["explanation"],
-        }
-    except ValueError as exc:
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=400)
-    except Exception as exc:
-        log("Could not generate prompt suggestion", str(exc))
-        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
-
-
-@app.post("/api/ai-prompt-settings")
-async def api_update_ai_prompt_settings(
-    body: AIPromptSettingsUpdate,
-    authorization: str = Header(default=""),
-    x_dashboard_secret: str = Header(default=""),
-):
-    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
-    if not access:
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-    if not can_access_business(access, body.business_id):
-        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
-    if not can_manage_business(access, body.business_id):
-        return JSONResponse({"status": "error", "message": "Only owner/admin can update AI prompt settings"}, status_code=403)
-
-    business = get_business_by_id(body.business_id)
-    if not business:
-        return JSONResponse({"status": "error", "message": "Business not found"}, status_code=404)
-
-    try:
-        data = upsert_ai_prompt_settings(body.business_id, body.settings)
-        return {"status": "ok", "data": data}
-    except Exception as e:
-        log("Could not update AI prompt settings", str(e))
-        return JSONResponse({"status": "error", "message": str(e)}, status_code=500)
-
-
-@app.get("/api/stats")
-async def api_get_stats(x_dashboard_secret: str = Header(default="")):
-    if require_dashboard_secret(x_dashboard_secret):
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    businesses = get_all_businesses()
-
-    return {
-        "status": "ok",
-        "data": {
-            "total_accounts": len(businesses),
-            "active_accounts": sum(1 for b in businesses if b.get("bot_enabled")),
-            "instagram_messages": get_message_count("instagram"),
-            "telegram_messages": get_message_count("telegram"),
-            "whatsapp_messages": get_message_count("whatsapp"),
+    try {
+      await API.delete(`/api/v2/conversation/${encodeURIComponent(target.apiId || target.id)}`);
+      rememberDeletedConversation(target.id);
+      removeConversationFromUi(target.id);
+      showToast('Chat deleted from dashboard');
+    } catch (e) {
+      if (String(e.message || '').includes('405')) {
+        rememberDeletedConversation(target.id);
+        removeConversationFromUi(target.id);
+        setApiError('');
+        showToast('Backend delete is not deployed yet, so this chat is hidden locally');
+        return;
+      }
+      setApiError(e.message);
+      showToast(e.message);
+    }
+  };
+
+  const editMessage = async (message) => {
+    if (!conv || !message?.id) return;
+    if (conv.platform !== 'telegram') {
+      showToast('Instagram and WhatsApp do not support editing already-delivered messages through the connected API.');
+      return;
+    }
+
+    const currentText = String(message.text || '').trim();
+    const nextText = window.prompt('Edit this Telegram message:', currentText);
+    if (nextText === null) return;
+    const cleanText = nextText.trim();
+    if (!cleanText || cleanText === currentText) return;
+
+    const conversationId = conv.id;
+    setThreads(prev => {
+      const existing = prev[conversationId]?.messages || prev[conversationId] || [];
+      return {
+        ...prev,
+        [conversationId]: {
+          updatedAt: Date.now(),
+          messages: existing.map(item => item.id === message.id ? { ...item, text: cleanText } : item),
         },
+      };
+    });
+
+    try {
+      await API.postJson('/api/v2/message/edit', { message_id: message.id, text: cleanText });
+      await loadThread(conversationId, { silent: true, limit: 300, noCache: true });
+      await loadConversations({ silent: true, sideLoad: false });
+      showToast('Message edited on Telegram');
+    } catch (e) {
+      setThreads(prev => {
+        const existing = prev[conversationId]?.messages || prev[conversationId] || [];
+        return {
+          ...prev,
+          [conversationId]: {
+            updatedAt: Date.now(),
+            messages: existing.map(item => item.id === message.id ? { ...item, text: currentText } : item),
+          },
+        };
+      });
+      setApiError(e.message);
+      showToast(e.message);
+    }
+  };
+
+  const deleteMessage = async (message) => {
+    if (!conv || !message?.id) return;
+    if (conv.platform !== 'telegram') {
+      showToast('Instagram and WhatsApp do not support deleting already-delivered messages through the connected API.');
+      return;
+    }
+    if (!window.confirm('Delete this message from the real Telegram chat and this dashboard?')) return;
+
+    const conversationId = conv.id;
+    try {
+      await API.postJson('/api/v2/message/delete', { message_id: message.id });
+      setThreads(prev => {
+        const existing = prev[conversationId]?.messages || prev[conversationId] || [];
+        return {
+          ...prev,
+          [conversationId]: {
+            updatedAt: Date.now(),
+            messages: existing.filter(item => item.id !== message.id),
+          },
+        };
+      });
+      await loadConversations({ silent: true, sideLoad: false });
+      showToast('Message deleted from Telegram');
+    } catch (e) {
+      setApiError(e.message);
+      showToast(e.message);
+    }
+  };
+
+  const handleTool = async (tool, setDraft, file, caption = '') => {
+    if (file) {
+      if (!conv) return false;
+      if (!liveMode) {
+        showToast(`Connect live backend before sending ${tool === 'voice' ? 'voice notes' : 'images'}`);
+        return false;
+      }
+
+      setSending(true);
+      try {
+        if (tool === 'voice') {
+          await sendLiveVoice(conv, file);
+        } else {
+          await sendLiveImage(conv, file, caption.trim());
+        }
+        await loadThread(conv.id);
+        await loadConversations({ silent: true, sideLoad: false });
+        showToast(tool === 'voice' ? 'Voice note sent' : 'Image sent');
+        return true;
+      } catch (e) {
+        setApiError(e.message);
+        showToast(e.message);
+        return false;
+      } finally {
+        setSending(false);
+      }
     }
 
-
-@app.get("/debug/businesses")
-async def debug_businesses(x_dashboard_secret: str = Header(default="")):
-    if require_dashboard_secret(x_dashboard_secret):
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    result = supabase.table("businesses").select("*").order("created_at", desc=True).execute()
-    rows = [sanitize_business_row(r) for r in (result.data or [])]
-    return {"count": len(rows), "businesses": rows}
-
-
-@app.get("/debug/whatsapp")
-async def debug_whatsapp(x_dashboard_secret: str = Header(default="")):
-    if require_dashboard_secret(x_dashboard_secret):
-        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
-
-    return {
-        "has_whatsapp_access_token": bool(WHATSAPP_ACCESS_TOKEN),
-        "whatsapp_access_token_preview": safe_token(WHATSAPP_ACCESS_TOKEN),
-        "whatsapp_phone_number_id": WHATSAPP_PHONE_NUMBER_ID,
-        "whatsapp_business_account_id": WHATSAPP_BUSINESS_ACCOUNT_ID,
-        "public_base_url": PUBLIC_BASE_URL,
+    if (tool === 'voice-unsupported') {
+      showToast('Voice recording is not supported in this browser');
+      return false;
     }
 
+    if (tool === 'voice-instagram') {
+      showToast('Voice recording currently supports Telegram and WhatsApp. Instagram needs public media hosting first.');
+      return false;
+    }
 
-# ============================================================================
-# INFO ROUTES
-# ============================================================================
-@app.get("/privacy")
-async def privacy():
-    return PlainTextResponse(
-        "Privacy Policy: This app collects Instagram, Telegram and WhatsApp messages to provide automated and manual sales replies."
-    )
+    if (tool === 'voice-permission') {
+      showToast(caption || 'Microphone permission was denied');
+      return false;
+    }
 
+    if (tool === 'voice') {
+      showToast('Press the mic to start recording');
+      return false;
+    }
 
-@app.get("/terms")
-async def terms():
-    return PlainTextResponse(
-        "Terms of Service: This app provides automated and manual Instagram, Telegram and WhatsApp sales replies using AI-assisted tools."
-    )
+    showToast('Choose an image to send');
+    return false;
+  };
+
+  const changeView = (view) => {
+    if (isOperator && !['leads', 'inbox', 'posts', 'clients', 'operators', 'profile'].includes(view)) {
+      setActiveView('inbox');
+      showToast('Operator access is limited to Leads, Inbox, Posts, Clients, Operators, and Profile');
+      return;
+    }
+    if ((view === 'operators' || view === 'clients' || view === 'settings') && liveModeRef.current) {
+      loadOperatorAccounts(selectedBusinessId);
+    }
+    setActiveView(view);
+    const names = {
+      inbox: t.inbox,
+      insights: t.insights,
+      posts: t.posts || 'Posts',
+      leads: t.leads || 'Leads',
+      clients: t.clients || 'Clients',
+      operators: t.operators || 'Operators',
+      knowledge: t.knowledge,
+      prompts: 'AI Prompt Settings',
+      accounts: t.accounts,
+      settings: t.settings,
+      profile: 'Profile',
+    };
+    showToast(`${names[view] || view} selected`);
+  };
+
+  const setLeadStage = (conversationId, stage) => {
+    if (!LEAD_STAGE_ORDER.includes(stage)) return;
+    setLeadStages(prev => {
+      const next = { ...prev, [conversationId]: stage };
+      writeStoredObject(LEAD_STAGES_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ lead_stages: next });
+      return next;
+    });
+    showToast(`Lead stage updated to ${stage}`);
+  };
+
+  const setLeadPrice = (conversationId, price) => {
+    setLeadPrices(prev => {
+      const next = { ...prev };
+      const clean = String(price || '').trim();
+      if (clean) next[conversationId] = price;
+      else delete next[conversationId];
+      writeStoredObject(LEAD_PRICES_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ lead_prices: next });
+      return next;
+    });
+  };
+
+  const setOperatorDealCount = (operatorId, value) => {
+    setOperatorDeals(prev => {
+      const next = { ...prev, [operatorId]: Math.max(0, Number(value || 0)) };
+      writeStoredObject(OPERATOR_DEALS_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ operator_deals: next });
+      return next;
+    });
+  };
+
+  const setClientOwner = (conversationId, owner) => {
+    setClientOwners(prev => {
+      const next = { ...prev };
+      const clean = String(owner || '').trim();
+      if (clean) next[conversationId] = clean;
+      else delete next[conversationId];
+      writeStoredObject(CLIENT_OWNERS_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ client_owners: next });
+      return next;
+    });
+    showToast(owner ? `Client picked by ${owner}` : 'Client unpicked');
+  };
+
+  const addManualClient = (conversationId) => {
+    setManualClients(prev => {
+      if (prev.includes(conversationId)) return prev;
+      const next = [...prev, conversationId];
+      writeStoredObject(MANUAL_CLIENTS_STORAGE_KEY, { items: next });
+      queueWorkspaceStateSave({ manual_clients: { items: next } });
+      return next;
+    });
+    showToast('Client added to important list');
+  };
+
+  const removeManualClient = (conversationId) => {
+    setManualClients(prev => {
+      const next = prev.filter(id => id !== conversationId);
+      writeStoredObject(MANUAL_CLIENTS_STORAGE_KEY, { items: next });
+      queueWorkspaceStateSave({ manual_clients: { items: next } });
+      return next;
+    });
+    showToast('Client removed from important list');
+  };
+
+  const addManualLead = (lead = {}) => {
+    const name = String(lead.name || '').trim();
+    const owner = String(lead.owner || lead.operator || currentOwnerLabel).trim();
+    if (!name || !owner) {
+      showToast('Lead name and operator are required');
+      return;
+    }
+    const id = `manual_lead_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+    const item = {
+      id,
+      name,
+      platform: String(lead.platform || 'manual').trim(),
+      operator: owner,
+      note: String(lead.note || '').trim(),
+      price: String(lead.price || '').trim(),
+      stage: 'new',
+      created_at: new Date().toISOString(),
+    };
+    setManualLeads(prev => {
+      const next = [item, ...prev].slice(0, 500);
+      writeStoredObject(MANUAL_LEADS_STORAGE_KEY, { items: next });
+      queueWorkspaceStateSave({ manual_leads: { items: next } });
+      return next;
+    });
+    setClientOwner(id, owner);
+    setLeadStage(id, 'new');
+    if (item.price) setLeadPrice(id, item.price);
+    showToast(`Manual lead assigned to ${owner}`);
+  };
+
+  const removeManualLead = (leadId) => {
+    const id = String(leadId || '').trim();
+    if (!id) return;
+    setManualLeads(prev => {
+      const next = prev.filter(item => String(item?.id || '') !== id);
+      writeStoredObject(MANUAL_LEADS_STORAGE_KEY, { items: next });
+      queueWorkspaceStateSave({ manual_leads: { items: next } });
+      return next;
+    });
+    setClientOwners(prev => {
+      const next = { ...prev };
+      delete next[id];
+      writeStoredObject(CLIENT_OWNERS_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ client_owners: next });
+      return next;
+    });
+    setLeadStages(prev => {
+      const next = { ...prev };
+      delete next[id];
+      writeStoredObject(LEAD_STAGES_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ lead_stages: next });
+      return next;
+    });
+    setLeadPrices(prev => {
+      const next = { ...prev };
+      delete next[id];
+      writeStoredObject(LEAD_PRICES_STORAGE_KEY, next);
+      queueWorkspaceStateSave({ lead_prices: next });
+      return next;
+    });
+    showToast('Manual lead removed');
+  };
+
+  const addOperatorAdminNote = async (text, recipients = ['*'], mode = 'all') => {
+    const business = String(selectedBusinessId || '').trim();
+    const clean = String(text || '').trim();
+    if (!clean || !business) {
+      showToast('Select business and task text');
+      return;
+    }
+
+    if (!liveModeRef.current) {
+      setOperatorAdminNotes(prev => {
+        const next = [{
+          id: `${Date.now()}`,
+          text: clean,
+          recipients,
+          assign_mode: mode,
+          created_at: new Date().toISOString(),
+        }, ...prev].slice(0, 50);
+        writeStoredObject(OPERATOR_ADMIN_NOTES_STORAGE_KEY, { items: next });
+        queueWorkspaceStateSave({ operator_admin_notes: { items: next } });
+        return next;
+      });
+      showToast('Task saved locally');
+      return;
+    }
+
+    try {
+      await API.postJson('/api/v2/operator-tasks', {
+        business_id: business,
+        text: clean,
+        recipients,
+        assign_mode: mode,
+      });
+      await loadOperatorTasks(business, { forMe: isOperator, silent: true });
+      showToast('Task sent to operators');
+    } catch (e) {
+      showToast(e.message || 'Could not send task');
+    }
+  };
+
+  const selectConversation = (conversationId) => {
+    setSelectedId(conversationId);
+    setActiveView('inbox');
+    setMoreOpen(false);
+    warmupConversationThreads(conversations, conversationId);
+  };
+
+  // Mark selected unread as read
+  useEffect(() => {
+    if (!selectedId) return;
+    setConversations(cs => cs.map(c => c.id === selectedId ? clearConversationUnread(c) : c));
+  }, [selectedId, liveMode]);
+
+  if (booting) {
+    return (
+      <main className="app-loading-screen" role="status" aria-live="polite">
+        <span className="spinner" aria-hidden="true" />
+        <p>Loading... please wait</p>
+      </main>
+    );
+  }
+
+  return (
+    <>
+      <div className={`app ${activeView === 'inbox' ? '' : 'workspace-mode'}`}>
+        <TopBar
+          t={t}
+          lang={lang}
+          setLang={setLang}
+          theme={theme}
+          setTheme={setTheme}
+          conv={conv}
+          aiOn={aiOn}
+          canToggleAi={!isOperator}
+          activeView={activeView}
+          onToggleAi={toggleAi}
+          onRefresh={refreshWorkspace}
+          onToast={showToast}
+          onPin={pinConversation}
+          onArchive={archiveConversation}
+          onDelete={deleteConversation}
+          onMore={() => setMoreOpen(v => !v)}
+          moreOpen={moreOpen}
+          onOpenProfile={() => setActiveView('profile')}
+          onSignOut={onSignOut}
+          userProfile={userProfile}
+          onUpdateUserProfile={updateUserProfile}
+        />
+        <Rail t={t} activeView={activeView} onView={changeView} currentUser={currentUser} userProfile={userProfile} businesses={businesses} />
+        <ListColumn
+          conversations={conversations}
+          selectedId={selectedId}
+          onSelect={selectConversation}
+          t={t}
+          loading={loading}
+          apiError={apiError}
+          liveMode={liveMode}
+          onRefresh={refreshWorkspace}
+        />
+        {activeView === 'inbox' ? (
+          <ThreadColumn
+            conv={conv}
+            aiOn={aiOn}
+            onToggleAi={toggleAi}
+            t={t}
+            messages={messages}
+            onSend={sendMessage}
+            onEditMessage={editMessage}
+            onDeleteMessage={deleteMessage}
+            sending={sending}
+            threadLoading={threadLoading}
+            onTool={handleTool}
+          />
+        ) : (
+          <WorkspacePanel
+            lang={lang}
+            t={t}
+            view={activeView}
+            stats={stats}
+            posts={posts}
+            postsLoading={postsLoading}
+            postsError={postsError}
+            selectedPostId={selectedPostId}
+            onSelectPost={setSelectedPostId}
+            onImportPosts={() => importInstagramPosts(selectedBusinessId)}
+            onRefreshPosts={() => loadInstagramPosts(selectedBusinessId, { refresh: true })}
+            onSavePostInfo={saveInstagramPostInfo}
+            growthAnalyzer={growthAnalyzer}
+            growthAnalyzerLoading={growthAnalyzerLoading}
+            growthAnalyzerError={growthAnalyzerError}
+            onRefreshGrowthAnalyzer={() => loadGrowthAnalyzer(selectedBusinessId, { noCache: true })}
+            conversations={conversations}
+            businesses={businesses}
+            selectedBusinessId={selectedBusinessId}
+            onSelectBusiness={setSelectedBusinessId}
+            onRefresh={refreshWorkspace}
+            onBusinessSetting={updateBusinessSetting}
+            promptSettings={promptSettings}
+            onPromptSetting={updatePromptSetting}
+            onSavePromptSettings={savePromptSettings}
+            promptLoading={promptLoading}
+            promptSaving={promptSaving}
+            onToast={showToast}
+            onGeneratePrompt={generatePromptSuggestion}
+            generatorState={promptGeneratorState}
+            leadStages={leadStages}
+            leadPrices={leadPrices}
+            clientOwners={clientOwners}
+            manualClients={manualClients}
+            manualLeads={manualLeads}
+            operatorDeals={operatorDeals}
+            adminNotes={operatorAdminNotes}
+            operatorAccounts={operatorAccounts}
+            onReloadOperatorAccounts={() => loadOperatorAccounts(selectedBusinessId)}
+            onLeadStageChange={setLeadStage}
+            onLeadPriceChange={setLeadPrice}
+            onPickClient={setClientOwner}
+            onAddManualClient={addManualClient}
+            onRemoveManualClient={removeManualClient}
+            onAddManualLead={addManualLead}
+            onRemoveManualLead={removeManualLead}
+            onOperatorDealChange={setOperatorDealCount}
+            onAdminNote={addOperatorAdminNote}
+            onDownloadOperatorReport={downloadOperatorReport}
+            onOpenConversation={selectConversation}
+            ownerEmail={ownerEmail}
+            onOwnerEmailSave={saveOwnerEmailScope}
+            onSignOut={onSignOut}
+            currentUser={currentUser}
+            userProfile={userProfile}
+            onUpdateUserProfile={updateUserProfile}
+          />
+        )}
+        {activeView === 'inbox' && <DetailColumn conv={conv} t={t} stats={stats} onDelete={deleteConversation} messages={messages} />}
+      </div>
+      <Toast message={toast} />
+
+      <window.TweaksPanel title="Tweaks">
+        <window.TweakSection label="Appearance">
+          <window.TweakRadio
+            label="Theme"
+            value={theme}
+            options={[{ label: 'Light', value: 'light' }, { label: 'Dark', value: 'dark' }]}
+            onChange={(v) => {
+              setTheme(v);
+              window.parent.postMessage({ type: '__edit_mode_set_keys', edits: { theme: v } }, '*');
+            }}
+          />
+        </window.TweakSection>
+        <window.TweakSection label="Language">
+          <window.TweakRadio
+            label="UI"
+            value={lang}
+            options={[{ label: 'EN', value: 'en' }, { label: 'UZ', value: 'uz' }, { label: 'RU', value: 'ru' }]}
+            onChange={setLang}
+          />
+        </window.TweakSection>
+      </window.TweaksPanel>
+    </>
+  );
+}
+
+function Root() {
+  const [lang, setLang] = useState(() => window.localStorage.getItem(UI_LANG_STORAGE_KEY) || 'en');
+  const localDevSession = localDevDashboardSession();
+  const forceDashboard = Boolean(urlParams.get('api') || urlParams.get('secret') || readAuthSession()?.token);
+  const [showDashboard, setShowDashboard] = useState(() => {
+    const hasDashboardHash = window.location.hash === DASHBOARD_HASH;
+    const forceDashboard = urlParams.get('dashboard') === '1';
+    const hasApiContext = Boolean(urlParams.get('api') || urlParams.get('secret'));
+    const hasAuthToken = Boolean(readAuthSession()?.token);
+    return hasDashboardHash || forceDashboard || hasApiContext || hasAuthToken;
+  });
+  const [currentUser, setCurrentUser] = useState(() => readAuthSession() || localDevSession || null);
+  const [signedIn, setSignedIn] = useState(() => {
+    const auth = readAuthSession();
+    return !!(auth?.token || localDevSession?.token);
+  });
+
+  useEffect(() => {
+    window.localStorage.setItem(UI_LANG_STORAGE_KEY, lang);
+  }, [lang]);
+
+  useEffect(() => {
+    if (!localDevSession?.token) return;
+    saveAuthSession(localDevSession.ownerEmail, localDevSession);
+    setCurrentUser((current) => current?.token ? current : localDevSession);
+    setSignedIn(true);
+  }, [localDevSession?.ownerEmail, localDevSession?.role, localDevSession?.token]);
+
+  useEffect(() => {
+    const onHashChange = () => setShowDashboard(window.location.hash === DASHBOARD_HASH);
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  useEffect(() => {
+    if (!showDashboard && !forceDashboard) return;
+    if (!showDashboard && forceDashboard) setShowDashboard(true);
+    if (window.location.hash === DASHBOARD_HASH) return;
+    window.location.hash = DASHBOARD_HASH;
+  }, [showDashboard, forceDashboard]);
+
+  const openDashboard = () => {
+    window.location.hash = DASHBOARD_HASH;
+    setShowDashboard(true);
+  };
+
+  const backToLanding = () => {
+    window.location.hash = '';
+    setShowDashboard(false);
+  };
+
+  const signOut = () => {
+    clearAuthSession();
+    setCurrentUser(null);
+    setSignedIn(false);
+    backToLanding();
+  };
+
+  const authExpired = () => {
+    clearAuthSession();
+    setCurrentUser(null);
+    setSignedIn(false);
+    window.location.hash = DASHBOARD_HASH;
+    setShowDashboard(true);
+  };
+
+  if (!showDashboard && !forceDashboard) return <LandingPage onOpenDashboard={openDashboard} lang={lang} setLang={setLang} />;
+  if (!signedIn) return <SignInPage lang={lang} onSignedIn={(session) => { setCurrentUser(session || readAuthSession() || localDevSession); setSignedIn(true); }} onBack={backToLanding} />;
+  return <App lang={lang} setLang={setLang} onSignOut={signOut} onAuthExpired={authExpired} currentUser={currentUser || readAuthSession()} />;
+}
+
+createRoot(document.getElementById('root')).render(<Root />);
