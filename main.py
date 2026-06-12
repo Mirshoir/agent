@@ -1407,97 +1407,16 @@ def can_access_business(access: dict, business_id: str) -> bool:
     return normalize_id(business_id) in set(access.get("business_ids") or [])
 
 
-def is_business_admin_access(access: dict, business_id: str = "") -> bool:
+def can_manage_business(access: dict, business_id: str = "") -> bool:
     if not access:
         return False
     if access.get("is_admin"):
         return True
-    role = get_user_business_role(access.get("email", ""), business_id) if business_id else ""
-    return normalize_id(role or access.get("role", "")).lower() in BUSINESS_ADMIN_ROLES
-
-
-def operator_owner_labels(access: dict) -> set[str]:
-    email = normalize_email((access or {}).get("email", ""))
-    labels = {email} if email else set()
-    if email and "@" in email:
-        labels.add(email.split("@", 1)[0])
-    return {normalize_id(item).lower() for item in labels if normalize_id(item)}
-
-
-def workspace_state_items(value) -> list:
-    if isinstance(value, dict):
-        items = value.get("items")
-    else:
-        items = value
-    return items if isinstance(items, list) else []
-
-
-def merge_unique_items(existing_items: list, requested_items: list) -> list:
-    merged = []
-    seen = set()
-    for item in [*existing_items, *requested_items]:
-        key = normalize_id(item)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        merged.append(key)
-    return merged
-
-
-def manual_lead_key(item) -> str:
-    return normalize_id(item.get("id")) if isinstance(item, dict) else ""
-
-
-def manual_lead_owner(item) -> str:
-    if not isinstance(item, dict):
-        return ""
-    return normalize_id(item.get("operator") or item.get("owner"))
-
-
-def scope_workspace_state_update_for_access(state: dict, access: dict, business_id: str) -> dict:
-    if is_business_admin_access(access, business_id):
-        return state
-
-    existing_state = get_workspace_state(business_id)
-    operator_labels = operator_owner_labels(access)
-    scoped = dict(state)
-
-    if "client_owners" in scoped:
-        existing_owners = existing_state.get("client_owners") if isinstance(existing_state.get("client_owners"), dict) else {}
-        requested_owners = scoped.get("client_owners") if isinstance(scoped.get("client_owners"), dict) else {}
-        merged_owners = dict(existing_owners)
-        for raw_client_id, raw_owner in requested_owners.items():
-            client_id = normalize_id(raw_client_id)
-            requested_owner = normalize_id(raw_owner)
-            existing_owner = normalize_id(existing_owners.get(client_id))
-            if not client_id or existing_owner or not requested_owner:
-                continue
-            if requested_owner.lower() in operator_labels:
-                merged_owners[client_id] = requested_owner
-        scoped["client_owners"] = merged_owners
-
-    if "manual_clients" in scoped:
-        existing_items = workspace_state_items(existing_state.get("manual_clients"))
-        requested_items = workspace_state_items(scoped.get("manual_clients"))
-        scoped["manual_clients"] = {"items": merge_unique_items(existing_items, requested_items)}
-
-    if "manual_leads" in scoped:
-        existing_items = [item for item in workspace_state_items(existing_state.get("manual_leads")) if isinstance(item, dict)]
-        existing_ids = {manual_lead_key(item) for item in existing_items if manual_lead_key(item)}
-        merged_items = list(existing_items)
-        for item in workspace_state_items(scoped.get("manual_leads")):
-            if not isinstance(item, dict):
-                continue
-            item_id = manual_lead_key(item)
-            if not item_id or item_id in existing_ids:
-                continue
-            owner = manual_lead_owner(item)
-            if owner and owner.lower() in operator_labels:
-                merged_items.append(item)
-                existing_ids.add(item_id)
-        scoped["manual_leads"] = {"items": merged_items[:500]}
-
-    return scoped
+    business_id = normalize_id(business_id)
+    if business_id and not can_access_business(access, business_id):
+        return False
+    role = normalize_id(get_user_business_role(access.get("email"), business_id) or access.get("role")).lower()
+    return role in {"owner", "admin", "super_admin"}
 
 
 def get_latest_instagram_comment_anchor(business_id: str, commenter_id: str = "", post_id: str = "") -> dict:
@@ -2738,6 +2657,31 @@ def load_inbox_message_by_external_id(
     except Exception as exc:
         log("Could not load inbox message by external id", {"business_id": business_id, "platform": platform, "external_message_id": external_message_id, "error": str(exc)})
         return {}
+
+
+def mark_customer_inbound_read(business_id: str, platform: str, customer_id: str, channel: str = ""):
+    business_id = normalize_id(business_id)
+    platform = normalize_id(platform).lower()
+    customer_id = normalize_id(customer_id)
+    channel = standard_channel(platform, channel)
+    if not business_id or not platform or not customer_id:
+        return
+    try:
+        query = (
+            supabase.table("inbox_messages")
+            .update({"is_read": True})
+            .eq("business_id", business_id)
+            .eq("platform", platform)
+            .eq("customer_id", customer_id)
+            .eq("direction", "inbound")
+            .eq("is_read", False)
+        )
+        if channel:
+            query = query.eq("channel", channel)
+        query.execute()
+        clear_inbox_caches()
+    except Exception as exc:
+        log("Could not mark customer inbound read", {"business_id": business_id, "platform": platform, "customer_id": customer_id, "error": str(exc)})
 
 
 def has_outbound_reply_after(
@@ -6843,13 +6787,13 @@ def send_instagram_payload(access_token: str, business: dict, payload: dict):
     return res
 
 
-def send_dm(access_token: str, recipient_id: str, text: str, business: dict = None):
+def send_dm(access_token: str, recipient_id: str, text: str, business: dict = None, message_tag: str = "", preserve_text: bool = False):
     recipient_id = normalize_id(recipient_id)
     if not access_token or not recipient_id or not text:
         return None
 
     business = business or {}
-    text = complete_sentence_reply(remove_urls(text), limit=1000)
+    text = normalize_id(text)[:1000] if preserve_text else complete_sentence_reply(remove_urls(text), limit=1000)
     if looks_like_internal_prompt_leak(text):
         log("Prompt leak blocked at send_dm", {"reply_preview": text[:300], "recipient_id": recipient_id})
         text = safe_outbound_leak_fallback(business)
@@ -6861,17 +6805,43 @@ def send_dm(access_token: str, recipient_id: str, text: str, business: dict = No
         "message": {"text": text[:1000]},
     }
 
+    message_tag = normalize_id(message_tag).upper()
+    if message_tag:
+        payload["tag"] = message_tag
+
     if business.get("oauth_provider") == "facebook_page":
-        payload["messaging_type"] = "RESPONSE"
+        payload["messaging_type"] = "MESSAGE_TAG" if message_tag else "RESPONSE"
 
     return send_instagram_payload(access_token, business, payload)
 
 
-def send_instagram_dm(access_token: str, recipient_id: str, text: str, business: dict):
-    res = send_dm(access_token, recipient_id, text, business)
+def send_instagram_dm(access_token: str, recipient_id: str, text: str, business: dict, message_tag: str = "", preserve_text: bool = False):
+    res = send_dm(access_token, recipient_id, text, business, message_tag=message_tag, preserve_text=preserve_text)
     if res is None:
         return False, {"error": "Send failed"}
     return res.ok, safe_json(res)
+
+
+def send_manual_instagram_dm(access_token: str, recipient_id: str, text: str, business: dict):
+    ok, result = send_instagram_dm(access_token, recipient_id, text, business, preserve_text=True)
+    if ok or not instagram_reply_window_closed(result or {}):
+        return ok, result
+
+    ok, retry_result = send_instagram_dm(
+        access_token,
+        recipient_id,
+        text,
+        business,
+        message_tag="HUMAN_AGENT",
+        preserve_text=True,
+    )
+    if isinstance(retry_result, dict):
+        retry_result = {
+            **retry_result,
+            "human_agent_retry": True,
+            **({"message_tag": "HUMAN_AGENT"} if ok else {}),
+        }
+    return ok, retry_result
 
 
 def send_instagram_media(access_token: str, recipient_id: str, media_type: str, media_url: str, caption: str = "",
@@ -6990,6 +6960,29 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
     is_echo = bool(message.get("is_echo"))
 
     if is_echo:
+        business = find_business_for_webhook(entry_id, sender_id)
+        if business and recipient_id:
+            business_id = normalize_id(business.get("id"))
+            if not load_inbox_message_by_external_id(
+                business_id,
+                "instagram",
+                recipient_id,
+                message_id,
+                direction="outbound",
+            ):
+                save_inbox_message(
+                    business=business,
+                    platform="instagram",
+                    sender_id=sender_id or normalize_id(business.get("instagram_business_id")) or entry_id,
+                    recipient_id=recipient_id,
+                    message_text=message_text,
+                    direction="outbound",
+                    platform_message_id=message_id,
+                    raw_payload=messaging,
+                    is_read=True,
+                    channel="dm",
+                )
+            mark_customer_inbound_read(business_id, "instagram", recipient_id, "dm")
         return
 
     media_type = None
@@ -9696,7 +9689,7 @@ async def send_message_v2(
                 ok = bool(send_result and send_result.ok)
                 result = safe_json(send_result) if send_result is not None else {"error": "Send failed"}
             else:
-                ok, result = send_instagram_dm(access_token, target_id, text, business)
+                ok, result = send_manual_instagram_dm(access_token, target_id, text, business)
 
         elif platform == "telegram":
             if channel == "telegram_user_private":
@@ -9861,6 +9854,8 @@ async def toggle_ai_v2(
         platform, business_id, channel, customer_scope = parts
         if not can_access_business(access, business_id):
             return JSONResponse({"error": "Forbidden"}, status_code=403)
+        if not can_manage_business(access, business_id):
+            return JSONResponse({"error": "Only owner/admin can turn bots on or off"}, status_code=403)
         platform = normalize_id(platform).lower()
         channel = standard_channel(platform, channel)
         customer_id = customer_scope
@@ -10191,7 +10186,6 @@ async def update_workspace_state_v2(
         state = payload.get("state") or {}
         if not isinstance(state, dict):
             return JSONResponse({"error": "state must be an object"}, status_code=400)
-        state = scope_workspace_state_update_for_access(state, access, business_id)
 
         updated_keys = []
         for key, value in state.items():
@@ -10262,11 +10256,15 @@ async def api_update_combined_settings(
 
     business_settings = clean_business_settings(payload.get("business_settings") or {})
     if business_settings:
+        if not can_manage_business(access, business_id):
+            return JSONResponse({"status": "error", "message": "Only owner/admin can update bot settings"}, status_code=403)
         update_business(business_id, business_settings)
         updated["business_settings"] = list(business_settings.keys())
 
     ai_prompt_settings = payload.get("ai_prompt_settings") or {}
     if isinstance(ai_prompt_settings, dict) and ai_prompt_settings:
+        if not can_manage_business(access, business_id):
+            return JSONResponse({"status": "error", "message": "Only owner/admin can update AI prompt settings"}, status_code=403)
         upsert_ai_prompt_settings(business_id, ai_prompt_settings)
         updated["ai_prompt_settings"] = [
             key for key in ai_prompt_settings.keys() if key in AI_PROMPT_SETTING_FIELDS
@@ -10284,7 +10282,6 @@ async def api_update_combined_settings(
         "operator_tasks",
     }
     if isinstance(workspace_state, dict) and workspace_state:
-        workspace_state = scope_workspace_state_update_for_access(workspace_state, access, business_id)
         updated_workspace = []
         for key, value in workspace_state.items():
             if key not in allowed_workspace_keys:
@@ -11384,7 +11381,7 @@ async def api_send_message(
         result = {}
 
         if platform == "instagram":
-            ok, result = send_instagram_dm(
+            ok, result = send_manual_instagram_dm(
                 access_token=get_business_access_token(business),
                 recipient_id=customer_id,
                 text=text,
@@ -11441,10 +11438,16 @@ async def api_toggle_chat_ai(
         channel: str,
         customer_id: str,
         enabled: bool,
+        authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
 ):
-    if require_dashboard_secret(x_dashboard_secret):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+    if not can_manage_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Only owner/admin can turn bots on or off"}, status_code=403)
 
     set_chat_ai_enabled(business_id, platform, channel, customer_id, enabled)
     return {"status": "ok", "enabled": enabled}
@@ -11461,6 +11464,8 @@ async def api_update_business_settings(
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
     if not can_access_business(access, body.business_id):
         return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+    if not can_manage_business(access, body.business_id):
+        return JSONResponse({"status": "error", "message": "Only owner/admin can update bot settings"}, status_code=403)
 
     business = get_business_by_id(body.business_id)
     if not business:
@@ -11504,6 +11509,8 @@ async def api_generate_ai_prompt(
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
     if not can_access_business(access, body.business_id):
         return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+    if not can_manage_business(access, body.business_id):
+        return JSONResponse({"status": "error", "message": "Only owner/admin can generate AI prompts"}, status_code=403)
 
     business = get_business_by_id(body.business_id)
     if not business:
@@ -11539,6 +11546,8 @@ async def api_update_ai_prompt_settings(
         return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
     if not can_access_business(access, body.business_id):
         return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+    if not can_manage_business(access, body.business_id):
+        return JSONResponse({"status": "error", "message": "Only owner/admin can update AI prompt settings"}, status_code=403)
 
     business = get_business_by_id(body.business_id)
     if not business:
