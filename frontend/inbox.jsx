@@ -2651,7 +2651,6 @@ function ClientsTable({
   onLeadStageChange = () => {},
   onLeadPriceChange = () => {},
   currentUser = null,
-  isOperator = false,
   onPickClient = () => {},
   w,
 }) {
@@ -2675,11 +2674,10 @@ function ClientsTable({
       if (clean && !options.some(item => item.toLowerCase() === clean.toLowerCase())) options.push(clean);
     };
     add(currentOwnerLabel);
-    if (isOperator) return options;
     (operatorAccounts || []).forEach(item => add(item?.login_id));
     Object.values(clientOwners || {}).forEach(add);
     return options;
-  }, [currentOwnerLabel, isOperator, operatorAccounts, clientOwners]);
+  }, [currentOwnerLabel, operatorAccounts, clientOwners]);
   const conversationMap = useMemo(
     () => new Map((conversations || []).map(conv => [conv.id, conv])),
     [conversations],
@@ -2720,11 +2718,8 @@ function ClientsTable({
     [manualClients, manualLeads, conversationMap, leadStages, leadPrices, clientOwners],
   );
   const availableCandidates = useMemo(
-    () => (conversations || []).filter(conv => {
-      if ((manualClients || []).includes(conv.id)) return false;
-      return !isOperator || !String(clientOwners?.[conv.id] || '').trim();
-    }),
-    [conversations, manualClients, clientOwners, isOperator],
+    () => (conversations || []).filter(conv => !(manualClients || []).includes(conv.id)),
+    [conversations, manualClients],
   );
 
   const stageNames = {
@@ -2744,74 +2739,70 @@ function ClientsTable({
         </div>
         <span>{rows.length}</span>
       </div>
-      {!isOperator && (
-        <>
-          <div className="panel-actions" style={{ marginBottom: 12 }}>
-            <select value={candidateId} onChange={(e) => setCandidateId(e.target.value)}>
-              <option value="">Select conversation...</option>
-              {availableCandidates.map(conv => (
-                <option key={conv.id} value={conv.id}>{conv.name} ({conv.handle})</option>
-              ))}
-            </select>
-            <button
-              onClick={() => {
-                if (!candidateId) return;
-                onAddManualClient(candidateId);
-                setCandidateId('');
-              }}
-              disabled={!candidateId}
-            >
-              Add client
-            </button>
-          </div>
-          <div className="manual-lead-form">
-            <input
-              value={manualLeadForm.name}
-              placeholder={w.manualLeadName || 'Lead name'}
-              onChange={(e) => setManualLeadForm(prev => ({ ...prev, name: e.target.value }))}
-            />
-            <select
-              value={manualLeadForm.platform}
-              aria-label={w.manualLeadSource || 'Source'}
-              onChange={(e) => setManualLeadForm(prev => ({ ...prev, platform: e.target.value }))}
-            >
-              <option value="telegram">Telegram</option>
-              <option value="whatsapp">WhatsApp</option>
-              <option value="instagram">Instagram</option>
-              <option value="phone">Phone</option>
-              <option value="other">Other</option>
-            </select>
-            <select
-              value={manualLeadForm.owner}
-              aria-label={w.manualLeadOwner || 'Operator'}
-              onChange={(e) => setManualLeadForm(prev => ({ ...prev, owner: e.target.value }))}
-            >
-              {operatorOptions.map(option => <option key={option} value={option}>{option}</option>)}
-            </select>
-            <input
-              value={manualLeadForm.price}
-              placeholder={w.leadPricePlaceholder || 'Add price'}
-              onChange={(e) => setManualLeadForm(prev => ({ ...prev, price: e.target.value }))}
-            />
-            <input
-              value={manualLeadForm.note}
-              placeholder={w.manualLeadNote || 'Note'}
-              onChange={(e) => setManualLeadForm(prev => ({ ...prev, note: e.target.value }))}
-            />
-            <button
-              type="button"
-              onClick={() => {
-                if (!manualLeadForm.name.trim()) return;
-                onAddManualLead(manualLeadForm);
-                setManualLeadForm({ name: '', platform: 'telegram', owner: currentOwnerLabel, price: '', note: '' });
-              }}
-              disabled={!manualLeadForm.name.trim() || !manualLeadForm.owner.trim()}
-            >
-              {w.addManualLead || 'Add manual lead'}
-            </button>
-          </div>
-        </>
-      )}
+      <div className="panel-actions" style={{ marginBottom: 12 }}>
+        <select value={candidateId} onChange={(e) => setCandidateId(e.target.value)}>
+          <option value="">Select conversation...</option>
+          {availableCandidates.map(conv => (
+            <option key={conv.id} value={conv.id}>{conv.name} ({conv.handle})</option>
+          ))}
+        </select>
+        <button
+          onClick={() => {
+            if (!candidateId) return;
+            onAddManualClient(candidateId);
+            setCandidateId('');
+          }}
+          disabled={!candidateId}
+        >
+          Add client
+        </button>
+      </div>
+      <div className="manual-lead-form">
+        <input
+          value={manualLeadForm.name}
+          placeholder={w.manualLeadName || 'Lead name'}
+          onChange={(e) => setManualLeadForm(prev => ({ ...prev, name: e.target.value }))}
+        />
+        <select
+          value={manualLeadForm.platform}
+          aria-label={w.manualLeadSource || 'Source'}
+          onChange={(e) => setManualLeadForm(prev => ({ ...prev, platform: e.target.value }))}
+        >
+          <option value="telegram">Telegram</option>
+          <option value="whatsapp">WhatsApp</option>
+          <option value="instagram">Instagram</option>
+          <option value="phone">Phone</option>
+          <option value="other">Other</option>
+        </select>
+        <select
+          value={manualLeadForm.owner}
+          aria-label={w.manualLeadOwner || 'Operator'}
+          onChange={(e) => setManualLeadForm(prev => ({ ...prev, owner: e.target.value }))}
+        >
+          {operatorOptions.map(option => <option key={option} value={option}>{option}</option>)}
+        </select>
+        <input
+          value={manualLeadForm.price}
+          placeholder={w.leadPricePlaceholder || 'Add price'}
+          onChange={(e) => setManualLeadForm(prev => ({ ...prev, price: e.target.value }))}
+        />
+        <input
+          value={manualLeadForm.note}
+          placeholder={w.manualLeadNote || 'Note'}
+          onChange={(e) => setManualLeadForm(prev => ({ ...prev, note: e.target.value }))}
+        />
+        <button
+          type="button"
+          onClick={() => {
+            if (!manualLeadForm.name.trim()) return;
+            onAddManualLead(manualLeadForm);
+            setManualLeadForm({ name: '', platform: 'telegram', owner: currentOwnerLabel, price: '', note: '' });
+          }}
+          disabled={!manualLeadForm.name.trim() || !manualLeadForm.owner.trim()}
+        >
+          {w.addManualLead || 'Add manual lead'}
+        </button>
+      </div>
       <div className="clients-table-wrap">
         <table className="clients-table">
           <thead>
@@ -2832,13 +2823,7 @@ function ClientsTable({
                 <td colSpan="8" className="clients-empty">{w.clientsEmpty}</td>
               </tr>
             )}
-            {rows.map(row => {
-              const rowOwnerKey = String(row.owner || '').trim().toLowerCase();
-              const isOwnedByCurrentUser = rowOwnerKey && currentOwnerKeys.has(rowOwnerKey);
-              const canPickClient = !row.owner || (!isOperator && !isOwnedByCurrentUser);
-              const canUnpickClient = !isOperator && isOwnedByCurrentUser;
-              const canRemoveClient = !isOperator;
-              return (
+            {rows.map(row => (
               <tr key={row.id}>
                 <td>
                   <div className="client-cell">
@@ -2878,19 +2863,15 @@ function ClientsTable({
                   {row.sourceType === 'conversation' ? (
                     <button className="table-action" onClick={() => onOpenConversation(row.id)}>{w.leadOpen}</button>
                   ) : null}
-                  {canUnpickClient ? (
+                  {row.owner && currentOwnerKeys.has(row.owner.toLowerCase()) ? (
                     <button className="table-action" onClick={() => onPickClient(row.id, '')}>{w.unpickClient || 'Unpick'}</button>
-                  ) : null}
-                  {canPickClient ? (
+                  ) : (
                     <button className="table-action" onClick={() => onPickClient(row.id, currentOwnerLabel)}>{w.pickClient || 'Pick me'}</button>
-                  ) : null}
-                  {canRemoveClient ? (
-                    <button className="table-action" onClick={() => row.sourceType === 'manual' ? onRemoveManualLead(row.id) : onRemoveManualClient(row.id)}>Remove</button>
-                  ) : null}
+                  )}
+                  <button className="table-action" onClick={() => row.sourceType === 'manual' ? onRemoveManualLead(row.id) : onRemoveManualClient(row.id)}>Remove</button>
                 </td>
               </tr>
-              );
-            })}
+            ))}
           </tbody>
         </table>
       </div>
@@ -3542,7 +3523,7 @@ function WorkspacePanel({
   const w = WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en;
   const roleScope = resolveRoleScope(currentUser, businesses || []);
   const isOperator = roleScope.isOperator;
-  if (isOperator && !['leads', 'inbox', 'posts', 'clients', 'operators', 'settings', 'profile'].includes(view)) return null;
+  if (isOperator && !['leads', 'inbox', 'posts', 'clients', 'operators', 'profile'].includes(view)) return null;
   const selectedBusiness = businesses.find(b => b.id === selectedBusinessId) || businesses[0] || {};
   const activeProviderId = aiProviderForBusiness(selectedBusiness);
   const activeProvider = AI_PROVIDERS.find(provider => provider.id === activeProviderId) || AI_PROVIDERS[0];
@@ -3632,7 +3613,6 @@ function WorkspacePanel({
           onLeadStageChange={onLeadStageChange}
           onLeadPriceChange={onLeadPriceChange}
           currentUser={currentUser}
-          isOperator={isOperator}
           onPickClient={onPickClient}
           onOpenConversation={onOpenConversation}
           w={w}
@@ -4014,10 +3994,12 @@ function Rail({ t, activeView, onView, currentUser, userProfile, businesses }) {
         </button>
       ))}
       <div className="rail-spacer" />
-      <button className={`rail-btn ${activeView === 'settings' ? 'active' : ''}`} title={t.settings} onClick={() => onView('settings')}>
-        <I.Sett />
-        <span className="rail-label">{t.settings}</span>
-      </button>
+      {!isOperator && (
+        <button className={`rail-btn ${activeView === 'settings' ? 'active' : ''}`} title={t.settings} onClick={() => onView('settings')}>
+          <I.Sett />
+          <span className="rail-label">{t.settings}</span>
+        </button>
+      )}
       <button className={`rail-btn ${activeView === 'profile' ? 'active' : ''}`} title={t.you || 'You'} onClick={() => onView('profile')}>
         <span className="rail-avatar-mini">
           {userProfile?.photo ? <img src={userProfile.photo} alt={userProfile?.name || 'You'} /> : initialsFromName(userProfile?.name || 'You')}
@@ -4307,7 +4289,7 @@ function Message({ m, conv, t, onReplyComment, onEditMessage, onDeleteMessage })
 }
 
 // ---------- Thread head ----------
-function ThreadHead({ conv, aiOn, onToggleAi, t, onPin, onArchive, onDelete, onMore, moreOpen }) {
+function ThreadHead({ conv, aiOn, onToggleAi, canToggleAi = true, t, onPin, onArchive, onDelete, onMore, moreOpen }) {
   if (!conv) return null;
   return (
     <div className="topbar-thread">
@@ -4324,10 +4306,12 @@ function ThreadHead({ conv, aiOn, onToggleAi, t, onPin, onArchive, onDelete, onM
         </div>
       </div>
       <div className="thread-actions">
-        <button className={`ai-toggle ${aiOn ? 'on' : ''}`} onClick={onToggleAi}>
-          <span className="switch" />
-          <span className="label-i">{aiOn ? t.aiOn : t.aiOff}</span>
-        </button>
+        {canToggleAi && (
+          <button className={`ai-toggle ${aiOn ? 'on' : ''}`} onClick={onToggleAi}>
+            <span className="switch" />
+            <span className="label-i">{aiOn ? t.aiOn : t.aiOff}</span>
+          </button>
+        )}
         <button className={`icon-btn ${conv.pinned ? 'active' : ''}`} title="Pin" onClick={onPin}><I.Star /></button>
         <button className="icon-btn" title="Archive" onClick={onArchive}><I.Archive /></button>
         <div className="menu-wrap">
@@ -4840,7 +4824,7 @@ function DetailColumn({ conv, t, stats, onDelete, messages = [] }) {
 }
 
 // ---------- Top bar ----------
-function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onToggleAi, onRefresh, onToast, onPin, onArchive, onDelete, onMore, moreOpen, onOpenProfile, onSignOut, userProfile, onUpdateUserProfile }) {
+function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, canToggleAi = true, activeView, onToggleAi, onRefresh, onToast, onPin, onArchive, onDelete, onMore, moreOpen, onOpenProfile, onSignOut, userProfile, onUpdateUserProfile }) {
   const [accountOpen, setAccountOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const fileInputRef = useRef(null);
@@ -4897,6 +4881,7 @@ function TopBar({ t, lang, setLang, theme, setTheme, conv, aiOn, activeView, onT
         <ThreadHead
           conv={conv}
           aiOn={aiOn}
+          canToggleAi={canToggleAi}
           onToggleAi={onToggleAi}
           t={t}
           onPin={onPin}
@@ -6046,6 +6031,10 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
 
   const toggleAi = async () => {
     if (!conv) return;
+    if (isOperator) {
+      showToast('Only owner/admin can turn bots on or off');
+      return;
+    }
     const nextEnabled = !conv.aiOn;
     rememberAiOverride(selectedId, nextEnabled);
     setConversations(cs => cs.map(c => c.id === selectedId ? { ...c, aiOn: nextEnabled, needsHuman: nextEnabled ? false : c.needsHuman } : c));
@@ -6253,9 +6242,9 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   };
 
   const changeView = (view) => {
-    if (isOperator && !['leads', 'inbox', 'posts', 'clients', 'operators', 'settings', 'profile'].includes(view)) {
+    if (isOperator && !['leads', 'inbox', 'posts', 'clients', 'operators', 'profile'].includes(view)) {
       setActiveView('inbox');
-      showToast('Operator access is limited to Leads, Inbox, Posts, Clients, Operators, Settings, and Profile');
+      showToast('Operator access is limited to Leads, Inbox, Posts, Clients, Operators, and Profile');
       return;
     }
     if ((view === 'operators' || view === 'clients' || view === 'settings') && liveModeRef.current) {
@@ -6479,6 +6468,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
           setTheme={setTheme}
           conv={conv}
           aiOn={aiOn}
+          canToggleAi={!isOperator}
           activeView={activeView}
           onToggleAi={toggleAi}
           onRefresh={refreshWorkspace}
