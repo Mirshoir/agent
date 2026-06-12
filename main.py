@@ -7,6 +7,7 @@ import io
 import json
 import hashlib
 import hmac
+import sys
 import tempfile
 import shutil
 import subprocess
@@ -237,6 +238,12 @@ STATS_CACHE_TTL_SECONDS = int(os.getenv("STATS_CACHE_TTL_SECONDS", "20"))
 STATS_CACHE: dict[str, dict] = {}
 INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_PUBLIC_PREVIEW_CACHE_TTL_SECONDS", str(60 * 60 * 6)))
 INSTAGRAM_PUBLIC_PREVIEW_CACHE: dict[str, tuple[float, dict]] = {}
+INSTAGRAM_REEL_DOWNLOAD_ENABLED = str(os.getenv("INSTAGRAM_REEL_DOWNLOAD_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
+INSTAGRAM_REEL_CACHE_DIR = Path(os.getenv("INSTAGRAM_REEL_CACHE_DIR", "/tmp/instaagent_reels"))
+INSTAGRAM_REEL_MAX_MB = max(5, min(200, int(os.getenv("INSTAGRAM_REEL_MAX_MB", "80"))))
+INSTAGRAM_REEL_DOWNLOAD_TIMEOUT_SECONDS = max(10, min(90, int(os.getenv("INSTAGRAM_REEL_DOWNLOAD_TIMEOUT_SECONDS", "35"))))
+INSTAGRAM_REEL_DOWNLOAD_FAILURE_TTL_SECONDS = max(60, min(24 * 60 * 60, int(os.getenv("INSTAGRAM_REEL_DOWNLOAD_FAILURE_TTL_SECONDS", "1800"))))
+INSTAGRAM_REEL_DOWNLOAD_ATTEMPT_CACHE: dict[str, tuple[float, dict]] = {}
 INSTAGRAM_CUSTOMER_PROFILE_CACHE_TTL_SECONDS = int(os.getenv("INSTAGRAM_CUSTOMER_PROFILE_CACHE_TTL_SECONDS", str(60 * 60 * 24)))
 INSTAGRAM_CUSTOMER_PROFILE_CACHE: dict[str, tuple[float, dict]] = {}
 INSTAGRAM_HUMAN_AGENT_RETRY_ENABLED = str(
@@ -942,6 +949,141 @@ def fetch_instagram_public_preview(permalink: str) -> dict:
     except Exception:
         INSTAGRAM_PUBLIC_PREVIEW_CACHE[permalink] = (now, {})
         return {}
+
+
+def instagram_reel_cache_id(permalink: str) -> str:
+    permalink = normalize_id(unwrap_meta_redirect_url(permalink))
+    if not permalink:
+        return ""
+    return hashlib.sha256(permalink.encode("utf-8")).hexdigest()[:32]
+
+
+def is_instagram_reel_cache_url(url: str) -> bool:
+    value = normalize_id(url)
+    return "/api/instagram-reel-cache/" in value
+
+
+def instagram_reel_cache_url(cache_name: str) -> str:
+    cache_name = normalize_id(cache_name)
+    if not re.fullmatch(r"[a-f0-9]{32}\.(mp4|m4v|mov|webm)", cache_name):
+        return ""
+    base_root = (PUBLIC_BASE_URL or "").rstrip("/")
+    base = f"{base_root}/api/instagram-reel-cache/{cache_name}" if base_root else f"/api/instagram-reel-cache/{cache_name}"
+    if DASHBOARD_SECRET:
+        return f"{base}?token={DASHBOARD_SECRET}"
+    return base
+
+
+def find_instagram_reel_cache_path(cache_id: str) -> Path | None:
+    cache_id = normalize_id(cache_id).lower()
+    if not re.fullmatch(r"[a-f0-9]{32}", cache_id):
+        return None
+    try:
+        for ext in ("mp4", "m4v", "mov", "webm"):
+            path = INSTAGRAM_REEL_CACHE_DIR / f"{cache_id}.{ext}"
+            if path.exists() and path.is_file() and path.stat().st_size > 0:
+                return path
+    except Exception:
+        return None
+    return None
+
+
+def download_instagram_reel_to_cache(permalink: str) -> dict:
+    permalink = normalize_id(unwrap_meta_redirect_url(permalink))
+    if not INSTAGRAM_REEL_DOWNLOAD_ENABLED or not is_instagram_public_link(permalink):
+        return {}
+
+    cache_id = instagram_reel_cache_id(permalink)
+    if not cache_id:
+        return {}
+
+    cached_path = find_instagram_reel_cache_path(cache_id)
+    if cached_path:
+        return {
+            "media_url": instagram_reel_cache_url(cached_path.name),
+            "media_type": "video",
+            "cache_name": cached_path.name,
+        }
+
+    now = time.time()
+    attempted = INSTAGRAM_REEL_DOWNLOAD_ATTEMPT_CACHE.get(cache_id)
+    if attempted and (now - attempted[0]) < INSTAGRAM_REEL_DOWNLOAD_FAILURE_TTL_SECONDS:
+        return attempted[1] or {}
+
+    INSTAGRAM_REEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="ig-reel-", dir=str(INSTAGRAM_REEL_CACHE_DIR)))
+    try:
+        output_template = str(tmp_dir / f"{cache_id}.%(ext)s")
+        command = [
+            sys.executable,
+            "-m",
+            "yt_dlp",
+            "--no-playlist",
+            "--no-warnings",
+            "--quiet",
+            "--no-cache-dir",
+            "--socket-timeout",
+            str(min(INSTAGRAM_REEL_DOWNLOAD_TIMEOUT_SECONDS, 30)),
+            "--max-filesize",
+            f"{INSTAGRAM_REEL_MAX_MB}M",
+            "--format",
+            "best[ext=mp4]/mp4/best[ext=m4v]/best[ext=webm]/best",
+            "--output",
+            output_template,
+            "--print",
+            "after_move:filepath",
+            permalink,
+        ]
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=INSTAGRAM_REEL_DOWNLOAD_TIMEOUT_SECONDS + 10,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()[:500]
+            log("Instagram reel download failed", {"permalink": permalink, "error": detail or result.returncode})
+            INSTAGRAM_REEL_DOWNLOAD_ATTEMPT_CACHE[cache_id] = (now, {})
+            return {}
+
+        candidates = []
+        for line in (result.stdout or "").splitlines():
+            candidate = Path(line.strip())
+            if candidate.exists() and candidate.is_file():
+                candidates.append(candidate)
+        if not candidates:
+            candidates = [p for p in tmp_dir.glob(f"{cache_id}.*") if p.is_file()]
+
+        max_bytes = INSTAGRAM_REEL_MAX_MB * 1024 * 1024
+        for candidate in candidates:
+            ext = candidate.suffix.lower().lstrip(".")
+            if ext not in {"mp4", "m4v", "mov", "webm"}:
+                continue
+            size = candidate.stat().st_size
+            if size <= 0 or size > max_bytes:
+                continue
+            final_path = INSTAGRAM_REEL_CACHE_DIR / f"{cache_id}.{ext}"
+            if final_path.exists():
+                final_path.unlink()
+            shutil.move(str(candidate), str(final_path))
+            payload = {
+                "media_url": instagram_reel_cache_url(final_path.name),
+                "media_type": "video",
+                "cache_name": final_path.name,
+                "size": size,
+            }
+            INSTAGRAM_REEL_DOWNLOAD_ATTEMPT_CACHE[cache_id] = (now, payload)
+            return payload
+
+        log("Instagram reel download produced no playable file", {"permalink": permalink})
+        INSTAGRAM_REEL_DOWNLOAD_ATTEMPT_CACHE[cache_id] = (now, {})
+        return {}
+    except Exception as exc:
+        log("Instagram reel download error", {"permalink": permalink, "error": str(exc)})
+        INSTAGRAM_REEL_DOWNLOAD_ATTEMPT_CACHE[cache_id] = (now, {})
+        return {}
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def extract_instagram_permalink_from_payload(raw_payload: dict) -> str:
@@ -1831,6 +1973,28 @@ def require_dashboard_secret(x_dashboard_secret: str):
 
 def require_dashboard_media_secret(token: str = "", x_dashboard_secret: str = ""):
     return bool(DASHBOARD_SECRET and token != DASHBOARD_SECRET and x_dashboard_secret != DASHBOARD_SECRET)
+
+
+def parse_http_range(range_header: str, total_size: int):
+    range_header = normalize_id(range_header)
+    if not range_header or not range_header.startswith("bytes=") or total_size <= 0:
+        return None
+    try:
+        raw_start, raw_end = range_header.replace("bytes=", "", 1).split("-", 1)
+        if raw_start == "":
+            suffix = int(raw_end)
+            if suffix <= 0:
+                return None
+            start = max(total_size - suffix, 0)
+            end = total_size - 1
+        else:
+            start = int(raw_start)
+            end = int(raw_end) if raw_end else total_size - 1
+        if start < 0 or end < start or start >= total_size:
+            return None
+        return start, min(end, total_size - 1)
+    except Exception:
+        return None
 
 
 # ============================================================================
@@ -7226,6 +7390,17 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             except Exception as e:
                 log("Could not fetch public Instagram preview", str(e))
 
+        if post_permalink and media_type in (None, "", "file", "video"):
+            try:
+                cached_reel = download_instagram_reel_to_cache(post_permalink) or {}
+                cached_media_url = normalize_id(cached_reel.get("media_url"))
+                if cached_media_url:
+                    media_url = cached_media_url
+                    media_type = "video"
+                    post_media_type = post_media_type or "video"
+            except Exception as e:
+                log("Could not cache Instagram reel", str(e))
+
         save_inbox_message(
             business=business,
             platform="instagram",
@@ -9506,9 +9681,7 @@ async def get_conversation_messages_v2(
             update_rows = []
             for row in rows:
                 media_type = normalize_id(row.get("media_type")).lower()
-                if media_type not in ("video", "file", "photo", "image"):
-                    continue
-                if normalize_id(row.get("media_url")):
+                if media_type not in ("", "video", "file", "photo", "image"):
                     continue
 
                 post_permalink = normalize_id(
@@ -9519,13 +9692,25 @@ async def get_conversation_messages_v2(
                 if not post_permalink:
                     continue
 
-                preview = fetch_instagram_public_preview(post_permalink) or {}
+                media_url = normalize_id(row.get("media_url"))
+                preview = {}
+                cached_reel = {}
+                if not is_instagram_reel_cache_url(media_url):
+                    cached_reel = download_instagram_reel_to_cache(post_permalink) or {}
+                if not cached_reel and not media_url:
+                    preview = fetch_instagram_public_preview(post_permalink) or {}
+
+                cached_media_url = normalize_id(cached_reel.get("media_url"))
                 preview_media_url = normalize_id(preview.get("media_url"))
                 preview_image_url = normalize_id(preview.get("post_image_url"))
                 preview_media_type = normalize_id(preview.get("post_media_type")).lower()
 
                 changed = False
-                if preview_media_url:
+                if cached_media_url:
+                    row["media_url"] = cached_media_url
+                    row["media_type"] = "video"
+                    changed = True
+                elif preview_media_url:
                     row["media_url"] = preview_media_url
                     changed = True
                 if preview_image_url and not normalize_id(row.get("post_image_url")):
@@ -9534,7 +9719,10 @@ async def get_conversation_messages_v2(
                 if post_permalink and not normalize_id(row.get("post_permalink")):
                     row["post_permalink"] = post_permalink
                     changed = True
-                if preview_media_type and media_type in ("", "file"):
+                if cached_media_url and normalize_id(row.get("post_media_type")).lower() != "video":
+                    row["post_media_type"] = "video"
+                    changed = True
+                elif preview_media_type and media_type in ("", "file"):
                     row["media_type"] = "video" if "video" in preview_media_type else ("photo" if "image" in preview_media_type else media_type)
                     changed = True
 
@@ -9542,9 +9730,10 @@ async def get_conversation_messages_v2(
                     update_rows.append({
                         "id": normalize_id(row.get("id")),
                         "media_url": normalize_id(row.get("media_url")),
+                        "media_type": normalize_id(row.get("media_type")),
                         "post_image_url": normalize_id(row.get("post_image_url")),
                         "post_permalink": normalize_id(row.get("post_permalink")),
-                        "post_media_type": normalize_id(preview_media_type or row.get("post_media_type")).lower(),
+                        "post_media_type": normalize_id(row.get("post_media_type") or preview_media_type).lower(),
                     })
 
             if update_rows:
@@ -9553,6 +9742,7 @@ async def get_conversation_messages_v2(
                         try:
                             supabase.table("inbox_messages").update({
                                 "media_url": item.get("media_url") or None,
+                                "media_type": item.get("media_type") or None,
                                 "post_image_url": item.get("post_image_url") or None,
                                 "post_permalink": item.get("post_permalink") or None,
                                 "post_media_type": item.get("post_media_type") or None,
@@ -10452,6 +10642,62 @@ async def get_whatsapp_media(
         content=file_res.content,
         media_type=file_res.headers.get("Content-Type", "application/octet-stream"),
     )
+
+
+@app.get("/api/instagram-reel-cache/{cache_name}")
+async def get_instagram_reel_cache(
+        cache_name: str,
+        token: str = "",
+        x_dashboard_secret: str = Header(default=""),
+        range_header: str = Header(default="", alias="Range"),
+):
+    if require_dashboard_media_secret(token, x_dashboard_secret):
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+
+    cache_name = normalize_id(cache_name).lower()
+    if not re.fullmatch(r"[a-f0-9]{32}\.(mp4|m4v|mov|webm)", cache_name):
+        return JSONResponse({"status": "error", "message": "Invalid media id"}, status_code=400)
+
+    path = INSTAGRAM_REEL_CACHE_DIR / cache_name
+    try:
+        resolved = path.resolve()
+        cache_root = INSTAGRAM_REEL_CACHE_DIR.resolve()
+        if cache_root not in resolved.parents or not resolved.exists() or not resolved.is_file():
+            return JSONResponse({"status": "error", "message": "Cached video not found"}, status_code=404)
+
+        total = resolved.stat().st_size
+        mime = mimetypes.guess_type(str(resolved))[0] or "video/mp4"
+        byte_range = parse_http_range(range_header, total)
+        common_headers = {
+            "Cache-Control": "private, max-age=86400",
+            "Accept-Ranges": "bytes",
+            "Content-Type": mime,
+        }
+
+        with open(resolved, "rb") as fh:
+            if byte_range is not None:
+                start, end = byte_range
+                fh.seek(start)
+                chunk = fh.read(end - start + 1)
+                return Response(
+                    content=chunk,
+                    media_type=mime,
+                    status_code=206,
+                    headers={
+                        **common_headers,
+                        "Content-Range": f"bytes {start}-{end}/{total}",
+                        "Content-Length": str(len(chunk)),
+                    },
+                )
+            body = fh.read()
+        return Response(
+            content=body,
+            media_type=mime,
+            headers={**common_headers, "Content-Length": str(total)},
+        )
+    except Exception as exc:
+        log("Instagram reel cache proxy error", str(exc))
+        return JSONResponse({"status": "error", "message": str(exc)}, status_code=500)
 
 
 @app.get("/api/telegram-bot-media/{file_id}")
