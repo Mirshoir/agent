@@ -542,6 +542,9 @@ function apiErrorMessage(data, status) {
   if (Number(errorCode) === 10 && Number(errorSubcode) === 2534022) {
     return 'Instagram reply window is closed. Ask the customer to send a new DM first.';
   }
+  if (/human agent/i.test(String(description || '')) && /review/i.test(String(description || ''))) {
+    return 'Instagram Human Agent is not approved for this Meta app. Ask the customer to send a new DM first.';
+  }
   if (description) return errorCode ? `${description} (${errorCode})` : description;
 
   const message =
