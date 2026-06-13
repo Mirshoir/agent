@@ -7041,6 +7041,17 @@ def default_pack_count_question(lang: str = "") -> str:
     return "Nechta qop kerak?"
 
 
+def order_contact_question(lang: str = "") -> str:
+    lang = normalize_id(lang).lower()
+    if lang == "en":
+        return "Please leave your phone number so our manager can confirm the order."
+    if lang == "ru":
+        return "Оставьте, пожалуйста, номер телефона, чтобы менеджер подтвердил заказ."
+    if lang == "kk":
+        return "Тапсырысты растау үшін телефон нөміріңізді қалдырыңыз."
+    return "Buyurtmani tasdiqlash uchun telefon raqamingizni qoldiring."
+
+
 def wants_default_pack_size_info(text: str) -> bool:
     low = normalize_id(text).lower()
     if not low:
@@ -7138,6 +7149,7 @@ def build_verified_meshok_price_reply(user_text: str, media_match: dict, busines
     unit_str = f"{unit_price:.1f}".rstrip("0").rstrip(".")
     pack_info = default_pack_size_sentence(lang, business=business)
     pack_question = default_pack_count_question(lang)
+    contact_question = order_contact_question(lang)
     if meshok_count is None:
         if lang == "en":
             return f"Model {label} price is {unit_str} {currency}. {pack_info} {pack_question}"
@@ -7153,19 +7165,19 @@ def build_verified_meshok_price_reply(user_text: str, media_match: dict, busines
     total_str = f"{total_price:.1f}".rstrip("0").rstrip(".")
     if lang == "en":
         if meshok_count == 1:
-            return f"Model {label} price per piece is {unit_str} {currency}. {pack_info} Total is {total_str} {currency}. {pack_question}"
-        return f"Model {label} price per piece is {unit_str} {currency}. {meshok_count} bags contain {total_items} garments total, total price {total_str} {currency}. {pack_question}"
+            return f"Model {label} price per piece is {unit_str} {currency}. {pack_info} Total is {total_str} {currency}. {contact_question}"
+        return f"Model {label} price per piece is {unit_str} {currency}. {meshok_count} bags contain {total_items} garments total, total price {total_str} {currency}. {contact_question}"
     if lang == "ru":
         if meshok_count == 1:
-            return f"Для модели {label} цена за 1 штуку {unit_str} {currency}. {pack_info} Итого {total_str} {currency}. {pack_question}"
-        return f"Для модели {label} цена за 1 штуку {unit_str} {currency}. В {meshok_count} мешках всего {total_items} единиц одежды, общая сумма {total_str} {currency}. {pack_question}"
+            return f"Для модели {label} цена за 1 штуку {unit_str} {currency}. {pack_info} Итого {total_str} {currency}. {contact_question}"
+        return f"Для модели {label} цена за 1 штуку {unit_str} {currency}. В {meshok_count} мешках всего {total_items} единиц одежды, общая сумма {total_str} {currency}. {contact_question}"
     if lang == "kk":
         if meshok_count == 1:
-            return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. {pack_info} Жалпы {total_str} {currency}. {pack_question}"
-        return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. {meshok_count} қапта барлығы {total_items} киім болады, жалпы баға {total_str} {currency}. {pack_question}"
+            return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. {pack_info} Жалпы {total_str} {currency}. {contact_question}"
+        return f"Model {label} үшін 1 данасының бағасы {unit_str} {currency}. {meshok_count} қапта барлығы {total_items} киім болады, жалпы баға {total_str} {currency}. {contact_question}"
     if meshok_count == 1:
-        return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {pack_info} Jami {total_str} {currency}. {pack_question}"
-    return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {meshok_count} qopda jami {total_items} ta kiyim bo'ladi, umumiy narx {total_str} {currency}. {pack_question}"
+        return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {pack_info} Jami {total_str} {currency}. {contact_question}"
+    return f"Model {label} uchun 1 dona narxi {unit_str} {currency}. {meshok_count} qopda jami {total_items} ta kiyim bo'ladi, umumiy narx {total_str} {currency}. {contact_question}"
 
 
 def is_verified_media_match(media_match: dict = None) -> bool:
