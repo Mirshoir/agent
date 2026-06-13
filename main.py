@@ -8507,11 +8507,24 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             return
 
         if not business_allows_auto_reply(business, "instagram", "dm"):
+            log("Instagram DM reply skipped: auto-reply disabled", {
+                "business_id": business.get("id"),
+                "customer_id": sender_id,
+                "message_id": message_id,
+                "bot_enabled": business.get("bot_enabled"),
+                "auto_reply_dms": business.get("auto_reply_dms"),
+                "automation_mode": get_business_automation_mode(business),
+            })
             mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_auto_reply_disabled")
             mark_processed(processed_message_ids, message_id)
             return
 
         if not is_chat_ai_enabled("instagram", "dm", sender_id, business.get("id")):
+            log("Instagram DM reply skipped: chat AI disabled", {
+                "business_id": business.get("id"),
+                "customer_id": sender_id,
+                "message_id": message_id,
+            })
             mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_ai_disabled")
             mark_processed(processed_message_ids, message_id)
             return
