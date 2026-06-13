@@ -4826,6 +4826,32 @@ def wants_catalog(text: str) -> bool:
     return any(k in text for k in keywords)
 
 
+def wants_catalog_or_price_comment(text: str) -> bool:
+    return wants_catalog(text) or is_price_question(text)
+
+
+def public_catalog_dm_reply(user_text: str = "") -> str:
+    lang = detect_customer_language(user_text)
+    if lang == "en":
+        return "I sent the catalog to your DM."
+    if lang == "ru":
+        return "Отправили каталог вам в директ."
+    if lang == "kk":
+        return "Каталогты директке жібердік."
+    return "Katalogni direktga yubordik."
+
+
+def public_catalog_dm_failed_reply(user_text: str = "") -> str:
+    lang = detect_customer_language(user_text)
+    if lang == "en":
+        return "Please write to us in DM and I will send the catalog."
+    if lang == "ru":
+        return "Напишите нам в директ, и я отправлю каталог."
+    if lang == "kk":
+        return "Директке жазыңыз, каталогты жіберемін."
+    return "Iltimos, direktga yozing, katalogni yuboraman."
+
+
 PUBLIC_PRIVATE_INFO_REQUEST_MARKERS = (
     "telefon raqamingiz",
     "telefon nomeringiz",
@@ -7695,7 +7721,17 @@ def send_catalog_private_reply(access_token: str, comment_id: str, business: dic
     if business.get("oauth_provider") == "facebook_page":
         payload["messaging_type"] = "RESPONSE"
 
-    return send_instagram_payload(access_token, business, payload)
+    res = send_instagram_payload(access_token, business, payload)
+    if res is not None and res.ok:
+        return res
+
+    log("Instagram catalog private template failed; retrying text link", {
+        "comment_id": comment_id,
+        "status": getattr(res, "status_code", None),
+        "body": getattr(res, "text", "")[:500] if res is not None else "",
+    })
+    fallback_text = f"Assalomu alaykum! Katalog: {catalog_link}"
+    return send_instagram_private_reply(access_token, comment_id, fallback_text, business)
 
 
 def reply_to_comment(access_token: str, comment_id: str, text: str, business: dict = None):
@@ -8615,12 +8651,13 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
         mark_processed(processed_comment_ids, comment_id)
         return
 
+    wants_comment_catalog = wants_catalog_or_price_comment(comment_text)
     comment_scope = encode_comment_scope("", post_id) if post_id else (commenter_id or comment_id)
     ai_enabled = is_chat_ai_enabled("instagram", "instagram_comment", comment_scope, business.get("id"))
     # Backward compatibility with old per-customer comment settings.
     if ai_enabled and comment_scope != (commenter_id or comment_id):
         ai_enabled = is_chat_ai_enabled("instagram", "instagram_comment", commenter_id or comment_id, business.get("id"))
-    if not ai_enabled:
+    if not ai_enabled and not wants_comment_catalog:
         mark_processed(processed_comment_ids, comment_id)
         return
 
@@ -8631,7 +8668,7 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     reaction_reply = reaction_only_reply_text(comment_text)
     if reaction_reply:
         reply_text = reaction_reply
-    elif wants_catalog(comment_text):
+    elif wants_comment_catalog:
         catalog_link = get_catalog_link(business)
         dm_result = send_catalog_private_reply(access_token, comment_id, business)
         dm_raw_result = safe_json(dm_result) if dm_result is not None else {}
@@ -8649,10 +8686,10 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
                 is_read=True,
                 channel="dm",
             )
-            reply_text = "Katalog DM orqali yuborildi."
+            reply_text = public_catalog_dm_reply(comment_text)
         else:
             log("Instagram catalog private reply failed", {"comment_id": comment_id, "result": dm_raw_result})
-            reply_text = "Katalogni DM orqali yuborish uchun bizga xabar yozing."
+            reply_text = public_catalog_dm_failed_reply(comment_text)
     elif ((sales_agent_decision or {}).get("handoff") or {}).get("handoff_required"):
         reply_text = normalize_id(((sales_agent_decision or {}).get("handoff") or {}).get("customer_reply")) or "Menejerimiz DM orqali yordam beradi."
     else:
