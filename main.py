@@ -7401,7 +7401,7 @@ def _parse_numeric_price(value: str) -> float | None:
         return None
 
 
-def _extract_meshok_count(text: str) -> int | None:
+def _extract_meshok_count(text: str, allow_contextual_count: bool = False) -> int | None:
     low = normalize_id(text).lower()
     match = re.search(r"(\d+)\s*(?:qop|meshok|мешок|sack|bag)\b", low)
     if match:
@@ -7411,6 +7411,16 @@ def _extract_meshok_count(text: str) -> int | None:
             return 1
     if any(token in low for token in ["qop", "meshok", "мешок", "sack", "bag"]):
         return 1
+    if allow_contextual_count:
+        contextual_match = re.search(
+            r"^\s*(\d+)\s*(?:ta|та|dona|pcs?|pieces?|шт\.?)?\s*(?:kerak|olaman|olamiz|беру|надо)?\s*[.!?]*\s*$",
+            low,
+        )
+        if contextual_match:
+            try:
+                return max(1, int(contextual_match.group(1)))
+            except Exception:
+                return 1
     return None
 
 
@@ -7451,11 +7461,16 @@ def build_usd_only_reply(user_text: str, media_match: dict, business: dict = Non
     return f"Biz faqat {currency}da sotamiz. {pack_info} {pack_question}"
 
 
-def build_verified_meshok_price_reply(user_text: str, media_match: dict, business: dict = None) -> str:
+def build_verified_meshok_price_reply(
+    user_text: str,
+    media_match: dict,
+    business: dict = None,
+    allow_contextual_count: bool = False,
+) -> str:
     unit_price = _parse_numeric_price(media_match.get("top_match_price", ""))
     if unit_price is None:
         return ""
-    meshok_count = _extract_meshok_count(user_text)
+    meshok_count = _extract_meshok_count(user_text, allow_contextual_count=allow_contextual_count)
     currency = normalize_id(media_match.get("top_match_currency")) or "USD"
     lang = detect_customer_language(user_text)
     code = normalize_id(media_match.get("top_match_code"))
@@ -8848,7 +8863,11 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             and not media_reply_hint
         )
 
-        quantity_followup = _extract_meshok_count(message_text) is not None
+        allow_contextual_quantity = recent_media_context_found or verified_exact_media_match or bool(resolved_media_match)
+        quantity_followup = _extract_meshok_count(
+            message_text,
+            allow_contextual_count=allow_contextual_quantity,
+        ) is not None
 
         media_match_strategy = normalize_id((resolved_media_match or {}).get("match_strategy"))
 
@@ -8864,14 +8883,24 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 force_direct_media_reply = True
 
         if verified_exact_media_match and (is_price_question(message_text) or quantity_followup):
-            verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match, business)
+            verified_meshok_reply = build_verified_meshok_price_reply(
+                message_text,
+                resolved_media_match,
+                business,
+                allow_contextual_count=allow_contextual_quantity,
+            )
             if verified_meshok_reply:
                 media_reply_hint = verified_meshok_reply
                 force_direct_media_reply = True
 
         if needs_photo_fallback:
             if recent_media_context_found and (is_price_question(message_text) or quantity_followup):
-                verified_meshok_reply = build_verified_meshok_price_reply(message_text, resolved_media_match, business)
+                verified_meshok_reply = build_verified_meshok_price_reply(
+                    message_text,
+                    resolved_media_match,
+                    business,
+                    allow_contextual_count=allow_contextual_quantity,
+                )
                 if verified_meshok_reply:
                     media_reply_hint = verified_meshok_reply
                     media_match_context = (
