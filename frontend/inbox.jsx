@@ -632,20 +632,24 @@ function resolveMediaUrl(row = {}) {
 
 function withMediaToken(url) {
   if (!url) return '';
+  const rawUrl = String(url || '').trim();
   const secret = dashboardSecret();
-  const needsToken = [
+  const protectedPaths = [
+    '/api/instagram-reel-cache/',
     '/api/whatsapp/media/',
     '/api/telegram-user-media/',
     '/api/telegram-bot-media/',
-  ].some(path => String(url).includes(path));
-  if (!secret || !needsToken) return url;
+  ];
+  const needsToken = protectedPaths.some(path => rawUrl.includes(path));
+  if (!needsToken) return rawUrl;
 
   try {
-    const parsed = new URL(url, window.location.href);
+    const base = rawUrl.startsWith('/api/') ? API_BASE : window.location.href;
+    const parsed = new URL(rawUrl, base);
     if (!parsed.searchParams.has('token')) parsed.searchParams.set('token', secret);
     return parsed.toString();
   } catch (e) {
-    return url;
+    return rawUrl;
   }
 }
 
@@ -677,7 +681,16 @@ function isInstagramPostLink(url) {
 
 function isPlayableVideoUrl(url) {
   const value = String(url || '').toLowerCase();
-  return /^https?:\/\//.test(value) && !isInstagramPostLink(value) && /\.(mp4|mov|m4v|webm)(\?|$)/i.test(value);
+  if (!/^https?:\/\//.test(value)) return false;
+  if (isInstagramPostLink(value)) return false;
+  if (/\.(png|jpe?g|webp|gif|bmp|heic|heif)(\?|$)/i.test(value)) return false;
+  return (
+    /\.(mp4|mov|m4v|webm)(\?|$)/i.test(value) ||
+    value.includes('/api/instagram-reel-cache/') ||
+    value.includes('cdninstagram.com') ||
+    value.includes('fbcdn.net') ||
+    value.includes('scontent')
+  );
 }
 
 function isRenderableImageUrl(url) {

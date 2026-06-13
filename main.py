@@ -2448,9 +2448,9 @@ def transform_conversation_to_react(key: str, rows: list, business: dict = None,
         'platform': platform,
         'isCommentThread': platform == "instagram" and "comment" in normalize_id(channel).lower(),
         'postId': comment_post_id or extract_instagram_comment_post_id(latest_row),
-        'postPermalink': (latest_row.get("raw_payload") or {}).get("post_permalink", ""),
-        'postImageUrl': (latest_row.get("raw_payload") or {}).get("post_image_url", ""),
-        'postMediaType': normalize_id((latest_row.get("raw_payload") or {}).get("post_media_type", "")).lower(),
+        'postPermalink': latest_row.get("post_permalink") or (latest_row.get("raw_payload") or {}).get("post_permalink", ""),
+        'postImageUrl': latest_row.get("post_image_url") or (latest_row.get("raw_payload") or {}).get("post_image_url", ""),
+        'postMediaType': normalize_id(latest_row.get("post_media_type") or (latest_row.get("raw_payload") or {}).get("post_media_type", "")).lower(),
         'avatar': generate_avatar(customer_name),
         'lang': business.get('language', 'uz') if business else 'uz',
         'online': False,
@@ -10228,7 +10228,8 @@ async def get_conversations_v2(
         # Keep payload slim on hot path; this endpoint is polled frequently.
         fields = (
             "business_id,platform,channel,customer_id,chat_id,customer_name,"
-            "content,created_at,direction,is_read,external_message_id"
+            "content,created_at,direction,is_read,external_message_id,media_type,media_url,"
+            "post_permalink,post_image_url,post_media_type"
         )
         if include_raw:
             fields = f"{fields},raw_payload"
@@ -10482,10 +10483,14 @@ async def get_conversation_messages_v2(
                     or (row.get("raw_payload") or {}).get("post_permalink")
                     or extract_instagram_permalink_from_payload(row.get("raw_payload") or {})
                 )
+                media_url = normalize_id(row.get("media_url"))
+                if not post_permalink and media_url:
+                    maybe_permalink = unwrap_meta_redirect_url(media_url)
+                    if is_instagram_public_link(maybe_permalink):
+                        post_permalink = maybe_permalink
                 if not post_permalink:
                     continue
 
-                media_url = normalize_id(row.get("media_url"))
                 preview = {}
                 if not is_instagram_reel_cache_url(media_url):
                     cache_id = instagram_reel_cache_id(post_permalink)
