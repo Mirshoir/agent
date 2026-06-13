@@ -2567,12 +2567,12 @@ def parse_instagram_test_allowlist(value) -> set[str]:
     return allowed
 
 
-def instagram_dm_allowed_for_test_customer(business_id: str, sender_id: str, sender_profile: dict = None, customer_name: str = "") -> bool:
-    state = get_workspace_state(business_id)
-    allowed = parse_instagram_test_allowlist(state.get("instagram_dm_test_allowlist"))
-    if not allowed:
-        return True
-
+def instagram_dm_test_allowlist_candidates(
+    sender_id: str,
+    sender_profile: dict = None,
+    customer_name: str = "",
+    recent_rows: list = None,
+) -> set[str]:
     profile = sender_profile if isinstance(sender_profile, dict) else {}
     candidates = {
         normalize_id(sender_id).lower().lstrip("@"),
@@ -2580,7 +2580,40 @@ def instagram_dm_allowed_for_test_customer(business_id: str, sender_id: str, sen
         normalize_id(profile.get("username")).lower().lstrip("@"),
         normalize_id(profile.get("name")).lower().lstrip("@"),
     }
-    return bool(allowed.intersection({item for item in candidates if item}))
+    for row in recent_rows or []:
+        if not isinstance(row, dict):
+            continue
+        row_name = normalize_id(row.get("customer_name")).lower().lstrip("@")
+        if row_name and not _looks_like_numeric_id(row_name):
+            candidates.add(row_name)
+        raw = row.get("raw_payload")
+        if isinstance(raw, dict):
+            for candidate in _extract_username_candidates(raw):
+                clean = normalize_id(candidate).lower().lstrip("@")
+                if clean and not _looks_like_numeric_id(clean):
+                    candidates.add(clean)
+    return {item for item in candidates if item}
+
+
+def instagram_dm_allowed_for_test_customer(
+    business_id: str,
+    sender_id: str,
+    sender_profile: dict = None,
+    customer_name: str = "",
+    recent_rows: list = None,
+) -> bool:
+    state = get_workspace_state(business_id)
+    allowed = parse_instagram_test_allowlist(state.get("instagram_dm_test_allowlist"))
+    if not allowed:
+        return True
+
+    candidates = instagram_dm_test_allowlist_candidates(
+        sender_id=sender_id,
+        sender_profile=sender_profile,
+        customer_name=customer_name,
+        recent_rows=recent_rows,
+    )
+    return bool(allowed.intersection(candidates))
 
 
 def backfill_instagram_customer_name(business_id: str, customer_id: str, profile_name: str):
@@ -8323,7 +8356,25 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             sender_id=sender_id,
             sender_profile=sender_profile,
             customer_name=customer_display_name,
+            recent_rows=recent_lead_rows,
         ):
+            allowed = parse_instagram_test_allowlist(
+                get_workspace_state(business.get("id")).get("instagram_dm_test_allowlist")
+            )
+            candidates = instagram_dm_test_allowlist_candidates(
+                sender_id=sender_id,
+                sender_profile=sender_profile,
+                customer_name=customer_display_name,
+                recent_rows=recent_lead_rows,
+            )
+            log("Instagram DM reply skipped: test allowlist mismatch", {
+                "business_id": business.get("id"),
+                "customer_id": sender_id,
+                "message_id": message_id,
+                "allowed": sorted(allowed),
+                "candidates": sorted(candidates),
+                "customer_display_name": customer_display_name,
+            })
             mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_test_allowlist")
             mark_processed(processed_message_ids, message_id)
             return
