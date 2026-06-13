@@ -30,6 +30,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from supabase import create_client
 
+from agent_orchestrator import run_agent_cycle
+from ai_audit_log import build_ai_action, save_ai_action
+from coaching_report import build_daily_coaching_report, coaching_report_text
+
 try:
     import telegram_bot as telegram_bot_module
     from telegram_bot import (
@@ -614,14 +618,64 @@ def normalize_lead_state(state: dict = None) -> dict:
     name_collected = bool(state.get("name_collected")) or bool(customer_name and not _looks_like_generated_instagram_name(customer_name))
     last_lead_update = normalize_id(state.get("last_lead_update"))
     last_message_id = normalize_id(state.get("last_message_id"))
-    return {
+    stage = normalize_id(state.get("stage") or "new").lower()
+    if stage == "negotiation":
+        stage = "hot"
+    if stage == "handoff":
+        stage = "handoff_required"
+    if stage not in {"new", "engaged", "interested", "qualified", "hot", "handoff_required", "won", "lost"}:
+        stage = "new"
+    try:
+        score = max(0, min(100, int(float(state.get("score") or state.get("lead_score") or 0))))
+    except Exception:
+        score = 0
+
+    normalized = {
         "phone": phone,
         "customer_name": customer_name,
         "phone_collected": phone_collected,
         "name_collected": name_collected,
         "last_lead_update": last_lead_update,
         "last_message_id": last_message_id,
+        "score": score,
+        "lead_score": score,
+        "stage": stage,
+        "handoff_required": bool(state.get("handoff_required") or stage == "handoff_required"),
     }
+    for key in (
+        "business_id",
+        "platform",
+        "channel",
+        "customer_id",
+        "last_message_text",
+        "last_message_at",
+        "primary_intent",
+        "language",
+        "stage_label",
+        "product_interest",
+        "qualification_summary",
+        "handoff_reason",
+        "handoff_priority",
+        "manager_note",
+        "updated_at",
+    ):
+        value = normalize_id(state.get(key))
+        if value:
+            normalized[key] = value
+    for key in ("intents", "score_reasons", "handoff_reasons"):
+        value = state.get(key)
+        if isinstance(value, list):
+            normalized[key] = value[:20]
+    for key in ("signals",):
+        value = state.get(key)
+        if isinstance(value, dict):
+            normalized[key] = value
+    if state.get("intent_confidence") not in (None, ""):
+        try:
+            normalized["intent_confidence"] = float(state.get("intent_confidence"))
+        except Exception:
+            pass
+    return normalized
 
 
 def lead_state_missing_fields(state: dict = None) -> list[str]:
@@ -641,6 +695,8 @@ def build_known_customer_information_block(lead_state: dict = None) -> str:
 Known customer information:
 - Name: {state.get("customer_name") or "unknown"}
 - Phone: {state.get("phone") or "unknown"}
+- Lead stage: {state.get("stage") or "new"}
+- Lead score: {state.get("score") or 0}
 - Phone collected: {"yes" if state.get("phone_collected") else "no"}
 - Name collected: {"yes" if state.get("name_collected") else "no"}
 - Last lead update: {state.get("last_lead_update") or "unknown"}
@@ -3064,6 +3120,139 @@ def normalize_manual_lead(item: dict) -> dict:
     }
 
 
+def collect_sales_agent_lead_states(business_id: str) -> list[dict]:
+    state = get_workspace_state(business_id)
+    leads = []
+    for key, value in state.items():
+        if isinstance(key, str) and key.startswith("lead_state:") and isinstance(value, dict):
+            leads.append(normalize_lead_state(value))
+    return leads
+
+
+def collect_workspace_ai_actions(business_id: str) -> list[dict]:
+    state = get_workspace_state(business_id)
+    bucket = state.get("ai_actions_recent") or {}
+    items = bucket.get("items") if isinstance(bucket, dict) else []
+    return [item for item in items if isinstance(item, dict)]
+
+
+def load_ai_actions_for_metrics(business_ids: list[str], limit: int = 1000) -> list[dict]:
+    actions = []
+    clean_ids = [normalize_id(item) for item in (business_ids or []) if normalize_id(item)]
+    try:
+        query = (
+            supabase.table("ai_actions")
+            .select("business_id,customer_id,platform,action_type,confidence,handoff_required,manager_corrected,created_at")
+            .order("created_at", desc=True)
+            .limit(limit)
+        )
+        if clean_ids:
+            query = query.in_("business_id", clean_ids)
+        actions = query.execute().data or []
+    except Exception:
+        actions = []
+
+    if clean_ids:
+        for business_id in clean_ids:
+            actions.extend(collect_workspace_ai_actions(business_id))
+    return [item for item in actions if isinstance(item, dict)]
+
+
+def estimate_average_response_minutes(business_ids: list[str], limit: int = 1200) -> float:
+    clean_ids = [normalize_id(item) for item in (business_ids or []) if normalize_id(item)]
+    try:
+        query = (
+            supabase.table("inbox_messages")
+            .select("business_id,platform,channel,customer_id,chat_id,direction,created_at")
+            .order("created_at", desc=True)
+            .limit(limit)
+        )
+        if clean_ids:
+            query = query.in_("business_id", clean_ids)
+        rows = list(reversed(query.execute().data or []))
+    except Exception:
+        return 0.0
+
+    pending = {}
+    intervals = []
+    for row in rows:
+        created_at = normalize_id(row.get("created_at"))
+        try:
+            ts = datetime.fromisoformat(created_at.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            continue
+        platform = normalize_id(row.get("platform")).lower()
+        channel = standard_channel(platform, row.get("channel", ""))
+        key = (
+            normalize_id(row.get("business_id")),
+            platform,
+            channel,
+            conversation_scope(platform, channel, row.get("customer_id"), row.get("chat_id")),
+        )
+        if normalize_id(row.get("direction")).lower() == "inbound":
+            pending[key] = ts
+        elif key in pending:
+            delta = (ts - pending.pop(key)).total_seconds() / 60
+            if 0 <= delta <= 24 * 60:
+                intervals.append(delta)
+    if not intervals:
+        return 0.0
+    return round(sum(intervals) / len(intervals), 1)
+
+
+def build_sales_agent_metrics(business_ids: list[str]) -> dict:
+    clean_ids = [normalize_id(item) for item in (business_ids or []) if normalize_id(item)]
+    leads = []
+    for business_id in clean_ids:
+        leads.extend(collect_sales_agent_lead_states(business_id))
+
+    today = datetime.utcnow().date()
+    stage_counts = {}
+    for lead in leads:
+        stage = normalize_id(lead.get("stage") or "new").lower()
+        stage_counts[stage] = stage_counts.get(stage, 0) + 1
+
+    phones = {
+        normalize_phone_number(lead.get("phone"))
+        for lead in leads
+        if normalize_phone_number(lead.get("phone"))
+    }
+    actions = load_ai_actions_for_metrics(clean_ids)
+    action_count = len(actions)
+    handoff_actions = [action for action in actions if action.get("handoff_required")]
+    low_confidence = [action for action in actions if float(action.get("confidence") or 0) and float(action.get("confidence") or 0) < 0.45]
+    manager_corrections = [action for action in actions if action.get("manager_corrected")]
+
+    new_today = 0
+    for lead in leads:
+        ts = normalize_id(lead.get("updated_at") or lead.get("last_message_at") or lead.get("last_lead_update"))
+        try:
+            if datetime.fromisoformat(ts.replace("Z", "+00:00")).date() == today:
+                new_today += 1
+        except Exception:
+            pass
+
+    qualified = sum(stage_counts.get(stage, 0) for stage in ("qualified", "hot", "handoff_required", "won"))
+    handoff_rate = round((len(handoff_actions) / action_count) * 100, 1) if action_count else 0.0
+    return {
+        "new_leads_today": new_today,
+        "qualified_leads": qualified,
+        "hot_leads": stage_counts.get("hot", 0),
+        "handoff_required_leads": stage_counts.get("handoff_required", 0),
+        "won_orders": stage_counts.get("won", 0),
+        "lost_leads": stage_counts.get("lost", 0),
+        "phone_numbers_collected": len(phones),
+        "average_response_time_minutes": estimate_average_response_minutes(clean_ids),
+        "ai_to_human_handoff_rate": handoff_rate,
+        "ai_actions_logged": action_count,
+        "low_confidence_replies": len(low_confidence),
+        "manager_corrections": len(manager_corrections),
+        "wrong_replies": len([a for a in actions if normalize_id(a.get("action_type")).lower() == "wrong_reply"]),
+        "hallucination_reports": len([a for a in actions if normalize_id(a.get("action_type")).lower() == "hallucination_report"]),
+        "customer_asked_for_human": len([a for a in actions if "human" in json.dumps(a, ensure_ascii=False).lower()]),
+    }
+
+
 def load_business_conversation_lookup(business_id: str, limit: int = 2500) -> dict:
     business_id = normalize_id(business_id)
     if not business_id:
@@ -3731,6 +3920,266 @@ def scope_operator_tasks_for_access(items: list[dict], access: dict) -> list[dic
     return scoped
 
 
+def sales_agent_conversation_id(
+    platform: str,
+    business_id: str,
+    channel: str,
+    customer_id: str,
+    chat_id: str = "",
+) -> str:
+    platform = normalize_id(platform).lower()
+    business_id = normalize_id(business_id)
+    channel = standard_channel(platform, channel)
+    scope = conversation_scope(platform, channel, normalize_id(customer_id), normalize_id(chat_id))
+    if not platform or not business_id or not scope:
+        return ""
+    return f"{platform}::{business_id}::{channel}::{scope}"
+
+
+def sales_agent_recent_messages(rows: list[dict]) -> list[dict]:
+    messages = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        messages.append(
+            {
+                "direction": normalize_id(row.get("direction")).lower(),
+                "content": normalize_id(row.get("content")),
+                "media_type": normalize_id(row.get("media_type")).lower(),
+                "created_at": normalize_id(row.get("created_at")),
+            }
+        )
+    return messages
+
+
+def write_ai_action_fallback(action: dict):
+    business_id = normalize_id(action.get("business_id"))
+    if not business_id:
+        return
+    state = get_workspace_state(business_id)
+    bucket = state.get("ai_actions_recent") or {}
+    items = bucket.get("items") if isinstance(bucket, dict) else []
+    if not isinstance(items, list):
+        items = []
+    items = [action] + items
+    upsert_workspace_state(
+        business_id,
+        "ai_actions_recent",
+        {"items": items[:200]},
+        updated_by="sales_agent",
+    )
+
+
+def record_sales_agent_action(
+    *,
+    business: dict,
+    platform: str,
+    channel: str,
+    customer_id: str,
+    action_type: str,
+    input_message: str,
+    decision: dict = None,
+    reply_sent: str = "",
+    tool_used: str = "",
+):
+    try:
+        payload = build_ai_action(
+            business_id=(business or {}).get("id", ""),
+            customer_id=customer_id,
+            platform=platform,
+            channel=channel,
+            action_type=action_type,
+            input_message=input_message,
+            ai_decision=decision or {},
+            confidence=(decision or {}).get("confidence"),
+            tool_used=tool_used,
+            reply_sent=reply_sent,
+            handoff_required=bool(((decision or {}).get("handoff") or {}).get("handoff_required")),
+        )
+        save_ai_action(supabase, payload, fallback_writer=write_ai_action_fallback)
+    except Exception as exc:
+        log("Could not record sales agent action", str(exc))
+
+
+def sync_sales_agent_workspace_indexes(
+    *,
+    business_id: str,
+    conversation_id: str,
+    lead_state: dict,
+):
+    business_id = normalize_id(business_id)
+    conversation_id = normalize_id(conversation_id)
+    if not business_id or not conversation_id:
+        return
+
+    state = get_workspace_state(business_id)
+    lead_stages = dict(_safe_state_dict(state.get("lead_stages")))
+    lead_scores = dict(_safe_state_dict(state.get("lead_scores")))
+    lead_reasons = dict(_safe_state_dict(state.get("lead_reasons")))
+    needs_human = dict(_safe_state_dict(state.get("needs_human")))
+
+    lead_stages[conversation_id] = normalize_id(lead_state.get("stage") or "new").lower()
+    lead_scores[conversation_id] = int(lead_state.get("score") or lead_state.get("lead_score") or 0)
+    lead_reasons[conversation_id] = {
+        "summary": normalize_id(lead_state.get("qualification_summary")),
+        "reasons": lead_state.get("score_reasons") if isinstance(lead_state.get("score_reasons"), list) else [],
+        "intent": normalize_id(lead_state.get("primary_intent")),
+        "updated_at": normalize_id(lead_state.get("updated_at") or lead_state.get("last_message_at")),
+    }
+    needs_human[conversation_id] = {
+        "required": bool(lead_state.get("handoff_required")),
+        "reason": normalize_id(lead_state.get("handoff_reason")),
+        "priority": normalize_id(lead_state.get("handoff_priority")),
+        "manager_note": normalize_id(lead_state.get("manager_note")),
+        "updated_at": normalize_id(lead_state.get("updated_at") or lead_state.get("last_message_at")),
+    }
+
+    upsert_workspace_state(business_id, "lead_stages", lead_stages, updated_by="sales_agent")
+    upsert_workspace_state(business_id, "lead_scores", lead_scores, updated_by="sales_agent")
+    upsert_workspace_state(business_id, "lead_reasons", lead_reasons, updated_by="sales_agent")
+    upsert_workspace_state(business_id, "needs_human", needs_human, updated_by="sales_agent")
+
+
+def upsert_customer_lead_record(
+    *,
+    business_id: str,
+    platform: str,
+    channel: str,
+    customer_id: str,
+    lead_state: dict,
+):
+    try:
+        payload = {
+            "business_id": normalize_id(business_id),
+            "platform": normalize_id(platform).lower(),
+            "channel": standard_channel(platform, channel),
+            "customer_id": normalize_id(customer_id),
+            "customer_name": normalize_id(lead_state.get("customer_name")),
+            "phone": normalize_phone_number(lead_state.get("phone")),
+            "product_interest": normalize_id(lead_state.get("product_interest")),
+            "stage": normalize_id(lead_state.get("stage") or "new").lower(),
+            "score": int(lead_state.get("score") or lead_state.get("lead_score") or 0),
+            "handoff_required": bool(lead_state.get("handoff_required")),
+            "handoff_reason": normalize_id(lead_state.get("handoff_reason")),
+            "qualification_summary": normalize_id(lead_state.get("qualification_summary")),
+            "state": lead_state,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+        }
+        supabase.table("customer_leads").upsert(
+            payload,
+            on_conflict="business_id,platform,channel,customer_id",
+        ).execute()
+    except Exception:
+        pass
+
+
+def create_handoff_operator_task_once(business_id: str, conversation_id: str, lead_state: dict):
+    business_id = normalize_id(business_id)
+    conversation_id = normalize_id(conversation_id)
+    if not business_id or not conversation_id or not lead_state.get("handoff_required"):
+        return
+    state = get_workspace_state(business_id)
+    task_index = dict(_safe_state_dict(state.get("handoff_tasks")))
+    if task_index.get(conversation_id):
+        return
+
+    customer = normalize_id(lead_state.get("customer_name")) or normalize_id(lead_state.get("customer_id")) or "Customer"
+    stage = normalize_id(lead_state.get("stage_label") or lead_state.get("stage") or "Lead")
+    score = int(lead_state.get("score") or 0)
+    reason = normalize_id(lead_state.get("handoff_reason")) or "review required"
+    text = f"{stage}: {customer} needs human attention. Score {score}. Reason: {reason}."
+    try:
+        append_operator_task(
+            business_id=business_id,
+            text=text,
+            recipients=["*"],
+            assign_mode="all",
+            created_by="sales_agent",
+        )
+        task_index[conversation_id] = {
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "reason": reason,
+        }
+        upsert_workspace_state(business_id, "handoff_tasks", task_index, updated_by="sales_agent")
+    except Exception as exc:
+        log("Could not create handoff operator task", str(exc))
+
+
+def run_sales_agent_for_inbound(
+    *,
+    business: dict,
+    platform: str,
+    customer_id: str,
+    channel: str,
+    message_text: str,
+    message_id: str = "",
+    customer_name: str = "",
+    chat_id: str = "",
+    media_type: str = "",
+    media_match: dict = None,
+    recent_rows: list = None,
+    existing_lead_state: dict = None,
+) -> dict:
+    business = business or {}
+    business_id = normalize_id(business.get("id"))
+    platform = normalize_id(platform).lower()
+    channel = standard_channel(platform, channel)
+    customer_id = normalize_id(customer_id)
+    if not business_id or not platform or not customer_id:
+        return {}
+
+    existing_state = normalize_lead_state(existing_lead_state or get_customer_lead_state(platform, business_id, customer_id, channel))
+    rows = recent_rows if recent_rows is not None else get_recent_platform_message_rows(platform, business, customer_id, channel, limit=20)
+    decision = run_agent_cycle(
+        business=business,
+        business_id=business_id,
+        platform=platform,
+        channel=channel,
+        customer_id=customer_id,
+        customer_name=customer_name,
+        message_text=message_text,
+        message_id=message_id,
+        media_type=media_type or "",
+        media_match=media_match or {},
+        recent_messages=sales_agent_recent_messages(rows),
+        existing_lead_state=existing_state,
+    )
+    lead_state = normalize_lead_state(decision.get("lead_state") or {})
+    upsert_customer_lead_state(
+        business_id=business_id,
+        platform=platform,
+        customer_id=customer_id,
+        lead_state=lead_state,
+        channel=channel,
+        updated_by="sales_agent",
+    )
+    upsert_customer_lead_record(
+        business_id=business_id,
+        platform=platform,
+        channel=channel,
+        customer_id=customer_id,
+        lead_state=lead_state,
+    )
+    conversation_id = sales_agent_conversation_id(platform, business_id, channel, customer_id, chat_id)
+    sync_sales_agent_workspace_indexes(
+        business_id=business_id,
+        conversation_id=conversation_id,
+        lead_state=lead_state,
+    )
+    create_handoff_operator_task_once(business_id, conversation_id, lead_state)
+    record_sales_agent_action(
+        business=business,
+        platform=platform,
+        channel=channel,
+        customer_id=customer_id,
+        action_type="perceive_reason",
+        input_message=message_text,
+        decision=decision,
+        tool_used="product_matcher" if media_match else "",
+    )
+    return decision
+
+
 # ============================================================================
 # AI
 # ============================================================================
@@ -3795,15 +4244,17 @@ Runtime settings:
 
 DEFAULT_AI_PROMPT_SETTINGS = {
     "global_prompt": """
-You are a real human sales operator for this business.
+You are the business virtual sales assistant.
 Use the configured business facts, product information, pricing, delivery details, catalog links, contacts, and knowledge.
 Use short, practical, sales-focused replies in the customer's language.
 Sound natural for Instagram, Telegram, or WhatsApp.
+When introducing yourself, be transparent that you are the business virtual assistant.
 
 Hard rules:
 - Never promise reservation/holding stock unless the business facts explicitly say it is allowed.
 - Never use uncertain fabricated statements.
-- Never mention AI, system, prompt, automation.
+- Never pretend to be a human salesperson.
+- Never mention system, prompt, internal tools, database, or automation details.
 - Before asking for the customer's name or phone number, check the conversation history and known lead state first.
 - If the customer has already shared a phone number in any valid format, never ask for it again in the same conversation.
 - If the customer has already shared their name, never ask for it again in the same conversation.
@@ -3831,7 +4282,7 @@ WhatsApp rules:
 - Ask 2-3 short clarifying questions when customer intent is unclear.
 """.strip(),
     "opening_message": """
-Assalomu alaykum 😊 Qanday yordam kerak?
+Assalomu alaykum 😊 Men virtual yordamchiman. Mahsulot, narx, yetkazib berish yoki buyurtma bo‘yicha yordam beraman.
 """.strip(),
     "lead_collection_rules": """
 Collect buyer context naturally and briefly.
@@ -3909,6 +4360,7 @@ Business-only scope:
 
 Sales-agent rules:
 - Introduce the configured business naturally when needed.
+- If introducing yourself, say you are the business virtual assistant.
 - Use only configured business strengths and facts.
 - Tone: samimiy, short, practical, complete enough to help the customer buy.
 - Ask qualification questions naturally: name, city, phone number.
@@ -3917,6 +4369,7 @@ Sales-agent rules:
 - Never ask for a name again if the customer already sent one in the current conversation.
 - If both name and phone are already collected, confirm briefly and continue the sale.
 - Product availability should be confirmed, never invented.
+- Never pretend to be a human salesperson.
 - Never say stock is reserved or will be reserved unless configured.
 - Never invent price, discount, stock, delivery time, payment terms, or availability.
 - Exact price should not be invented. If asked price and it is missing, say it should be confirmed.
@@ -4016,8 +4469,8 @@ def fallback_prompt_suggestion(field: str, current_prompt: str = "", goal: str =
 
     if field == "opening_message":
         return {
-            "suggested_prompt": "Assalomu alaykum 😊 Qanday yordam kerak?",
-            "explanation": "Made the opening short and natural, without asking for phone or address too early.",
+            "suggested_prompt": "Assalomu alaykum 😊 Men virtual yordamchiman. Mahsulot, narx, yetkazib berish yoki buyurtma bo‘yicha yordam beraman.",
+            "explanation": "Made the opening transparent, short, and natural without asking for phone or address too early.",
         }
 
     suggested_prompt = "\n".join([
@@ -4266,7 +4719,9 @@ Safety rules:
 - If the topic is unrelated to this business, do not answer it; use the unrelated-topic refusal from the business policy.
 - If information is missing, ask 2-3 short clarifying questions.
 - Only mention a manager when the customer asks for a human or is ready to order.
-- Never mention AI, database, API, prompt, automation, or internal system.
+- If introducing yourself, say you are the business virtual assistant.
+- Never pretend to be a human salesperson.
+- Never mention database, API, prompt, automation, or internal system details.
 - Do not use markdown, bold formatting, or long paragraphs.
 - Never ask customers to specify which product/model a photo is about after they already sent a product image.
 - If a customer sends an image or asks about the image price and the exact product is not known, give a short helpful fallback and offer manager confirmation.
@@ -7537,6 +7992,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         force_direct_media_reply = False
         resolved_media_match = {}
         verified_exact_media_match = False
+        sales_agent_decision = {}
 
         if matcher_source_url and media_type in {"photo", "video", "file"}:
             log("Instagram DM media matcher request", {
@@ -7719,6 +8175,29 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                             "media_type": recent_media_type,
                         })
 
+        sales_agent_decision = run_sales_agent_for_inbound(
+            business=business,
+            platform="instagram",
+            customer_id=sender_id,
+            channel="dm",
+            message_text=message_text or ("Customer sent product media." if media_type in {"photo", "video", "file"} else ""),
+            message_id=message_id,
+            customer_name=customer_display_name,
+            media_type=media_type or "",
+            media_match=resolved_media_match or {},
+            recent_rows=recent_lead_rows,
+            existing_lead_state=lead_state,
+        )
+        if sales_agent_decision:
+            lead_state = sales_agent_decision.get("lead_state") or lead_state
+            agent_context = normalize_id(sales_agent_decision.get("reply_context"))
+            if agent_context:
+                media_match_context = f"{media_match_context}\n{agent_context}".strip()
+            handoff_result = sales_agent_decision.get("handoff") or {}
+            if handoff_result.get("handoff_required") and normalize_id(handoff_result.get("customer_reply")):
+                media_reply_hint = normalize_id(handoff_result.get("customer_reply"))
+                force_direct_media_reply = True
+
         if media_type in {"photo", "video", "file"} and not normalize_id(message_text):
             log("Instagram DM cached media without immediate reply", {
                 "customer_id": sender_id,
@@ -7881,9 +8360,40 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 is_read=True,
                 channel="dm",
             )
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="processed")
+            record_sales_agent_action(
+                business=business,
+                platform="instagram",
+                channel="dm",
+                customer_id=sender_id,
+                action_type="reply_sent",
+                input_message=message_text,
+                decision=sales_agent_decision,
+                reply_sent=saved_reply_text,
+                tool_used="product_matcher" if resolved_media_match else "",
+            )
+            handoff_required = bool(((sales_agent_decision or {}).get("handoff") or {}).get("handoff_required"))
+            if handoff_required:
+                set_chat_ai_enabled(business.get("id"), "instagram", "dm", sender_id, False)
+            mark_instagram_processed_message(
+                business.get("id"),
+                message_id,
+                sender_id,
+                "dm",
+                status="processed_handoff_required" if handoff_required else "processed",
+            )
             mark_processed(processed_message_ids, message_id)
         elif send_result is not None:
+            record_sales_agent_action(
+                business=business,
+                platform="instagram",
+                channel="dm",
+                customer_id=sender_id,
+                action_type="reply_failed",
+                input_message=message_text,
+                decision=sales_agent_decision,
+                reply_sent=reply_text,
+                tool_used="product_matcher" if resolved_media_match else "",
+            )
             mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="failed_send")
             log("Instagram DM send failed", {
                 "customer_id": sender_id,
@@ -7948,6 +8458,19 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
         is_read=False,
         channel="instagram_comment",
     )
+    comment_customer_id = commenter_id or comment_id
+    sales_agent_decision = run_sales_agent_for_inbound(
+        business=business,
+        platform="instagram",
+        customer_id=comment_customer_id,
+        channel="instagram_comment",
+        message_text=comment_text,
+        message_id=comment_id,
+        customer_name=commenter_username or f"IG User {str(comment_customer_id)[-4:]}",
+        media_type="",
+        media_match={},
+        recent_rows=get_recent_platform_message_rows("instagram", business, comment_customer_id, "instagram_comment", limit=20),
+    )
 
     if is_conversation_finished_message(comment_text):
         comment_scope = encode_comment_scope("", post_id) if post_id else (commenter_id or comment_id)
@@ -7997,8 +8520,19 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
         else:
             log("Instagram catalog private reply failed", {"comment_id": comment_id, "result": dm_raw_result})
             reply_text = "Katalogni DM orqali yuborish uchun bizga xabar yozing."
+    elif ((sales_agent_decision or {}).get("handoff") or {}).get("handoff_required"):
+        reply_text = normalize_id(((sales_agent_decision or {}).get("handoff") or {}).get("customer_reply")) or "Menejerimiz DM orqali yordam beradi."
     else:
-        reply_text = get_ai_reply(comment_text, business, "instagram", commenter_id or comment_id, "instagram_comment")
+        agent_context = normalize_id((sales_agent_decision or {}).get("reply_context"))
+        reply_text = get_ai_reply(
+            comment_text,
+            business,
+            "instagram",
+            commenter_id or comment_id,
+            "instagram_comment",
+            media_context=agent_context,
+            lead_state=(sales_agent_decision or {}).get("lead_state") or {},
+        )
         reply_text = safe_public_comment_reply(reply_text, business)
 
     reply_text = safe_public_comment_reply(reply_text, business)
@@ -8025,6 +8559,16 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
             customer_name=commenter_username or f"IG User {str(commenter_id or comment_id)[-4:]}",
             is_read=True,
             channel="instagram_comment",
+        )
+        record_sales_agent_action(
+            business=business,
+            platform="instagram",
+            channel="instagram_comment",
+            customer_id=comment_customer_id,
+            action_type="reply_sent",
+            input_message=comment_text,
+            decision=sales_agent_decision,
+            reply_sent=reply_text,
         )
 
     mark_processed(processed_comment_ids, comment_id)
@@ -8272,7 +8816,7 @@ def add_whatsapp_memory(phone: str, role: str, content: str, limit: int = 12):
 def first_whatsapp_intro_message(business: dict = None):
     settings = get_ai_prompt_settings((business or {}).get("id", ""))
     business_name = normalize_id((business or {}).get("business_name")) or "bizning kompaniya"
-    return settings.get("opening_message") or f"Assalomu alaykum. Men {business_name} vakiliman. Qanday yordam bera olaman?"
+    return settings.get("opening_message") or f"Assalomu alaykum. Men {business_name} virtual yordamchisiman. Qanday yordam bera olaman?"
 
 
 def build_whatsapp_system_prompt(business: dict, intro_sent: bool):
@@ -8444,21 +8988,48 @@ async def process_whatsapp_message(change: dict):
 
             add_whatsapp_memory(sender_id, "user", text or f"Customer sent {msg_type}")
 
-            if msg_type == "text":
-                reply_text = get_whatsapp_ai_reply(sender_id, text, business)
+            media_match_context = ""
+            media_reply_hint = ""
+            media_match = {}
+            if media_type and media_url and media_type in {"photo", "file"}:
+                media_match = analyze_media_for_sales_reply(
+                    media_url=media_url,
+                    user_text=text or "",
+                    media_type=media_type,
+                    access_token=get_whatsapp_access_token(business),
+                )
+                if media_match:
+                    media_match_context = media_match.get("context", "")
+                    media_reply_hint = media_match.get("reply_hint", "")
+
+            sales_agent_decision = run_sales_agent_for_inbound(
+                business=business,
+                platform="whatsapp",
+                customer_id=sender_id,
+                channel="whatsapp",
+                message_text=text or f"Customer sent {msg_type}",
+                message_id=message_id,
+                customer_name=customer_name,
+                media_type=media_type or "",
+                media_match=media_match or {},
+                recent_rows=get_recent_platform_message_rows("whatsapp", business, sender_id, "whatsapp", limit=20),
+            )
+            agent_context = normalize_id((sales_agent_decision or {}).get("reply_context"))
+            if agent_context:
+                media_match_context = f"{media_match_context}\n{agent_context}".strip()
+
+            handoff_result = (sales_agent_decision or {}).get("handoff") or {}
+            if handoff_result.get("handoff_required") and normalize_id(handoff_result.get("customer_reply")):
+                reply_text = normalize_id(handoff_result.get("customer_reply"))
+            elif msg_type == "text":
+                reply_text = get_whatsapp_ai_reply(
+                    sender_id,
+                    text,
+                    business,
+                    media_context=media_match_context,
+                    media_reply_hint=media_reply_hint,
+                )
             elif media_type:
-                media_match_context = ""
-                media_reply_hint = ""
-                if media_url and media_type in {"photo", "file"}:
-                    media_match = analyze_media_for_sales_reply(
-                        media_url=media_url,
-                        user_text=text or "",
-                        media_type=media_type,
-                        access_token=get_whatsapp_access_token(business),
-                    )
-                    if media_match:
-                        media_match_context = media_match.get("context", "")
-                        media_reply_hint = media_match.get("reply_hint", "")
                 reply_text = get_whatsapp_ai_reply(
                     sender_id,
                     text or "Customer sent a media message.",
@@ -8467,7 +9038,13 @@ async def process_whatsapp_message(change: dict):
                     media_reply_hint=media_reply_hint,
                 )
             else:
-                reply_text = get_whatsapp_ai_reply(sender_id, text, business)
+                reply_text = get_whatsapp_ai_reply(
+                    sender_id,
+                    text,
+                    business,
+                    media_context=media_match_context,
+                    media_reply_hint=media_reply_hint,
+                )
 
             send_result = send_whatsapp_text(sender_id, reply_text, business)
             raw_result = safe_json(send_result) if send_result is not None else {}
@@ -8486,8 +9063,32 @@ async def process_whatsapp_message(change: dict):
                     is_read=True,
                     channel="whatsapp",
                 )
+                record_sales_agent_action(
+                    business=business,
+                    platform="whatsapp",
+                    channel="whatsapp",
+                    customer_id=sender_id,
+                    action_type="reply_sent",
+                    input_message=text,
+                    decision=sales_agent_decision,
+                    reply_sent=reply_text,
+                    tool_used="product_matcher" if media_match else "",
+                )
+                if handoff_result.get("handoff_required"):
+                    set_chat_ai_enabled(business.get("id"), "whatsapp", "whatsapp", sender_id, False)
                 mark_processed(processed_message_ids, message_id)
             else:
+                record_sales_agent_action(
+                    business=business,
+                    platform="whatsapp",
+                    channel="whatsapp",
+                    customer_id=sender_id,
+                    action_type="reply_failed",
+                    input_message=text,
+                    decision=sales_agent_decision,
+                    reply_sent=reply_text,
+                    tool_used="product_matcher" if media_match else "",
+                )
                 log("WhatsApp reply failed; not marking processed", raw_result)
 
         except Exception as e:
@@ -10345,6 +10946,10 @@ async def get_stats_v2(
             'active_conversations': 0,
             'needing_human': 0,
         }
+        stats_business_ids = [normalize_id(b.get("id")) for b in businesses if normalize_id(b.get("id"))]
+        sales_metrics = build_sales_agent_metrics(stats_business_ids)
+        payload.update(sales_metrics)
+        payload["needing_human"] = sales_metrics.get("handoff_required_leads", 0)
         STATS_CACHE[cache_key] = {"ts": now, "data": payload}
         return {'status': 'ok', 'data': payload}
 
@@ -10409,6 +11014,48 @@ async def get_operator_deals_report_pdf(
     )
 
 
+@app.get("/api/v2/coaching-report")
+async def get_coaching_report_v2(
+    business_id: str = "",
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    business_id = normalize_id(business_id)
+    if not business_id:
+        return JSONResponse({"error": "Missing business_id"}, status_code=400)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    business = get_business_by_id(business_id) or {}
+    lead_states = collect_sales_agent_lead_states(business_id)
+    ai_actions = load_ai_actions_for_metrics([business_id], limit=500)
+    try:
+        messages = (
+            supabase.table("inbox_messages")
+            .select("business_id,platform,channel,customer_id,direction,content,created_at")
+            .eq("business_id", business_id)
+            .order("created_at", desc=True)
+            .limit(500)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:
+        messages = []
+
+    report = build_daily_coaching_report(
+        business=business,
+        lead_states=lead_states,
+        ai_actions=ai_actions,
+        messages=messages,
+    )
+    return {"status": "ok", "data": report, "text": coaching_report_text(report)}
+
+
 @app.post("/api/v2/workspace-state")
 async def update_workspace_state_v2(
     request: Request,
@@ -10429,7 +11076,11 @@ async def update_workspace_state_v2(
 
         allowed_keys = {
             "lead_stages",
+            "lead_scores",
+            "lead_reasons",
             "lead_prices",
+            "needs_human",
+            "handoff_tasks",
             "manual_clients",
             "manual_leads",
             "client_owners",
