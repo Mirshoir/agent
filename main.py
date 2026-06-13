@@ -4072,6 +4072,49 @@ def claim_instagram_message_processing(business_id: str, message_id: str, custom
     except Exception as exc:
         log("Could not claim Instagram message processing", {"business_id": business_id, "message_id": message_id, "error": str(exc)})
 
+    try:
+        existing_rows = (
+            supabase.table("dashboard_workspace_state")
+            .select("state_value,updated_at")
+            .eq("business_id", business_id)
+            .eq("state_key", state_key)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        existing = existing_rows[0] if existing_rows and isinstance(existing_rows[0], dict) else {}
+        existing_value = existing.get("state_value") if isinstance(existing.get("state_value"), dict) else {}
+        existing_status = normalize_id(existing_value.get("status")).lower()
+        claimed_at = normalize_id(existing_value.get("claimed_at") or existing.get("updated_at"))
+        claim_age = 0.0
+        if claimed_at:
+            try:
+                claim_dt = datetime.fromisoformat(claimed_at.replace("Z", "+00:00")).replace(tzinfo=None)
+                claim_age = (datetime.utcnow() - claim_dt).total_seconds()
+            except Exception:
+                claim_age = 0.0
+        if existing_status == "processing" and claim_age > 90:
+            upsert_workspace_state(business_id, state_key, state_value, updated_by="instagram_bot")
+            log("Recovered stale Instagram message processing claim", {
+                "business_id": business_id,
+                "message_id": message_id,
+                "claim_age_seconds": round(claim_age, 1),
+            })
+            return True
+        log("Instagram message claim exists", {
+            "business_id": business_id,
+            "message_id": message_id,
+            "status": existing_status,
+            "claim_age_seconds": round(claim_age, 1),
+        })
+    except Exception as read_exc:
+        log("Could not inspect existing Instagram message claim", {
+            "business_id": business_id,
+            "message_id": message_id,
+            "error": str(read_exc),
+        })
+
     fallback = WORKSPACE_STATE_FALLBACK.get(business_id) or {}
     if state_key in fallback:
         return False
@@ -8052,10 +8095,16 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
     log("Processing Instagram messaging event", messaging)
 
     if "read" in messaging or "delivery" in messaging:
+        log("Instagram DM event ignored: read/delivery receipt", {
+            "entry_id": entry_id,
+            "has_read": "read" in messaging,
+            "has_delivery": "delivery" in messaging,
+        })
         return
 
     message = messaging.get("message") or {}
     if not message:
+        log("Instagram DM event ignored: missing message", {"entry_id": entry_id})
         return
 
     sender_id = normalize_id(messaging.get("sender", {}).get("id"))
@@ -8227,15 +8276,37 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         message_text = "📎 Attachment"
 
     if not sender_id or not recipient_id:
+        log("Instagram DM event ignored: missing sender/recipient", {
+            "entry_id": entry_id,
+            "sender_id": sender_id,
+            "recipient_id": recipient_id,
+            "message_id": message_id,
+        })
         return
 
     if not message_text and not media_type:
+        log("Instagram DM event ignored: no text or media", {
+            "entry_id": entry_id,
+            "sender_id": sender_id,
+            "recipient_id": recipient_id,
+            "message_id": message_id,
+        })
         return
 
     if is_processed(processed_message_ids, message_id):
+        log("Instagram DM event ignored: processed in memory", {
+            "entry_id": entry_id,
+            "sender_id": sender_id,
+            "message_id": message_id,
+        })
         return
 
     if message_id in processing_message_ids:
+        log("Instagram DM event ignored: already processing in memory", {
+            "entry_id": entry_id,
+            "sender_id": sender_id,
+            "message_id": message_id,
+        })
         return
 
     processing_message_ids.add(message_id)
@@ -8243,6 +8314,12 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
     try:
         business = find_business_for_webhook(entry_id, recipient_id)
         if not business:
+            log("Instagram DM reply skipped: no business matched", {
+                "entry_id": entry_id,
+                "recipient_id": recipient_id,
+                "sender_id": sender_id,
+                "message_id": message_id,
+            })
             return
 
         access_token = get_business_access_token(business)
