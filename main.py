@@ -2777,6 +2777,34 @@ def set_chat_ai_enabled(business_id, platform, channel, customer_id, enabled):
     ).execute()
 
 
+def set_business_channel_chat_ai_enabled(business_id: str, platform: str, channel: str, enabled: bool) -> int:
+    business_id = normalize_id(business_id)
+    platform = normalize_id(platform).lower()
+    channel = standard_channel(platform, channel)
+    if not business_id or not platform:
+        return 0
+    try:
+        result = (
+            supabase.table("chat_ai_settings")
+            .update({"ai_enabled": bool(enabled)})
+            .eq("business_id", business_id)
+            .eq("platform", platform)
+            .eq("channel", channel or "")
+            .execute()
+        )
+        rows = result.data if isinstance(result.data, list) else []
+        return len(rows)
+    except Exception as exc:
+        log("Could not sync channel chat AI settings", {
+            "business_id": business_id,
+            "platform": platform,
+            "channel": channel,
+            "enabled": bool(enabled),
+            "error": str(exc),
+        })
+        return 0
+
+
 def mark_conversation_read_in_db(conversation_id: str):
     parts = conversation_id.split("::")
     if len(parts) != 4:
@@ -12451,7 +12479,26 @@ async def api_update_business_settings(
         return JSONResponse({"status": "error", "message": "No valid settings to update"}, status_code=400)
 
     update_business(body.business_id, settings)
-    return {"status": "ok", "message": "Settings updated"}
+    next_bot_enabled = settings.get("bot_enabled", business.get("bot_enabled"))
+    next_auto_reply_dms = settings.get("auto_reply_dms", business.get("auto_reply_dms"))
+    next_auto_reply_comments = settings.get("auto_reply_comments", business.get("auto_reply_comments"))
+    synced_chat_ai = {}
+
+    # Settings is the owner/admin master control. When a channel is enabled here,
+    # unpause existing per-chat rows for that channel so old manual pauses do not
+    # invisibly override the business-level switch.
+    if normalize_bool(next_bot_enabled, True):
+        if settings.get("bot_enabled") is True and normalize_bool(next_auto_reply_dms, True):
+            synced_chat_ai["instagram_dm"] = set_business_channel_chat_ai_enabled(body.business_id, "instagram", "dm", True)
+        if settings.get("auto_reply_dms") is True:
+            synced_chat_ai["instagram_dm"] = set_business_channel_chat_ai_enabled(body.business_id, "instagram", "dm", True)
+        if settings.get("auto_reply_comments") is True or (settings.get("bot_enabled") is True and normalize_bool(next_auto_reply_comments, True)):
+            synced_chat_ai["instagram_comment"] = set_business_channel_chat_ai_enabled(body.business_id, "instagram", "instagram_comment", True)
+
+    message = "Settings updated"
+    if synced_chat_ai:
+        message = "Settings updated and matching chats were re-enabled"
+    return {"status": "ok", "message": message, "synced_chat_ai": synced_chat_ai}
 
 
 @app.get("/api/ai-prompt-settings/{business_id}")

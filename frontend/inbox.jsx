@@ -5661,6 +5661,39 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     });
   };
 
+  const clearAiOverridesForBusinessSettings = (businessId, settings = {}) => {
+    const currentBusiness = businesses.find(item => item.id === businessId) || {};
+    const nextBotEnabled = Object.prototype.hasOwnProperty.call(settings, 'bot_enabled')
+      ? settings.bot_enabled === true
+      : currentBusiness.bot_enabled !== false;
+    const nextInstagramDms = Object.prototype.hasOwnProperty.call(settings, 'auto_reply_dms')
+      ? settings.auto_reply_dms === true
+      : currentBusiness.auto_reply_dms !== false;
+    const nextInstagramComments = Object.prototype.hasOwnProperty.call(settings, 'auto_reply_comments')
+      ? settings.auto_reply_comments === true
+      : currentBusiness.auto_reply_comments !== false;
+    const enableInstagramDms = nextBotEnabled && nextInstagramDms && (settings.bot_enabled === true || settings.auto_reply_dms === true);
+    const enableInstagramComments = nextBotEnabled && nextInstagramComments && (settings.bot_enabled === true || settings.auto_reply_comments === true);
+    if (!enableInstagramDms && !enableInstagramComments) return;
+
+    setAiOverrides(prev => {
+      const next = { ...prev };
+      let changed = false;
+      conversations.forEach(item => {
+        if (!item?.id || item.businessId !== businessId || item.platform !== 'instagram') return;
+        const channel = String(item.channel || '').toLowerCase();
+        const isComment = item.isCommentThread || channel.includes('comment');
+        const shouldClear = isComment ? enableInstagramComments : enableInstagramDms;
+        if (shouldClear && Object.prototype.hasOwnProperty.call(next, item.id)) {
+          delete next[item.id];
+          changed = true;
+        }
+      });
+      if (changed) writeStoredObject(AI_OVERRIDE_STORAGE_KEY, next);
+      return changed ? next : prev;
+    });
+  };
+
   const rememberDeletedConversation = (conversationId) => {
     setDeletedConversations(prev => {
       const next = { ...prev, [conversationId]: true };
@@ -5970,9 +6003,11 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     setBusinesses(rows => rows.map(b => b.id === businessId ? { ...b, ...settings } : b));
     if (!persist || !liveMode) return;
     try {
-      await API.postJson('/api/business-settings', { business_id: businessId, settings });
-      showToast('Business settings saved');
+      const result = await API.postJson('/api/business-settings', { business_id: businessId, settings });
+      clearAiOverridesForBusinessSettings(businessId, settings);
+      showToast(result.message || 'Business settings saved');
       await loadBusinesses();
+      await loadConversations({ sideLoad: false });
     } catch (e) {
       setApiError(e.message);
       showToast(e.message);
