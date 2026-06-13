@@ -228,10 +228,12 @@ const API = {
   },
 };
 
-const THREAD_POLL_MS = 1200;
-const INBOX_POLL_MS = 2000;
+const THREAD_POLL_MS = 2500;
+const INBOX_POLL_MS = 3000;
 const STATS_POLL_MS = 20000;
-const THREAD_WARMUP_CONCURRENCY = 6;
+const THREAD_WARMUP_CONCURRENCY = 1;
+const THREAD_PREVIEW_LIMIT = 30;
+const THREAD_ACTIVE_LIMIT = 120;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
 const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
@@ -5816,8 +5818,6 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       setSelectedId(current => next.some(c => c.id === current) ? current : next[0].id);
       setLiveMode(true);
       setApiError('');
-      // Warm all threads in background so chat switches feel instant.
-      window.setTimeout(() => warmupConversationThreads(next, selectedCurrent), 0);
       if (sideLoad) {
         loadStats();
         loadBusinesses({ silent: true });
@@ -5869,14 +5869,14 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     showToast(clean ? `Owner scoped to ${clean}` : 'Owner scope cleared');
   };
 
-  const loadThread = async (conversationId, { silent = false, markRead = true, limit = 200, noCache = false } = {}) => {
+  const loadThread = async (conversationId, { silent = false, markRead = true, limit = THREAD_ACTIVE_LIMIT, noCache = false } = {}) => {
     if (!conversationId || !liveMode) return;
     const inFlight = threadLoadPromisesRef.current[conversationId];
     if (inFlight) return inFlight;
     if (!silent) setThreadLoading(true);
     const request = (async () => {
       try {
-        const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?mark_read=${markRead ? '1' : '0'}&limit=${Math.max(1, Number(limit || 200))}&no_cache=${noCache ? '1' : '0'}`);
+        const data = await API.get(`/api/v2/conversation/${encodeURIComponent(conversationId)}/messages?mark_read=${markRead ? '1' : '0'}&limit=${Math.max(1, Number(limit || THREAD_ACTIVE_LIMIT))}&no_cache=${noCache ? '1' : '0'}`);
         const normalized = (data.data || []).map(normalizeMessage);
         setThreads(prev => ({
           ...prev,
@@ -5914,7 +5914,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       const currentMessages = getThreadMessages(threads[conversationId]);
       if (!conversationId || currentMessages.length > 0) continue;
       threadWarmupRunningRef.current += 1;
-      loadThread(conversationId, { silent: true, markRead: false, limit: 120, noCache: true })
+      loadThread(conversationId, { silent: true, markRead: false, limit: THREAD_PREVIEW_LIMIT, noCache: false })
         .catch(() => false)
         .finally(() => {
           threadWarmupRunningRef.current = Math.max(0, threadWarmupRunningRef.current - 1);
@@ -5926,7 +5926,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const warmupConversationThreads = (rows = [], priorityId = '') => {
     const queue = [];
     if (priorityId) queue.push(priorityId);
-    for (const row of rows || []) {
+    for (const row of (rows || []).slice(0, 1)) {
       if (row?.id) queue.push(row.id);
     }
     for (const conversationId of queue) {
@@ -6125,7 +6125,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
           };
         });
         window.setTimeout(() => {
-          loadThread(targetConv.id, { silent: true, limit: 300, noCache: true });
+          loadThread(targetConv.id, { silent: true, limit: THREAD_ACTIVE_LIMIT, noCache: true });
           loadConversations({ silent: true, sideLoad: false });
         }, 1500);
         showToast('Message sent');
@@ -6203,7 +6203,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
 
   useEffect(() => {
     const cached = getThreadMessages(threads[selectedId]);
-    loadThread(selectedId, { silent: cached.length > 0, limit: 300, noCache: true });
+    loadThread(selectedId, { silent: cached.length > 0, limit: THREAD_ACTIVE_LIMIT, noCache: true });
   }, [selectedId, liveMode]);
 
   useEffect(() => {
@@ -6214,7 +6214,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       if (!currentId || threadPollBusy.current) return;
       threadPollBusy.current = true;
       try {
-        await loadThread(currentId, { silent: true, noCache: true });
+        await loadThread(currentId, { silent: true, limit: THREAD_ACTIVE_LIMIT, noCache: true });
       } finally {
         threadPollBusy.current = false;
       }
@@ -6380,7 +6380,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
 
     try {
       await API.postJson('/api/v2/message/edit', { message_id: message.id, text: cleanText });
-      await loadThread(conversationId, { silent: true, limit: 300, noCache: true });
+      await loadThread(conversationId, { silent: true, limit: THREAD_ACTIVE_LIMIT, noCache: true });
       await loadConversations({ silent: true, sideLoad: false });
       showToast('Message edited on Telegram');
     } catch (e) {
@@ -6443,7 +6443,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
         } else {
           await sendLiveImage(conv, file, caption.trim());
         }
-        await loadThread(conv.id);
+        await loadThread(conv.id, { limit: THREAD_ACTIVE_LIMIT });
         await loadConversations({ silent: true, sideLoad: false });
         showToast(tool === 'voice' ? 'Voice note sent' : 'Image sent');
         return true;
@@ -6678,7 +6678,6 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     setSelectedId(conversationId);
     setActiveView('inbox');
     setMoreOpen(false);
-    warmupConversationThreads(conversations, conversationId);
   };
 
   // Mark selected unread as read

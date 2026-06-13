@@ -1417,6 +1417,7 @@ CONVERSATIONS_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATIONS_CACHE_TTL_SECON
 _conversations_cache: dict[str, tuple[float, dict]] = {}
 CONVERSATION_MESSAGES_CACHE_TTL_SECONDS = float(os.getenv("CONVERSATION_MESSAGES_CACHE_TTL_SECONDS", "12"))
 _conversation_messages_cache: dict[str, tuple[float, dict]] = {}
+CONVERSATION_MESSAGES_CACHE_MAX_ENTRIES = max(10, min(200, int(os.getenv("CONVERSATION_MESSAGES_CACHE_MAX_ENTRIES", "80"))))
 CONVERSATIONS_FAST_LOOKBACK_DAYS = max(7, min(365, int(os.getenv("CONVERSATIONS_FAST_LOOKBACK_DAYS", "120"))))
 CONVERSATIONS_FAST_FETCH_LIMIT = max(80, min(5000, int(os.getenv("CONVERSATIONS_FAST_FETCH_LIMIT", "800"))))
 CONVERSATIONS_MAX_FETCH_ROWS = max(200, min(20000, int(os.getenv("CONVERSATIONS_MAX_FETCH_ROWS", "5000"))))
@@ -10337,7 +10338,7 @@ async def get_conversation_messages_v2(
         if platform == "instagram" and "comment" in channel:
             customer_id, post_id = decode_comment_scope(customer_scope)
 
-        limit = max(1, min(int(limit or 200), 300))
+        limit = max(1, min(int(limit or 120), 150))
         cache_key = json.dumps(
             {
                 "conversation_id": conversation_id,
@@ -10385,9 +10386,9 @@ async def get_conversation_messages_v2(
 
         base_fields = (
             "id,direction,role,created_at,media_type,content,platform,channel,customer_id,"
-            "external_message_id,media_url,post_permalink,post_image_url,post_media_type,raw_payload"
+            "external_message_id,media_url,post_permalink,post_image_url,post_media_type"
         )
-        select_fields = base_fields
+        select_fields = f"{base_fields},raw_payload" if include_raw else base_fields
 
         query = (
             supabase.table("inbox_messages")
@@ -10574,8 +10575,9 @@ async def get_conversation_messages_v2(
         }
         if not no_cache:
             _conversation_messages_cache[cache_key] = (time.time(), response_payload)
-            if len(_conversation_messages_cache) > 500:
-                for stale_key in sorted(_conversation_messages_cache, key=lambda item: _conversation_messages_cache[item][0])[:150]:
+            if len(_conversation_messages_cache) > CONVERSATION_MESSAGES_CACHE_MAX_ENTRIES:
+                overflow = max(10, CONVERSATION_MESSAGES_CACHE_MAX_ENTRIES // 3)
+                for stale_key in sorted(_conversation_messages_cache, key=lambda item: _conversation_messages_cache[item][0])[:overflow]:
                     _conversation_messages_cache.pop(stale_key, None)
         return response_payload
 
