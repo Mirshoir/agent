@@ -1488,9 +1488,13 @@ function resolveCommentPostPreview(conv, messages = []) {
 
 function isVideoPostPreview(post = {}) {
   const type = String(post?.postMediaType || '').toLowerCase();
-  if (type.includes('video') || type.includes('reel')) return true;
   const url = String(post?.postImageUrl || '').toLowerCase();
-  return /\.(mp4|mov|m4v|webm)(\?|$)/i.test(url);
+  return (type.includes('video') || type.includes('reel')) && isPlayableVideoUrl(url);
+}
+
+function isImagePostPreview(post = {}) {
+  const url = String(post?.postImageUrl || '');
+  return Boolean(url && !isInstagramPostLink(url) && (isRenderableImageUrl(url) || !isPlayableVideoUrl(url)));
 }
 
 // ---------- Small helpers ----------
@@ -4217,14 +4221,15 @@ function VoiceWave({ count = 28 }) {
 // ---------- Message bubble ----------
 function MediaVideo({ src, poster, fallbackHref, label = 'video' }) {
   const [failed, setFailed] = useState(false);
+  const [posterFailed, setPosterFailed] = useState(false);
   const href = fallbackHref || src;
   const title = label || 'video';
 
   if (!src || failed) {
     return (
       <a className="media-fallback" href={href} target="_blank" rel="noreferrer">
-        {poster ? (
-          <img className="media-img" src={poster} alt={title} />
+        {poster && !posterFailed ? (
+          <img className="media-img" src={poster} alt={title} onError={() => setPosterFailed(true)} />
         ) : (
           <span className="ph" data-label={title} />
         )}
@@ -4244,6 +4249,46 @@ function MediaVideo({ src, poster, fallbackHref, label = 'video' }) {
       onError={() => setFailed(true)}
     />
   );
+}
+
+function PostPreviewMedia({ post, imageClassName, videoClassName, fallbackClassName, fallbackText = 'Instagram post' }) {
+  const imageUrl = post?.postImageUrl || '';
+  const href = post?.postPermalink || imageUrl;
+  const [failed, setFailed] = useState(false);
+
+  if (imageUrl && !failed && isVideoPostPreview(post)) {
+    return (
+      <video
+        className={videoClassName}
+        src={imageUrl}
+        controls
+        playsInline
+        preload="metadata"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+
+  if (imageUrl && !failed && isImagePostPreview(post)) {
+    return (
+      <img
+        className={imageClassName}
+        src={imageUrl}
+        alt="Instagram post"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+
+  if (href) {
+    return (
+      <a className={fallbackClassName} href={href} target="_blank" rel="noreferrer">
+        {fallbackText}
+      </a>
+    );
+  }
+
+  return <div className={fallbackClassName}>{fallbackText}</div>;
 }
 
 function Message({ m, conv, t, onReplyComment, onEditMessage, onDeleteMessage }) {
@@ -4616,19 +4661,13 @@ function ThreadColumn({ conv, aiOn, onToggleAi, t, messages, onSend, onEditMessa
         {threadLoading && (!messages || messages.length === 0) && <div className="empty">Loading conversation…</div>}
         {conv.isCommentThread && (commentPost.postImageUrl || commentPost.postPermalink || commentPost.postId) && (
           <div className="post-preview-card">
-            {commentPost.postImageUrl && isVideoPostPreview(commentPost) ? (
-              <video
-                className="post-preview-video"
-                src={commentPost.postImageUrl}
-                controls
-                playsInline
-                preload="metadata"
-              />
-            ) : commentPost.postImageUrl ? (
-              <img className="post-preview-image" src={commentPost.postImageUrl} alt="Instagram post" />
-            ) : (
-              <div className="post-preview-fallback">Instagram post</div>
-            )}
+            <PostPreviewMedia
+              post={commentPost}
+              imageClassName="post-preview-image"
+              videoClassName="post-preview-video"
+              fallbackClassName="post-preview-fallback"
+              fallbackText="Instagram post"
+            />
             <div className="post-preview-meta">
               <strong>Commented post</strong>
               {commentPost.postPermalink ? (
@@ -4802,19 +4841,13 @@ function DetailColumn({ conv, t, stats, onDelete, messages = [] }) {
         <h3>{t.channel}</h3>
         {conv.isCommentThread && (commentPost.postImageUrl || commentPost.postPermalink || commentPost.postId) && (
           <div className="detail-post-card">
-            {commentPost.postImageUrl && isVideoPostPreview(commentPost) ? (
-              <video
-                className="detail-post-video"
-                src={commentPost.postImageUrl}
-                controls
-                playsInline
-                preload="metadata"
-              />
-            ) : commentPost.postImageUrl ? (
-              <img className="detail-post-image" src={commentPost.postImageUrl} alt="Instagram post" />
-            ) : (
-              <div className="detail-post-fallback">Instagram post</div>
-            )}
+            <PostPreviewMedia
+              post={commentPost}
+              imageClassName="detail-post-image"
+              videoClassName="detail-post-video"
+              fallbackClassName="detail-post-fallback"
+              fallbackText="Source post"
+            />
             <div className="detail-post-meta">
               <span>Source post</span>
               {commentPost.postPermalink ? (
