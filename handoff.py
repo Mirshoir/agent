@@ -3,7 +3,8 @@ from typing import Any
 
 
 def normalize_text(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value or "")).strip()
+    text = str(value or "").replace("‘", "'").replace("’", "'").replace("ʼ", "'").replace("ʻ", "'")
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _detect_language(text: str) -> str:
@@ -65,11 +66,18 @@ def decide_handoff(
     if signals.get("order_intent") and (signals.get("phone_provided") or qualification.get("score", 0) >= 85):
         reasons.append("ready_to_buy_now")
         priority = "high"
-    if ai_confidence is not None and ai_confidence < 0.45:
+    low_confidence_can_handoff = (
+        ai_confidence is not None
+        and ai_confidence < 0.45
+        and intent.get("primary_intent") not in {"greeting", "general"}
+        and not signals.get("greeting")
+        and len(lowered) > 20
+    )
+    if low_confidence_can_handoff:
         reasons.append("bot_confidence_low")
         priority = "normal"
 
-    if re.search(r"\b(?:card|karta|карта|hisob|schet|счет|contract|shartnoma|договор)\b", lowered):
+    if re.search(r"\b(?:card|karta|карта|hisob|schet|счет|contract|shartnoma|договор|tolov|to'lov|oplata|оплата)\b", lowered):
         if "payment_or_contract_issue" not in reasons:
             reasons.append("payment_or_contract_issue")
         priority = "high"

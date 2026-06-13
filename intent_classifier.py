@@ -7,7 +7,7 @@ def normalize_text(value: Any) -> str:
 
 
 def compact_lower(value: Any) -> str:
-    return normalize_text(value).lower()
+    return normalize_text(value).lower().replace("‘", "'").replace("’", "'").replace("ʼ", "'").replace("ʻ", "'")
 
 
 def detect_language(text: str) -> str:
@@ -71,7 +71,7 @@ INTENT_KEYWORDS = {
     ],
     "payment_question": [
         "payment", "pay", "card", "click", "payme", "cash", "oplata", "оплата", "карта", "karta",
-        "pul otkaz", "to'lov", "tolov",
+        "pul otkaz", "to'lov", "to'lovda", "tolov", "tolovda",
     ],
     "product_interest": [
         "bormi", "available", "mavjud", "model", "mahsulot", "product", "tovar", "товар", "есть",
