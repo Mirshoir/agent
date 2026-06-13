@@ -8428,23 +8428,17 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             updated_by="instagram_bot",
         )
 
-        if not instagram_dm_allowed_for_test_customer(
-            business_id=business.get("id"),
-            sender_id=sender_id,
-            sender_profile=sender_profile,
-            customer_name=customer_display_name,
-            recent_rows=recent_lead_rows,
-        ):
-            allowed = parse_instagram_test_allowlist(
-                get_workspace_state(business.get("id")).get("instagram_dm_test_allowlist")
-            )
+        allowed = parse_instagram_test_allowlist(
+            get_workspace_state(business.get("id")).get("instagram_dm_test_allowlist")
+        )
+        if allowed:
             candidates = instagram_dm_test_allowlist_candidates(
                 sender_id=sender_id,
                 sender_profile=sender_profile,
                 customer_name=customer_display_name,
                 recent_rows=recent_lead_rows,
             )
-            log("Instagram DM reply skipped: test allowlist mismatch", {
+            log("Instagram DM test allowlist configured but not enforced", {
                 "business_id": business.get("id"),
                 "customer_id": sender_id,
                 "message_id": message_id,
@@ -8452,9 +8446,6 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 "candidates": sorted(candidates),
                 "customer_display_name": customer_display_name,
             })
-            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_test_allowlist")
-            mark_processed(processed_message_ids, message_id)
-            return
 
         if is_conversation_finished_message(message_text):
             set_chat_ai_enabled(business.get("id"), "instagram", "dm", sender_id, False)
