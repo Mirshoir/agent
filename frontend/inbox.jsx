@@ -1638,6 +1638,7 @@ const WORKSPACE_TEXT = {
     promptFormula: 'Prompt formula', noBusinesses: 'No businesses returned from the backend.', connectInstagram: 'Connect Instagram', connectFacebook: 'Connect Facebook',
     unnamedBusiness: 'Unnamed business', active: 'active', paused: 'paused', botEnabled: 'Bot enabled', botEnabledHint: 'Controls automatic replies for this business.',
     instagramDms: 'Instagram DMs', instagramDmsHint: 'Automatic Instagram direct-message replies.', instagramComments: 'Instagram comments',
+    instagramDmTestAllowlist: 'Instagram DM test allowlist', instagramDmTestAllowlistHint: 'Optional. While filled, AI replies only to these Instagram usernames.', instagramDmTestAllowlistPlaceholder: '@mirshoir_mirolimzoda',
     instagramCommentsHint: 'Automatic comment replies.', language: 'Language', tone: 'Tone', aiModel: 'AI model', provider: 'Provider', model: 'Model',
     customModel: 'Custom model', temperature: 'Temperature', maxTokens: 'Max tokens', apiKeys: 'API keys', key: 'key', saved: 'Saved', pasteApiKey: 'Paste API key',
     clear: 'Clear', promptReady: 'Prompt suggestion ready', promptLocal: 'Prompt suggestion generated locally', noBusinessLocal: 'Generated locally because no live business is selected.',
@@ -1721,6 +1722,7 @@ const WORKSPACE_TEXT = {
     promptFormula: 'Prompt formulasi', noBusinesses: 'Backenddan bizneslar kelmadi.', connectInstagram: 'Instagram ulash', connectFacebook: 'Facebook ulash',
     unnamedBusiness: 'Nomsiz biznes', active: 'faol', paused: 'pauza', botEnabled: 'Bot yoqilgan', botEnabledHint: 'Bu biznes uchun avtomatik javoblarni boshqaradi.',
     instagramDms: 'Instagram DM', instagramDmsHint: 'Instagram DM avtomatik javoblari.', instagramComments: 'Instagram kommentlar',
+    instagramDmTestAllowlist: 'Instagram DM test ro‘yxati', instagramDmTestAllowlistHint: 'Ixtiyoriy. To‘ldirilsa, AI faqat shu Instagram username’larga javob beradi.', instagramDmTestAllowlistPlaceholder: '@mirshoir_mirolimzoda',
     instagramCommentsHint: 'Kommentlarga avtomatik javoblar.', language: 'Til', tone: 'Ohang', aiModel: 'AI model', provider: 'Provider', model: 'Model',
     customModel: 'Custom model', temperature: 'Temperature', maxTokens: 'Max token', apiKeys: 'API kalitlar', key: 'kalit', saved: 'Saqlangan', pasteApiKey: 'API kalitni kiriting',
     clear: 'Tozalash', promptReady: 'Prompt tavsiyasi tayyor', promptLocal: 'Prompt tavsiyasi lokal yaratildi', noBusinessLocal: 'Live biznes tanlanmagani uchun lokal yaratildi.',
@@ -1804,6 +1806,7 @@ const WORKSPACE_TEXT = {
     promptFormula: 'Формула prompt', noBusinesses: 'Backend не вернул бизнесы.', connectInstagram: 'Подключить Instagram', connectFacebook: 'Подключить Facebook',
     unnamedBusiness: 'Без названия', active: 'активен', paused: 'пауза', botEnabled: 'Бот включен', botEnabledHint: 'Управляет автоответами для бизнеса.',
     instagramDms: 'Instagram DM', instagramDmsHint: 'Автоответы в Instagram DM.', instagramComments: 'Комментарии Instagram',
+    instagramDmTestAllowlist: 'Тестовый список Instagram DM', instagramDmTestAllowlistHint: 'Необязательно. Если заполнено, ИИ отвечает только этим Instagram username.', instagramDmTestAllowlistPlaceholder: '@mirshoir_mirolimzoda',
     instagramCommentsHint: 'Автоответы на комментарии.', language: 'Язык', tone: 'Тон', aiModel: 'AI модель', provider: 'Провайдер', model: 'Модель',
     customModel: 'Своя модель', temperature: 'Temperature', maxTokens: 'Макс. токены', apiKeys: 'API ключи', key: 'ключ', saved: 'Сохранен', pasteApiKey: 'Вставьте API ключ',
     clear: 'Очистить', promptReady: 'Prompt готов', promptLocal: 'Prompt сгенерирован локально', noBusinessLocal: 'Создано локально, потому что live бизнес не выбран.',
@@ -3573,6 +3576,8 @@ function WorkspacePanel({
   onSelectBusiness,
   onRefresh,
   onBusinessSetting,
+  instagramDmTestAllowlist,
+  onInstagramDmTestAllowlist,
   promptSettings,
   onPromptSetting,
   onSavePromptSettings,
@@ -3914,6 +3919,16 @@ function WorkspacePanel({
             onChange={(enabled) => onBusinessSetting(selectedBusiness.id, { auto_reply_comments: enabled }, true)}
             w={w}
           />
+          <label className="field-row">
+            <span>{w.instagramDmTestAllowlist}</span>
+            <input
+              value={instagramDmTestAllowlist || ''}
+              placeholder={w.instagramDmTestAllowlistPlaceholder}
+              onChange={(e) => onInstagramDmTestAllowlist(e.target.value, false)}
+              onBlur={(e) => onInstagramDmTestAllowlist(e.target.value, true)}
+            />
+            <small>{w.instagramDmTestAllowlistHint}</small>
+          </label>
           <label className="field-row">
             <span>{w.language}</span>
             <input value={selectedBusiness.language || ''} onChange={(e) => onBusinessSetting(selectedBusiness.id, { language: e.target.value }, false)} onBlur={(e) => onBusinessSetting(selectedBusiness.id, { language: e.target.value }, true)} />
@@ -5126,6 +5141,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const [leadReasons, setLeadReasons] = useState(() => readStoredObject(LEAD_REASONS_STORAGE_KEY));
   const [leadPrices, setLeadPrices] = useState(() => readStoredObject(LEAD_PRICES_STORAGE_KEY));
   const [needsHuman, setNeedsHuman] = useState(() => readStoredObject(NEEDS_HUMAN_STORAGE_KEY));
+  const [instagramDmTestAllowlist, setInstagramDmTestAllowlist] = useState('');
   const [clientOwners, setClientOwners] = useState(() => readStoredObject(CLIENT_OWNERS_STORAGE_KEY));
   const [manualClients, setManualClients] = useState(() => {
     const stored = readStoredObject(MANUAL_CLIENTS_STORAGE_KEY);
@@ -5409,6 +5425,16 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
         setNeedsHuman(state.needs_human);
         writeStoredObject(NEEDS_HUMAN_STORAGE_KEY, state.needs_human);
       }
+      if (Object.prototype.hasOwnProperty.call(state, 'instagram_dm_test_allowlist')) {
+        const allowlist = typeof state.instagram_dm_test_allowlist === 'string'
+          ? state.instagram_dm_test_allowlist
+          : Array.isArray(state.instagram_dm_test_allowlist)
+            ? state.instagram_dm_test_allowlist.join(', ')
+            : '';
+        setInstagramDmTestAllowlist(allowlist);
+      } else {
+        setInstagramDmTestAllowlist('');
+      }
       if (state.client_owners && typeof state.client_owners === 'object') {
         setClientOwners(state.client_owners);
         writeStoredObject(CLIENT_OWNERS_STORAGE_KEY, state.client_owners);
@@ -5470,6 +5496,15 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
         }
       }, 450);
     });
+  };
+
+  const updateInstagramDmTestAllowlist = (value, persist = false) => {
+    const next = String(value || '');
+    setInstagramDmTestAllowlist(next);
+    if (persist) {
+      queueWorkspaceStateSave({ instagram_dm_test_allowlist: next });
+      showToast(next.trim() ? 'Instagram DM test allowlist saved' : 'Instagram DM test allowlist cleared');
+    }
   };
 
   const downloadOperatorReport = async () => {
@@ -6736,6 +6771,8 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
             onSelectBusiness={setSelectedBusinessId}
             onRefresh={refreshWorkspace}
             onBusinessSetting={updateBusinessSetting}
+            instagramDmTestAllowlist={instagramDmTestAllowlist}
+            onInstagramDmTestAllowlist={updateInstagramDmTestAllowlist}
             promptSettings={promptSettings}
             onPromptSetting={updatePromptSetting}
             onSavePromptSettings={savePromptSettings}

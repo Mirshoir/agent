@@ -2357,6 +2357,39 @@ def display_name_from_instagram_profile(profile: dict, fallback: str = "") -> st
     return fallback
 
 
+def parse_instagram_test_allowlist(value) -> set[str]:
+    raw_items = []
+    if isinstance(value, dict):
+        value = value.get("items") if isinstance(value.get("items"), list) else value.get("value", "")
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = re.split(r"[\s,;]+", normalize_id(value))
+
+    allowed = set()
+    for item in raw_items:
+        clean = normalize_id(item).lower().lstrip("@")
+        if clean:
+            allowed.add(clean)
+    return allowed
+
+
+def instagram_dm_allowed_for_test_customer(business_id: str, sender_id: str, sender_profile: dict = None, customer_name: str = "") -> bool:
+    state = get_workspace_state(business_id)
+    allowed = parse_instagram_test_allowlist(state.get("instagram_dm_test_allowlist"))
+    if not allowed:
+        return True
+
+    profile = sender_profile if isinstance(sender_profile, dict) else {}
+    candidates = {
+        normalize_id(sender_id).lower().lstrip("@"),
+        normalize_id(customer_name).lower().lstrip("@"),
+        normalize_id(profile.get("username")).lower().lstrip("@"),
+        normalize_id(profile.get("name")).lower().lstrip("@"),
+    }
+    return bool(allowed.intersection({item for item in candidates if item}))
+
+
 def backfill_instagram_customer_name(business_id: str, customer_id: str, profile_name: str):
     profile_name = normalize_id(profile_name)
     if not business_id or not customer_id or not profile_name:
@@ -7947,6 +7980,16 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             updated_by="instagram_bot",
         )
 
+        if not instagram_dm_allowed_for_test_customer(
+            business_id=business.get("id"),
+            sender_id=sender_id,
+            sender_profile=sender_profile,
+            customer_name=customer_display_name,
+        ):
+            mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="skipped_test_allowlist")
+            mark_processed(processed_message_ids, message_id)
+            return
+
         if is_conversation_finished_message(message_text):
             set_chat_ai_enabled(business.get("id"), "instagram", "dm", sender_id, False)
             mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="finished_by_customer")
@@ -11123,6 +11166,7 @@ async def update_workspace_state_v2(
             "lead_prices",
             "needs_human",
             "handoff_tasks",
+            "instagram_dm_test_allowlist",
             "manual_clients",
             "manual_leads",
             "client_owners",
