@@ -1666,6 +1666,34 @@ def build_local_dashboard_demo_stats() -> dict:
     }
 
 
+def empty_dashboard_stats() -> dict:
+    return {
+        "total_messages": 0,
+        "total_accounts": 0,
+        "active_accounts": 0,
+        "instagram_messages": 0,
+        "telegram_messages": 0,
+        "whatsapp_messages": 0,
+        "active_conversations": 0,
+        "needing_human": 0,
+        "new_leads_today": 0,
+        "qualified_leads": 0,
+        "hot_leads": 0,
+        "handoff_required_leads": 0,
+        "won_orders": 0,
+        "lost_leads": 0,
+        "phone_numbers_collected": 0,
+        "average_response_time_minutes": 0.0,
+        "ai_to_human_handoff_rate": 0.0,
+        "ai_actions_logged": 0,
+        "low_confidence_replies": 0,
+        "manager_corrections": 0,
+        "wrong_replies": 0,
+        "hallucination_reports": 0,
+        "customer_asked_for_human": 0,
+    }
+
+
 def list_user_business_ids(email: str) -> list[str]:
     email = normalize_email(email)
     if not email:
@@ -5016,6 +5044,20 @@ def public_catalog_dm_failed_reply(user_text: str = "") -> str:
     return "Iltimos, direktga yozing, katalogni yuboraman."
 
 
+def public_catalog_link_fallback_reply(user_text: str = "", business: dict = None) -> str:
+    catalog_link = get_catalog_link(business or {})
+    if not catalog_link:
+        return public_catalog_dm_failed_reply(user_text)
+    lang = detect_customer_language(user_text)
+    if lang == "en":
+        return f"We could not send the catalog to DM automatically. Catalog: {catalog_link}"
+    if lang == "ru":
+        return f"Не удалось автоматически отправить каталог в директ. Каталог: {catalog_link}"
+    if lang == "kk":
+        return f"Каталогты директке автоматты түрде жібере алмадық. Каталог: {catalog_link}"
+    return f"Katalogni direktga avtomatik yubora olmadik. Katalog: {catalog_link}"
+
+
 PUBLIC_PRIVATE_INFO_REQUEST_MARKERS = (
     "telefon raqamingiz",
     "telefon nomeringiz",
@@ -5058,12 +5100,15 @@ def reaction_only_reply_text(text: str) -> str:
     return compact if emoji_only_re.fullmatch(compact) else ""
 
 
-def safe_public_comment_reply(text: str, business: dict = None) -> str:
+def safe_public_comment_reply(text: str, business: dict = None, preserve_urls: bool = False) -> str:
     reaction_reply = reaction_only_reply_text(text)
     if reaction_reply:
         return reaction_reply
 
-    reply = complete_sentence_reply(remove_urls(text), limit=1000)
+    if preserve_urls:
+        reply = normalize_id(text)[:1000].strip()
+    else:
+        reply = complete_sentence_reply(remove_urls(text), limit=1000)
     if reply and not is_public_private_info_request(reply):
         return reply
 
@@ -7898,24 +7943,69 @@ def send_catalog_private_reply(access_token: str, comment_id: str, business: dic
     return send_instagram_private_reply(access_token, comment_id, fallback_text, business)
 
 
-def reply_to_comment(access_token: str, comment_id: str, text: str, business: dict = None):
+def send_catalog_from_comment(access_token: str, comment_id: str, commenter_id: str, business: dict) -> tuple[object, str]:
+    catalog_link = get_catalog_link(business or {})
+    comment_id = normalize_id(comment_id)
+    commenter_id = normalize_id(commenter_id)
+    if not access_token or not comment_id or not catalog_link:
+        return None, "missing_required_fields"
+
+    private_reply = send_catalog_private_reply(access_token, comment_id, business)
+    if private_reply is not None and private_reply.ok:
+        return private_reply, "comment_private_reply"
+
+    if private_reply is not None:
+        log("Instagram comment private catalog send failed", {
+            "comment_id": comment_id,
+            "status": getattr(private_reply, "status_code", None),
+            "body": getattr(private_reply, "text", "")[:500],
+        })
+
+    if commenter_id:
+        dm_button = send_catalog_button(access_token, commenter_id, business, catalog_request_reply("katalog", business))
+        if dm_button is not None and dm_button.ok:
+            return dm_button, "direct_message_template"
+        if dm_button is not None:
+            log("Instagram comment catalog direct template failed", {
+                "comment_id": comment_id,
+                "commenter_id": commenter_id,
+                "status": getattr(dm_button, "status_code", None),
+                "body": getattr(dm_button, "text", "")[:500],
+            })
+
+        dm_text = send_dm(
+            access_token,
+            commenter_id,
+            f"Assalomu alaykum! Katalog: {catalog_link}",
+            business,
+            preserve_text=True,
+        )
+        if dm_text is not None and dm_text.ok:
+            return dm_text, "direct_message_text"
+        if dm_text is not None:
+            log("Instagram comment catalog direct text failed", {
+                "comment_id": comment_id,
+                "commenter_id": commenter_id,
+                "status": getattr(dm_text, "status_code", None),
+                "body": getattr(dm_text, "text", "")[:500],
+            })
+
+    return private_reply, "failed"
+
+
+def reply_to_comment(access_token: str, comment_id: str, text: str, business: dict = None, preserve_urls: bool = False):
     comment_id = normalize_id(comment_id)
     if not access_token or not comment_id or not text:
         return None
 
-    oauth_provider = (business or {}).get("oauth_provider", "")
+    url = f"{GRAPH_FACEBOOK}/{comment_id}/replies"
 
-    if oauth_provider == "facebook_page":
-        url = f"{GRAPH_FACEBOOK}/{comment_id}/comments"
-    else:
-        url = f"{GRAPH_INSTAGRAM}/{comment_id}/replies"
-
-    text = safe_public_comment_reply(text, business)[:1000]
+    text = safe_public_comment_reply(text, business, preserve_urls=preserve_urls)[:1000]
     if not text:
         text = "Xabaringiz uchun rahmat 😊 Batafsil ma'lumot uchun DM yozing."
 
     res = requests.post(url, params={"access_token": access_token, "message": text}, timeout=30)
-    log("Comment reply result", {"status": res.status_code, "body": res.text})
+    log("Comment reply result", {"url": url, "status": res.status_code, "body": res.text})
     return res
 
 
@@ -8771,6 +8861,11 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     comment_text = value.get("message") or value.get("text") or ""
 
     if not comment_id or not comment_text:
+        log("Instagram comment skipped: missing id/text", {
+            "comment_id": comment_id,
+            "has_text": bool(comment_text),
+            "field": change.get("field"),
+        })
         return
 
     if already_processed(processed_comment_ids, comment_id):
@@ -8778,10 +8873,17 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
 
     business = find_business_for_webhook(entry_id)
     if not business:
+        log("Instagram comment skipped: no business matched", {"entry_id": entry_id, "comment_id": comment_id})
         return
 
     # Prevent self-echo loops and duplicate self threads.
     if is_own_instagram_comment_actor(business, entry_id, commenter_id, commenter_username):
+        log("Instagram comment skipped: own comment", {
+            "business_id": business.get("id"),
+            "comment_id": comment_id,
+            "commenter_id": commenter_id,
+            "commenter_username": commenter_username,
+        })
         mark_processed(processed_comment_ids, comment_id)
         return
 
@@ -8831,6 +8933,12 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
         return
 
     if not business_allows_auto_reply(business, "instagram", "instagram_comment"):
+        log("Instagram comment skipped: business auto-reply disabled", {
+            "business_id": business.get("id"),
+            "comment_id": comment_id,
+            "bot_enabled": business.get("bot_enabled"),
+            "auto_reply_comments": business.get("auto_reply_comments"),
+        })
         mark_processed(processed_comment_ids, comment_id)
         return
 
@@ -8841,19 +8949,30 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
     if ai_enabled and comment_scope != (commenter_id or comment_id):
         ai_enabled = is_chat_ai_enabled("instagram", "instagram_comment", commenter_id or comment_id, business.get("id"))
     if not ai_enabled and not wants_comment_catalog:
+        log("Instagram comment skipped: chat AI disabled", {
+            "business_id": business.get("id"),
+            "comment_id": comment_id,
+            "comment_scope": comment_scope,
+            "wants_catalog": wants_comment_catalog,
+        })
         mark_processed(processed_comment_ids, comment_id)
         return
 
     if not access_token:
+        log("Instagram comment skipped: missing access token", {
+            "business_id": business.get("id"),
+            "comment_id": comment_id,
+        })
         mark_processed(processed_comment_ids, comment_id)
         return
 
     reaction_reply = reaction_only_reply_text(comment_text)
     if reaction_reply:
         reply_text = reaction_reply
+        preserve_public_urls = False
     elif wants_comment_catalog:
         catalog_link = get_catalog_link(business)
-        dm_result = send_catalog_private_reply(access_token, comment_id, business)
+        dm_result, catalog_delivery_method = send_catalog_from_comment(access_token, comment_id, commenter_id, business)
         dm_raw_result = safe_json(dm_result) if dm_result is not None else {}
         if dm_result is not None and dm_result.ok:
             save_inbox_message(
@@ -8864,17 +8983,25 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
                 message_text=f"Katalog: {catalog_link}",
                 direction="outbound",
                 platform_message_id=normalize_id(dm_raw_result.get("message_id") or dm_raw_result.get("id")) if isinstance(dm_raw_result, dict) else "",
-                raw_payload=dm_raw_result if isinstance(dm_raw_result, dict) else {},
+                raw_payload={**(dm_raw_result if isinstance(dm_raw_result, dict) else {}), "catalog_delivery_method": catalog_delivery_method},
                 customer_name=commenter_username or f"IG User {str(commenter_id or comment_id)[-4:]}",
                 is_read=True,
                 channel="dm",
             )
+            log("Instagram comment catalog sent", {
+                "business_id": business.get("id"),
+                "comment_id": comment_id,
+                "method": catalog_delivery_method,
+            })
             reply_text = public_catalog_dm_reply(comment_text)
+            preserve_public_urls = False
         else:
-            log("Instagram catalog private reply failed", {"comment_id": comment_id, "result": dm_raw_result})
-            reply_text = public_catalog_dm_failed_reply(comment_text)
+            log("Instagram catalog send failed", {"comment_id": comment_id, "result": dm_raw_result})
+            reply_text = public_catalog_link_fallback_reply(comment_text, business)
+            preserve_public_urls = bool(get_catalog_link(business))
     elif ((sales_agent_decision or {}).get("handoff") or {}).get("handoff_required"):
         reply_text = normalize_id(((sales_agent_decision or {}).get("handoff") or {}).get("customer_reply")) or "Menejerimiz DM orqali yordam beradi."
+        preserve_public_urls = False
     else:
         agent_context = normalize_id((sales_agent_decision or {}).get("reply_context"))
         reply_text = get_ai_reply(
@@ -8887,9 +9014,10 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
             lead_state=(sales_agent_decision or {}).get("lead_state") or {},
         )
         reply_text = safe_public_comment_reply(reply_text, business)
+        preserve_public_urls = False
 
-    reply_text = safe_public_comment_reply(reply_text, business)
-    send_result = reply_to_comment(access_token, comment_id, reply_text, business)
+    reply_text = safe_public_comment_reply(reply_text, business, preserve_urls=preserve_public_urls)
+    send_result = reply_to_comment(access_token, comment_id, reply_text, business, preserve_urls=preserve_public_urls)
     raw_result = safe_json(send_result) if send_result is not None else {}
     if send_result is not None and send_result.ok:
         outbound_payload = dict(raw_result) if isinstance(raw_result, dict) else {}
@@ -8923,6 +9051,13 @@ async def process_instagram_comment_event(entry_id: str, change: dict):
             decision=sales_agent_decision,
             reply_sent=reply_text,
         )
+    else:
+        log("Instagram comment public reply failed", {
+            "business_id": business.get("id"),
+            "comment_id": comment_id,
+            "status": getattr(send_result, "status_code", None),
+            "result": raw_result,
+        })
 
     mark_processed(processed_comment_ids, comment_id)
 
@@ -11434,6 +11569,7 @@ async def get_stats_v2(
                     .execute()
                     .data
                 )
+        businesses = [business for business in businesses if isinstance(business, dict)]
 
         payload = {
             'total_messages': get_message_count(business_ids=scoped_ids) if not access.get("is_admin") else get_message_count(),
@@ -11446,7 +11582,11 @@ async def get_stats_v2(
             'needing_human': 0,
         }
         stats_business_ids = [normalize_id(b.get("id")) for b in businesses if normalize_id(b.get("id"))]
-        sales_metrics = build_sales_agent_metrics(stats_business_ids)
+        try:
+            sales_metrics = build_sales_agent_metrics(stats_business_ids)
+        except Exception as metrics_exc:
+            log("Error building sales metrics", str(metrics_exc))
+            sales_metrics = {}
         payload.update(sales_metrics)
         payload["needing_human"] = sales_metrics.get("handoff_required_leads", 0)
         STATS_CACHE[cache_key] = {"ts": now, "data": payload}
@@ -11454,10 +11594,7 @@ async def get_stats_v2(
 
     except Exception as e:
         log("Error getting stats", str(e))
-        return JSONResponse(
-            {"status": "error", "message": str(e)},
-            status_code=500
-        )
+        return {"status": "ok", "data": empty_dashboard_stats(), "warning": "Stats temporarily unavailable"}
 
 
 @app.get("/api/v2/workspace-state")
