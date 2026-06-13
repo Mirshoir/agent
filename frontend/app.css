@@ -2576,7 +2576,7 @@ input, textarea { background: none; border: 0; outline: 0; }
 /* Leads pipeline */
 .leads-board {
   display: grid;
-  grid-template-columns: repeat(5, minmax(210px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 12px;
 }
 .lead-column {
@@ -2597,9 +2597,21 @@ input, textarea { background: none; border: 0; outline: 0; }
   border-color: oklch(69% 0.12 145);
   background: oklch(96% 0.035 145);
 }
-.lead-stage-negotiation {
+.lead-stage-engaged {
+  border-color: oklch(72% 0.10 210);
+  background: oklch(97% 0.025 210);
+}
+.lead-stage-interested {
+  border-color: oklch(72% 0.12 120);
+  background: oklch(97% 0.03 120);
+}
+.lead-stage-hot {
   border-color: oklch(66% 0.17 25);
   background: oklch(96% 0.035 25);
+}
+.lead-stage-handoff_required {
+  border-color: oklch(68% 0.15 52);
+  background: oklch(96% 0.035 52);
 }
 .lead-stage-won {
   border-color: oklch(74% 0.13 82);
@@ -2610,8 +2622,11 @@ input, textarea { background: none; border: 0; outline: 0; }
   background: oklch(94% 0.006 70);
 }
 .lead-stage-new header span { background: oklch(88% 0.07 165); color: oklch(35% 0.08 165); }
+.lead-stage-engaged header span { background: oklch(88% 0.07 210); color: oklch(34% 0.08 210); }
+.lead-stage-interested header span { background: oklch(88% 0.08 120); color: oklch(34% 0.09 120); }
 .lead-stage-qualified header span { background: oklch(88% 0.08 145); color: oklch(34% 0.09 145); }
-.lead-stage-negotiation header span { background: oklch(88% 0.08 25); color: oklch(36% 0.13 25); }
+.lead-stage-hot header span { background: oklch(88% 0.08 25); color: oklch(36% 0.13 25); }
+.lead-stage-handoff_required header span { background: oklch(88% 0.08 52); color: oklch(36% 0.12 52); }
 .lead-stage-won header span { background: oklch(88% 0.10 82); color: oklch(38% 0.10 82); }
 .lead-stage-lost header span { background: oklch(24% 0.01 70); color: white; }
 .lead-column header {
@@ -2914,8 +2929,11 @@ input, textarea { background: none; border: 0; outline: 0; }
   font-weight: 700;
 }
 .stage-new { background: oklch(88% 0.07 165); }
+.stage-engaged { background: oklch(88% 0.07 210); }
+.stage-interested { background: oklch(88% 0.08 120); }
 .stage-qualified { background: oklch(88% 0.08 145); }
-.stage-negotiation { background: oklch(88% 0.08 25); }
+.stage-hot { background: oklch(88% 0.08 25); }
+.stage-handoff_required { background: oklch(88% 0.08 52); }
 .stage-won { background: oklch(88% 0.10 82); }
 .stage-lost { background: oklch(24% 0.01 70); color: white; }
 .table-action {

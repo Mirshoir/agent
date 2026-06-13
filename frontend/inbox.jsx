@@ -235,7 +235,10 @@ const THREAD_WARMUP_CONCURRENCY = 6;
 const AI_OVERRIDE_STORAGE_KEY = 'instaagent_ai_overrides';
 const DELETED_CONVERSATIONS_STORAGE_KEY = 'instaagent_deleted_conversations';
 const LEAD_STAGES_STORAGE_KEY = 'instaagent_lead_stages';
+const LEAD_SCORES_STORAGE_KEY = 'instaagent_lead_scores';
+const LEAD_REASONS_STORAGE_KEY = 'instaagent_lead_reasons';
 const LEAD_PRICES_STORAGE_KEY = 'instaagent_lead_prices';
+const NEEDS_HUMAN_STORAGE_KEY = 'instaagent_needs_human';
 const CLIENT_OWNERS_STORAGE_KEY = 'instaagent_client_owners';
 const MANUAL_CLIENTS_STORAGE_KEY = 'instaagent_manual_clients';
 const MANUAL_LEADS_STORAGE_KEY = 'instaagent_manual_leads';
@@ -1615,6 +1618,8 @@ const WORKSPACE_TEXT = {
     totalConversations: 'Total conversations', activeThreads: 'Active inbox threads', newLeads: 'New leads', recentProspects: 'Recent or unread prospects',
     aiHandledChats: 'AI handled chats', coveredByAi: 'Currently covered by AI', humanTakeoverChats: 'Human takeover chats', manualAttention: 'Needs manual attention',
     unreadMessages: 'Unread messages', waitingMessages: 'Customer messages waiting', responseRate: 'Response rate', estimatedInbox: 'Estimated from inbox state',
+    qualifiedLeads: 'Qualified leads', hotLeads: 'Hot leads', wonOrders: 'Won orders', lostLeads: 'Lost leads',
+    phoneCollected: 'Phones collected', handoffRate: 'Handoff rate', lowConfidenceReplies: 'Low confidence', managerCorrections: 'Manager corrections',
     avgResponseTime: 'Avg response time', liveEstimate: 'Live estimate', platformMessages: 'Platform messages', allPlatforms: 'Instagram + Telegram + WhatsApp',
     inbound: 'Inbound', outbound: 'Outbound', aiReplies: 'AI replies', humanReplies: 'Human replies', messagesByDay: 'Messages by day',
     messagesByPlatform: 'Messages by platform', inboundVsOutbound: 'Inbound vs outbound', aiVsHuman: 'AI replies vs human replies',
@@ -1637,7 +1642,8 @@ const WORKSPACE_TEXT = {
     customModel: 'Custom model', temperature: 'Temperature', maxTokens: 'Max tokens', apiKeys: 'API keys', key: 'key', saved: 'Saved', pasteApiKey: 'Paste API key',
     clear: 'Clear', promptReady: 'Prompt suggestion ready', promptLocal: 'Prompt suggestion generated locally', noBusinessLocal: 'Generated locally because no live business is selected.',
     backendUnavailableLocal: 'Generated locally because the backend endpoint is not available yet.',
-    leadNew: 'New', leadQualified: 'Qualified', leadNegotiation: 'Negotiation', leadWon: 'Won', leadLost: 'Lost',
+    leadNew: 'New', leadEngaged: 'Engaged', leadInterested: 'Interested', leadQualified: 'Qualified', leadHot: 'Hot', leadHandoffRequired: 'Needs Human', leadWon: 'Won', leadLost: 'Lost',
+    leadScore: 'Score', leadReason: 'Reason',
     leadAmount: 'Potential value', leadSource: 'Source', leadUpdated: 'Updated', leadEmpty: 'No leads in this stage yet.',
     leadOpen: 'Open chat', leadPrice: 'Price', leadPricePlaceholder: 'Add price', leadPriceClear: 'Clear price',
     clientsTitle: 'Clients table', clientsSubtitle: 'All customers with status, channel, price, and last message.', clientsEmpty: 'No clients yet.',
@@ -1695,6 +1701,8 @@ const WORKSPACE_TEXT = {
     totalConversations: 'Jami suhbatlar', activeThreads: 'Faol inbox suhbatlari', newLeads: 'Yangi leadlar', recentProspects: 'Yangi yoki o‘qilmagan mijozlar',
     aiHandledChats: 'AI yuritgan chatlar', coveredByAi: 'AI nazoratida', humanTakeoverChats: 'Operatorga o‘tgan chatlar', manualAttention: 'Qo‘lda ko‘rish kerak',
     unreadMessages: 'O‘qilmagan xabarlar', waitingMessages: 'Javob kutayotgan xabarlar', responseRate: 'Javob darajasi', estimatedInbox: 'Inbox holatidan taxmin',
+    qualifiedLeads: 'Saralangan lidlar', hotLeads: 'Qaynoq lidlar', wonOrders: 'Yutilgan buyurtmalar', lostLeads: 'Yo‘qotilgan lidlar',
+    phoneCollected: 'Telefonlar yig‘ildi', handoffRate: 'Operatorga o‘tish', lowConfidenceReplies: 'Past ishonch', managerCorrections: 'Menejer tuzatishlari',
     avgResponseTime: 'O‘rtacha javob vaqti', liveEstimate: 'Live taxmin', platformMessages: 'Platforma xabarlari', allPlatforms: 'Instagram + Telegram + WhatsApp',
     inbound: 'Kiruvchi', outbound: 'Chiquvchi', aiReplies: 'AI javoblari', humanReplies: 'Operator javoblari', messagesByDay: 'Kunlar bo‘yicha xabarlar',
     messagesByPlatform: 'Platformalar bo‘yicha xabarlar', inboundVsOutbound: 'Kiruvchi va chiquvchi', aiVsHuman: 'AI va operator javoblari',
@@ -1717,7 +1725,8 @@ const WORKSPACE_TEXT = {
     customModel: 'Custom model', temperature: 'Temperature', maxTokens: 'Max token', apiKeys: 'API kalitlar', key: 'kalit', saved: 'Saqlangan', pasteApiKey: 'API kalitni kiriting',
     clear: 'Tozalash', promptReady: 'Prompt tavsiyasi tayyor', promptLocal: 'Prompt tavsiyasi lokal yaratildi', noBusinessLocal: 'Live biznes tanlanmagani uchun lokal yaratildi.',
     backendUnavailableLocal: 'Backend endpoint hali ishlamagani uchun lokal yaratildi.',
-    leadNew: 'Yangi', leadQualified: 'Saralangan', leadNegotiation: 'Muzokara', leadWon: 'Yutilgan', leadLost: 'Yo‘qotilgan',
+    leadNew: 'Yangi', leadEngaged: 'Faol', leadInterested: 'Qiziqqan', leadQualified: 'Saralangan', leadHot: 'Qaynoq', leadHandoffRequired: 'Operator kerak', leadWon: 'Yutilgan', leadLost: 'Yo‘qotilgan',
+    leadScore: 'Ball', leadReason: 'Sabab',
     leadAmount: 'Potensial qiymat', leadSource: 'Manba', leadUpdated: 'Yangilangan', leadEmpty: 'Bu bosqichda lid yo‘q.',
     leadOpen: 'Chatni ochish', leadPrice: 'Narx', leadPricePlaceholder: 'Narx kiriting', leadPriceClear: 'Narxni o‘chirish',
     clientsTitle: 'Mijozlar jadvali', clientsSubtitle: 'Barcha mijozlar: status, kanal, narx va oxirgi xabar.', clientsEmpty: 'Hali mijoz yo‘q.',
@@ -1775,6 +1784,8 @@ const WORKSPACE_TEXT = {
     totalConversations: 'Всего диалогов', activeThreads: 'Активные диалоги inbox', newLeads: 'Новые лиды', recentProspects: 'Новые или непрочитанные клиенты',
     aiHandledChats: 'Чаты обработаны ИИ', coveredByAi: 'Сейчас ведет ИИ', humanTakeoverChats: 'Передано оператору', manualAttention: 'Нужно внимание человека',
     unreadMessages: 'Непрочитанные', waitingMessages: 'Сообщения ждут ответа', responseRate: 'Доля ответов', estimatedInbox: 'Оценка по inbox',
+    qualifiedLeads: 'Квалиф. лиды', hotLeads: 'Горячие лиды', wonOrders: 'Сделки', lostLeads: 'Потеряно',
+    phoneCollected: 'Телефоны собраны', handoffRate: 'Передача оператору', lowConfidenceReplies: 'Низкая уверенность', managerCorrections: 'Правки менеджера',
     avgResponseTime: 'Среднее время ответа', liveEstimate: 'Живая оценка', platformMessages: 'Сообщения платформ', allPlatforms: 'Instagram + Telegram + WhatsApp',
     inbound: 'Входящие', outbound: 'Исходящие', aiReplies: 'Ответы ИИ', humanReplies: 'Ответы оператора', messagesByDay: 'Сообщения по дням',
     messagesByPlatform: 'Сообщения по платформам', inboundVsOutbound: 'Входящие и исходящие', aiVsHuman: 'ИИ и оператор',
@@ -1797,7 +1808,8 @@ const WORKSPACE_TEXT = {
     customModel: 'Своя модель', temperature: 'Temperature', maxTokens: 'Макс. токены', apiKeys: 'API ключи', key: 'ключ', saved: 'Сохранен', pasteApiKey: 'Вставьте API ключ',
     clear: 'Очистить', promptReady: 'Prompt готов', promptLocal: 'Prompt сгенерирован локально', noBusinessLocal: 'Создано локально, потому что live бизнес не выбран.',
     backendUnavailableLocal: 'Создано локально, потому что backend endpoint пока недоступен.',
-    leadNew: 'Новые', leadQualified: 'Квалиф.', leadNegotiation: 'Переговоры', leadWon: 'Сделка', leadLost: 'Потеряно',
+    leadNew: 'Новые', leadEngaged: 'Вовлечены', leadInterested: 'Интерес', leadQualified: 'Квалиф.', leadHot: 'Горячие', leadHandoffRequired: 'Нужен оператор', leadWon: 'Сделка', leadLost: 'Потеряно',
+    leadScore: 'Балл', leadReason: 'Причина',
     leadAmount: 'Потенциал', leadSource: 'Источник', leadUpdated: 'Обновлено', leadEmpty: 'В этой стадии пока нет лидов.',
     leadOpen: 'Открыть чат', leadPrice: 'Цена', leadPricePlaceholder: 'Добавить цену', leadPriceClear: 'Удалить цену',
     clientsTitle: 'Таблица клиентов', clientsSubtitle: 'Все клиенты со статусом, каналом, ценой и последним сообщением.', clientsEmpty: 'Клиентов пока нет.',
@@ -1852,20 +1864,30 @@ const WORKSPACE_TEXT = {
   },
 };
 
-const LEAD_STAGE_ORDER = ['new', 'qualified', 'negotiation', 'won', 'lost'];
+const LEAD_STAGE_ORDER = ['new', 'engaged', 'interested', 'qualified', 'hot', 'handoff_required', 'won', 'lost'];
+
+function normalizeLeadStage(stage) {
+  const clean = String(stage || '').trim().toLowerCase();
+  if (clean === 'negotiation') return 'hot';
+  if (clean === 'handoff' || clean === 'needs_human') return 'handoff_required';
+  return LEAD_STAGE_ORDER.includes(clean) ? clean : 'new';
+}
 
 function guessLeadStage(conv) {
   const blob = `${conv.preview} ${conv.summary}`.toLowerCase();
   if (conv.unread > 0 || conv.needsHuman) return 'new';
-  if (/ready|order|заказ|buyurtma|olaman|сч[её]т|invoice/.test(blob)) return 'negotiation';
+  if (/ready|order|заказ|buyurtma|olaman|сч[её]т|invoice/.test(blob)) return 'hot';
   if (/thank|thanks|received|получил|rahmat|oldim/.test(blob)) return 'won';
   if (/cancel|later|нет|yo['’`]?q|not now|stop/.test(blob)) return 'lost';
-  return 'qualified';
+  if (/price|narx|qancha|size|rang|color|catalog|katalog|mahsulot|товар/.test(blob)) return 'interested';
+  return 'engaged';
 }
 
-function buildLeads(conversations, leadStages, leadPrices = {}) {
+function buildLeads(conversations, leadStages, leadPrices = {}, leadScores = {}, leadReasons = {}, needsHuman = {}) {
   const leads = (conversations || []).map(conv => {
-    const stage = leadStages[conv.id] || guessLeadStage(conv);
+    const stage = normalizeLeadStage(leadStages[conv.id] || guessLeadStage(conv));
+    const reasonInfo = leadReasons[conv.id] || {};
+    const handoffInfo = needsHuman[conv.id] || {};
     const inferredValue = Number(conv.kpis?.orders || 0) > 0
       ? Number(conv.kpis.orders) * 120
       : Math.max(90, 60 + Number(conv.unread || 0) * 45 + (conv.needsHuman ? 120 : 0));
@@ -1877,9 +1899,11 @@ function buildLeads(conversations, leadStages, leadPrices = {}) {
       handle: conv.handle,
       preview: conv.preview,
       unread: conv.unread,
-      needsHuman: conv.needsHuman,
+      needsHuman: conv.needsHuman || handoffInfo.required === true || stage === 'handoff_required',
       amount: inferredValue,
       price: leadPrices[conv.id] || '',
+      score: Number(leadScores[conv.id] || 0),
+      reason: String(reasonInfo.summary || (Array.isArray(reasonInfo.reasons) ? reasonInfo.reasons[0] : '') || '').trim(),
       updatedAt: conv.lastTime,
       source: conv.channelName || conv.channel || conv.platform,
       conversationId: conv.id,
@@ -1894,7 +1918,7 @@ function localPromptSuggestion(field, currentPrompt = '', goal = '') {
     instagram_prompt: 'Instagram comment+DM rules:',
     telegram_prompt: 'Telegram sales rules:',
     whatsapp_prompt: 'WhatsApp sales rules:',
-    opening_message: 'Assalomu alaykum 😊 Qanday yordam kerak?',
+    opening_message: 'Assalomu alaykum 😊 Men virtual yordamchiman. Mahsulot, narx, yetkazib berish yoki buyurtma bo‘yicha yordam beraman.',
     lead_collection_rules: 'Lead collection rules:',
     sales_rules: 'Sales reply rules:',
     handoff_rules: 'Human handoff rules:',
@@ -1905,8 +1929,8 @@ function localPromptSuggestion(field, currentPrompt = '', goal = '') {
 
   if (field === 'opening_message') {
     return {
-      suggested_prompt: 'Assalomu alaykum 😊 Qanday yordam kerak?',
-      explanation: 'Made the opening short and natural, without asking for phone or address too early.',
+      suggested_prompt: 'Assalomu alaykum 😊 Men virtual yordamchiman. Mahsulot, narx, yetkazib berish yoki buyurtma bo‘yicha yordam beraman.',
+      explanation: 'Made the opening transparent and natural, without asking for phone or address too early.',
     };
   }
 
@@ -1951,8 +1975,10 @@ function buildInsights(conversations, stats, w = WORKSPACE_TEXT.en) {
   const unreadMessages = rows.reduce((sum, conv) => sum + Number(conv.unread || 0), 0);
   const aiHandled = rows.filter(conv => conv.aiOn && !conv.needsHuman).length;
   const humanTakeover = rows.filter(conv => conv.needsHuman || conv.aiOn === false).length;
-  const newLeads = rows.filter(conv => conv.unread > 0 || /first|today|2 min|14 min|hr/i.test(`${conv.customerSince} ${conv.lastTime}`)).length;
+  const newLeads = Number(stats?.new_leads_today ?? rows.filter(conv => conv.unread > 0 || /first|today|2 min|14 min|hr/i.test(`${conv.customerSince} ${conv.lastTime}`)).length);
   const responseRate = totalConversations ? ((totalConversations - unreadMessages) / totalConversations) * 100 : 0;
+  const avgResponseMinutes = Number(stats?.average_response_time_minutes || 0);
+  const handoffRate = Number(stats?.ai_to_human_handoff_rate || 0);
 
   const platformCounts = ['instagram', 'telegram', 'whatsapp'].map(platform => ({
     label: platform === 'whatsapp' ? 'WhatsApp' : platform[0].toUpperCase() + platform.slice(1),
@@ -1997,9 +2023,14 @@ function buildInsights(conversations, stats, w = WORKSPACE_TEXT.en) {
       { label: w.newLeads, value: newLeads, hint: w.recentProspects },
       { label: w.aiHandledChats, value: aiHandled, hint: w.coveredByAi },
       { label: w.humanTakeoverChats, value: humanTakeover, hint: w.manualAttention },
+      { label: w.qualifiedLeads, value: Number(stats?.qualified_leads || 0), hint: w.buyingIntent },
+      { label: w.hotLeads, value: Number(stats?.hot_leads || 0), hint: w.manualAttention },
+      { label: w.phoneCollected, value: Number(stats?.phone_numbers_collected || 0), hint: w.leadCollectionRules },
+      { label: w.wonOrders, value: Number(stats?.won_orders || 0), hint: w.successfulDeals },
       { label: w.unreadMessages, value: unreadMessages, hint: w.waitingMessages },
       { label: w.responseRate, value: formatPercent(responseRate), hint: w.estimatedInbox },
-      { label: w.avgResponseTime, value: unreadMessages ? '14m' : '6m', hint: w.liveEstimate },
+      { label: w.avgResponseTime, value: avgResponseMinutes ? `${avgResponseMinutes}m` : (unreadMessages ? '14m' : '6m'), hint: w.liveEstimate },
+      { label: w.handoffRate, value: `${handoffRate}%`, hint: w.manualAttention },
       { label: w.platformMessages, value: platformCounts.reduce((sum, item) => sum + item.value, 0), hint: w.allPlatforms },
     ],
     platformCounts,
@@ -2014,6 +2045,9 @@ function buildInsights(conversations, stats, w = WORKSPACE_TEXT.en) {
       { label: w.deliveryQuestions, value: keywordCount(rows, deliveryTerms), hint: w.deliveryHint },
       { label: w.readyToOrder, value: keywordCount(rows, orderTerms), hint: w.buyingIntent },
       { label: w.followUp, value: humanTakeover, hint: w.aiPaused },
+      { label: w.lowConfidenceReplies, value: Number(stats?.low_confidence_replies || 0), hint: w.estimatedInbox },
+      { label: w.managerCorrections, value: Number(stats?.manager_corrections || 0), hint: w.manualAttention },
+      { label: w.lostLeads, value: Number(stats?.lost_leads || 0), hint: w.aiPaused },
     ],
   };
 }
@@ -2617,12 +2651,18 @@ function PromptGeneratorField({
   );
 }
 
-function LeadsBoard({ conversations, leadStages, leadPrices, setLeadStage, setLeadPrice, onOpenConversation, w }) {
-  const leads = useMemo(() => buildLeads(conversations, leadStages, leadPrices), [conversations, leadStages, leadPrices]);
+function LeadsBoard({ conversations, leadStages, leadPrices, leadScores = {}, leadReasons = {}, needsHuman = {}, setLeadStage, setLeadPrice, onOpenConversation, w }) {
+  const leads = useMemo(
+    () => buildLeads(conversations, leadStages, leadPrices, leadScores, leadReasons, needsHuman),
+    [conversations, leadStages, leadPrices, leadScores, leadReasons, needsHuman],
+  );
   const stageNames = {
     new: w.leadNew,
+    engaged: w.leadEngaged,
+    interested: w.leadInterested,
     qualified: w.leadQualified,
-    negotiation: w.leadNegotiation,
+    hot: w.leadHot,
+    handoff_required: w.leadHandoffRequired,
     won: w.leadWon,
     lost: w.leadLost,
   };
@@ -2647,6 +2687,8 @@ function LeadsBoard({ conversations, leadStages, leadPrices, setLeadStage, setLe
                   <p>{lead.preview}</p>
                   <div className="lead-meta">
                     <span>{w.leadSource}: <b>{lead.source}</b></span>
+                    <span>{w.leadScore}: <b>{lead.score || 0}</b></span>
+                    {lead.reason && <span>{w.leadReason}: <b>{lead.reason}</b></span>}
                     <span>{w.leadUpdated}: <b>{lead.updatedAt}</b></span>
                   </div>
                   <label className="lead-price-row">
@@ -2732,7 +2774,7 @@ function ClientsTable({
       .filter(Boolean)
       .map(conv => ({
         ...conv,
-        stage: leadStages[conv.id] || guessLeadStage(conv),
+        stage: normalizeLeadStage(leadStages[conv.id] || guessLeadStage(conv)),
         price: leadPrices[conv.id] || '',
         owner: String(clientOwners?.[conv.id] || '').trim(),
         sourceType: 'conversation',
@@ -2747,7 +2789,7 @@ function ClientsTable({
             handle: String(lead.note || '').trim() || '@manual',
             platform: String(lead.platform || 'manual').trim(),
             channelName: String(lead.platform || 'manual').trim(),
-            stage: leadStages[id] || lead.stage || 'new',
+            stage: normalizeLeadStage(leadStages[id] || lead.stage || 'new'),
             price: leadPrices[id] || lead.price || '',
             owner: String(clientOwners?.[id] || lead.operator || lead.owner || '').trim(),
             preview: String(lead.note || '').trim() || '-',
@@ -2767,8 +2809,11 @@ function ClientsTable({
 
   const stageNames = {
     new: w.leadNew,
+    engaged: w.leadEngaged,
+    interested: w.leadInterested,
     qualified: w.leadQualified,
-    negotiation: w.leadNegotiation,
+    hot: w.leadHot,
+    handoff_required: w.leadHandoffRequired,
     won: w.leadWon,
     lost: w.leadLost,
   };
@@ -3450,7 +3495,7 @@ function OperatorMessagesCard({ conversations, onOpenConversation, w }) {
 }
 
 function AdminPanel(props) {
-  const { conversations, leadStages, leadPrices, clientOwners, manualLeads, operatorDeals, adminNotes, onAdminNote, setLeadStage, setLeadPrice, onOpenConversation, selectedBusinessId, operatorAccounts, onReloadOperatorAccounts, onDownloadOperatorReport, w } = props;
+  const { conversations, leadStages, leadScores, leadReasons, leadPrices, needsHuman, clientOwners, manualLeads, operatorDeals, adminNotes, onAdminNote, setLeadStage, setLeadPrice, onOpenConversation, selectedBusinessId, operatorAccounts, onReloadOperatorAccounts, onDownloadOperatorReport, w } = props;
   return (
     <div className="operator-panel">
       <AdminTaskDispatchCard adminNotes={adminNotes} onAdminNote={onAdminNote} operatorAccounts={operatorAccounts} w={w} />
@@ -3473,14 +3518,14 @@ function AdminPanel(props) {
             <p>{w.clientsSubtitle}</p>
           </div>
         </div>
-        <LeadsBoard conversations={conversations} leadStages={leadStages} leadPrices={leadPrices} setLeadStage={setLeadStage} setLeadPrice={setLeadPrice} onOpenConversation={onOpenConversation} w={w} />
+        <LeadsBoard conversations={conversations} leadStages={leadStages} leadScores={leadScores} leadReasons={leadReasons} leadPrices={leadPrices} needsHuman={needsHuman} setLeadStage={setLeadStage} setLeadPrice={setLeadPrice} onOpenConversation={onOpenConversation} w={w} />
       </section>
     </div>
   );
 }
 
 function OperatorPanel(props) {
-  const { conversations, leadStages, leadPrices, adminNotes, setLeadStage, setLeadPrice, onOpenConversation, w, currentUser } = props;
+  const { conversations, leadStages, leadScores, leadReasons, leadPrices, needsHuman, adminNotes, setLeadStage, setLeadPrice, onOpenConversation, w, currentUser } = props;
   return (
     <div className="operator-panel">
       <OperatorTaskInboxCard adminNotes={adminNotes} currentUser={currentUser} w={w} />
@@ -3492,7 +3537,7 @@ function OperatorPanel(props) {
             <p>{w.clientsSubtitle}</p>
           </div>
         </div>
-        <LeadsBoard conversations={conversations} leadStages={leadStages} leadPrices={leadPrices} setLeadStage={setLeadStage} setLeadPrice={setLeadPrice} onOpenConversation={onOpenConversation} w={w} />
+        <LeadsBoard conversations={conversations} leadStages={leadStages} leadScores={leadScores} leadReasons={leadReasons} leadPrices={leadPrices} needsHuman={needsHuman} setLeadStage={setLeadStage} setLeadPrice={setLeadPrice} onOpenConversation={onOpenConversation} w={w} />
       </section>
     </div>
   );
@@ -3537,7 +3582,10 @@ function WorkspacePanel({
   onGeneratePrompt,
   generatorState,
   leadStages,
+  leadScores,
+  leadReasons,
   leadPrices,
+  needsHuman,
   clientOwners,
   manualClients,
   manualLeads,
@@ -3630,7 +3678,10 @@ function WorkspacePanel({
         <LeadsBoard
           conversations={conversations}
           leadStages={leadStages}
+          leadScores={leadScores}
+          leadReasons={leadReasons}
           leadPrices={leadPrices}
+          needsHuman={needsHuman}
           setLeadStage={onLeadStageChange}
           setLeadPrice={onLeadPriceChange}
           onOpenConversation={onOpenConversation}
@@ -3666,7 +3717,10 @@ function WorkspacePanel({
         <OperatorsSection
           conversations={conversations}
           leadStages={leadStages}
+          leadScores={leadScores}
+          leadReasons={leadReasons}
           leadPrices={leadPrices}
+          needsHuman={needsHuman}
           selectedBusinessId={selectedBusinessId}
           operatorDeals={operatorDeals}
           clientOwners={clientOwners}
@@ -5068,7 +5122,10 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const [promptGeneratorState, setPromptGeneratorState] = useState({});
   const [operatorAccounts, setOperatorAccounts] = useState([]);
   const [leadStages, setLeadStages] = useState(() => readStoredObject(LEAD_STAGES_STORAGE_KEY));
+  const [leadScores, setLeadScores] = useState(() => readStoredObject(LEAD_SCORES_STORAGE_KEY));
+  const [leadReasons, setLeadReasons] = useState(() => readStoredObject(LEAD_REASONS_STORAGE_KEY));
   const [leadPrices, setLeadPrices] = useState(() => readStoredObject(LEAD_PRICES_STORAGE_KEY));
+  const [needsHuman, setNeedsHuman] = useState(() => readStoredObject(NEEDS_HUMAN_STORAGE_KEY));
   const [clientOwners, setClientOwners] = useState(() => readStoredObject(CLIENT_OWNERS_STORAGE_KEY));
   const [manualClients, setManualClients] = useState(() => {
     const stored = readStoredObject(MANUAL_CLIENTS_STORAGE_KEY);
@@ -5336,9 +5393,21 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
         setLeadStages(state.lead_stages);
         writeStoredObject(LEAD_STAGES_STORAGE_KEY, state.lead_stages);
       }
+      if (state.lead_scores && typeof state.lead_scores === 'object') {
+        setLeadScores(state.lead_scores);
+        writeStoredObject(LEAD_SCORES_STORAGE_KEY, state.lead_scores);
+      }
+      if (state.lead_reasons && typeof state.lead_reasons === 'object') {
+        setLeadReasons(state.lead_reasons);
+        writeStoredObject(LEAD_REASONS_STORAGE_KEY, state.lead_reasons);
+      }
       if (state.lead_prices && typeof state.lead_prices === 'object') {
         setLeadPrices(state.lead_prices);
         writeStoredObject(LEAD_PRICES_STORAGE_KEY, state.lead_prices);
+      }
+      if (state.needs_human && typeof state.needs_human === 'object') {
+        setNeedsHuman(state.needs_human);
+        writeStoredObject(NEEDS_HUMAN_STORAGE_KEY, state.needs_human);
       }
       if (state.client_owners && typeof state.client_owners === 'object') {
         setClientOwners(state.client_owners);
@@ -6641,7 +6710,10 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
             onGeneratePrompt={generatePromptSuggestion}
             generatorState={promptGeneratorState}
             leadStages={leadStages}
+            leadScores={leadScores}
+            leadReasons={leadReasons}
             leadPrices={leadPrices}
+            needsHuman={needsHuman}
             clientOwners={clientOwners}
             manualClients={manualClients}
             manualLeads={manualLeads}

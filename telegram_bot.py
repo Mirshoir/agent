@@ -4,10 +4,14 @@ import time
 import asyncio
 import io
 import requests
+from datetime import datetime
 from fastapi import APIRouter, Request, Header
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from supabase import create_client
 from catalog_matcher import analyze_media_for_sales_reply_local as analyze_catalog_media
+
+from agent_orchestrator import run_agent_cycle
+from ai_audit_log import build_ai_action, save_ai_action
 
 try:
     from telethon import TelegramClient, events
@@ -161,6 +165,327 @@ def business_allows_auto_reply(business: dict = None, channel: str = "") -> bool
 
 def normalize_text(value):
     return str(value or "").strip()
+
+
+def standard_telegram_channel(channel: str = "") -> str:
+    clean = normalize_text(channel).lower()
+    if clean in {"telegram_bot_group", "telegram_group", "group", "supergroup"}:
+        return "telegram_bot_group"
+    if clean in {"telegram_user_private", "user_private"}:
+        return "telegram_user_private"
+    return "telegram_bot_private"
+
+
+def telegram_conversation_id(business_id: str, channel: str, customer_id: str, chat_id: str = "") -> str:
+    business_id = normalize_text(business_id)
+    channel = standard_telegram_channel(channel)
+    scope = normalize_text(chat_id or customer_id)
+    if not business_id or not scope:
+        return ""
+    return f"telegram::{business_id}::{channel}::{scope}"
+
+
+def lead_state_workspace_key(platform: str, customer_id: str, channel: str = "") -> str:
+    platform = normalize_text(platform).lower()
+    customer_id = normalize_text(customer_id)
+    channel = normalize_text(channel).lower()
+    if not platform or not customer_id:
+        return ""
+    if channel:
+        return f"lead_state:{platform}:{channel}:{customer_id}"
+    return f"lead_state:{platform}:{customer_id}"
+
+
+def get_workspace_state(business_id: str) -> dict:
+    business_id = normalize_text(business_id)
+    if not business_id:
+        return {}
+    try:
+        rows = (
+            supabase.table("dashboard_workspace_state")
+            .select("state_key,state_value")
+            .eq("business_id", business_id)
+            .execute()
+            .data
+            or []
+        )
+        return {
+            normalize_text(row.get("state_key")): row.get("state_value")
+            for row in rows
+            if normalize_text(row.get("state_key"))
+        }
+    except Exception as exc:
+        log("Could not load Telegram workspace state", str(exc))
+        return {}
+
+
+def upsert_workspace_state(business_id: str, state_key: str, state_value, updated_by: str = "telegram_bot"):
+    business_id = normalize_text(business_id)
+    state_key = normalize_text(state_key)
+    if not business_id or not state_key:
+        return
+    try:
+        supabase.table("dashboard_workspace_state").upsert(
+            {
+                "business_id": business_id,
+                "state_key": state_key,
+                "state_value": state_value,
+                "updated_by": updated_by,
+            },
+            on_conflict="business_id,state_key",
+        ).execute()
+    except Exception as exc:
+        log("Could not save Telegram workspace state", str(exc))
+
+
+def normalize_agent_lead_state(state: dict = None) -> dict:
+    state = dict(state or {})
+    stage = normalize_text(state.get("stage") or "new").lower()
+    if stage == "negotiation":
+        stage = "hot"
+    if stage == "handoff":
+        stage = "handoff_required"
+    if stage not in {"new", "engaged", "interested", "qualified", "hot", "handoff_required", "won", "lost"}:
+        stage = "new"
+    try:
+        score = max(0, min(100, int(float(state.get("score") or state.get("lead_score") or 0))))
+    except Exception:
+        score = 0
+    state["stage"] = stage
+    state["score"] = score
+    state["lead_score"] = score
+    state["handoff_required"] = bool(state.get("handoff_required") or stage == "handoff_required")
+    return state
+
+
+def get_customer_lead_state(platform: str, business_id: str, customer_id: str, channel: str = "") -> dict:
+    key = lead_state_workspace_key(platform, customer_id, channel)
+    if not key:
+        return {}
+    state = get_workspace_state(business_id)
+    value = state.get(key)
+    return normalize_agent_lead_state(value if isinstance(value, dict) else {})
+
+
+def upsert_customer_lead_state(business_id: str, platform: str, customer_id: str, channel: str, lead_state: dict):
+    key = lead_state_workspace_key(platform, customer_id, channel)
+    if key:
+        upsert_workspace_state(business_id, key, normalize_agent_lead_state(lead_state), updated_by="telegram_bot")
+
+
+def telegram_recent_rows_for_agent(customer_id: str, channel: str, business: dict, limit: int = 20) -> list[dict]:
+    history = get_recent_chat_history(customer_id, platform="telegram", channel=channel, limit=limit, business=business)
+    rows = []
+    for item in history:
+        rows.append(
+            {
+                "direction": "outbound" if item.get("role") == "assistant" else "inbound",
+                "content": item.get("content") or "",
+                "media_type": "",
+            }
+        )
+    return rows
+
+
+def sales_agent_recent_messages(rows: list[dict]) -> list[dict]:
+    return [
+        {
+            "direction": normalize_text(row.get("direction")).lower(),
+            "content": normalize_text(row.get("content")),
+            "media_type": normalize_text(row.get("media_type")).lower(),
+        }
+        for row in (rows or [])
+        if isinstance(row, dict)
+    ]
+
+
+def sync_sales_agent_workspace_indexes(business_id: str, conversation_id: str, lead_state: dict):
+    business_id = normalize_text(business_id)
+    conversation_id = normalize_text(conversation_id)
+    if not business_id or not conversation_id:
+        return
+    state = get_workspace_state(business_id)
+    lead_stages = dict(state.get("lead_stages") or {})
+    lead_scores = dict(state.get("lead_scores") or {})
+    lead_reasons = dict(state.get("lead_reasons") or {})
+    needs_human = dict(state.get("needs_human") or {})
+
+    lead_stages[conversation_id] = normalize_text(lead_state.get("stage") or "new").lower()
+    lead_scores[conversation_id] = int(lead_state.get("score") or lead_state.get("lead_score") or 0)
+    lead_reasons[conversation_id] = {
+        "summary": normalize_text(lead_state.get("qualification_summary")),
+        "reasons": lead_state.get("score_reasons") if isinstance(lead_state.get("score_reasons"), list) else [],
+        "intent": normalize_text(lead_state.get("primary_intent")),
+        "updated_at": normalize_text(lead_state.get("updated_at") or lead_state.get("last_message_at")),
+    }
+    needs_human[conversation_id] = {
+        "required": bool(lead_state.get("handoff_required")),
+        "reason": normalize_text(lead_state.get("handoff_reason")),
+        "priority": normalize_text(lead_state.get("handoff_priority")),
+        "manager_note": normalize_text(lead_state.get("manager_note")),
+        "updated_at": normalize_text(lead_state.get("updated_at") or lead_state.get("last_message_at")),
+    }
+
+    upsert_workspace_state(business_id, "lead_stages", lead_stages, updated_by="telegram_bot")
+    upsert_workspace_state(business_id, "lead_scores", lead_scores, updated_by="telegram_bot")
+    upsert_workspace_state(business_id, "lead_reasons", lead_reasons, updated_by="telegram_bot")
+    upsert_workspace_state(business_id, "needs_human", needs_human, updated_by="telegram_bot")
+
+
+def upsert_customer_lead_record(
+    *,
+    business_id: str,
+    channel: str,
+    customer_id: str,
+    lead_state: dict,
+):
+    try:
+        supabase.table("customer_leads").upsert(
+            {
+                "business_id": normalize_text(business_id),
+                "platform": "telegram",
+                "channel": standard_telegram_channel(channel),
+                "customer_id": normalize_text(customer_id),
+                "customer_name": normalize_text(lead_state.get("customer_name")),
+                "phone": normalize_text(lead_state.get("phone")),
+                "product_interest": normalize_text(lead_state.get("product_interest")),
+                "stage": normalize_text(lead_state.get("stage") or "new").lower(),
+                "score": int(lead_state.get("score") or lead_state.get("lead_score") or 0),
+                "handoff_required": bool(lead_state.get("handoff_required")),
+                "handoff_reason": normalize_text(lead_state.get("handoff_reason")),
+                "qualification_summary": normalize_text(lead_state.get("qualification_summary")),
+                "state": lead_state,
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+            },
+            on_conflict="business_id,platform,channel,customer_id",
+        ).execute()
+    except Exception:
+        pass
+
+
+def create_handoff_operator_task_once(business_id: str, conversation_id: str, lead_state: dict):
+    if not lead_state.get("handoff_required"):
+        return
+    state = get_workspace_state(business_id)
+    task_index = dict(state.get("handoff_tasks") or {})
+    if task_index.get(conversation_id):
+        return
+    bucket = state.get("operator_tasks") or {}
+    items = bucket.get("items") if isinstance(bucket, dict) else []
+    if not isinstance(items, list):
+        items = []
+    customer = normalize_text(lead_state.get("customer_name") or lead_state.get("customer_id") or "Customer")
+    reason = normalize_text(lead_state.get("handoff_reason") or "review required")
+    score = int(lead_state.get("score") or 0)
+    task = {
+        "id": f"task_{int(time.time() * 1000)}_tg",
+        "text": f"Needs Human Attention: {customer}. Score {score}. Reason: {reason}.",
+        "recipients": ["*"],
+        "assign_mode": "all",
+        "created_by": "telegram_bot",
+        "created_at": datetime.utcnow().isoformat() + "Z",
+    }
+    upsert_workspace_state(business_id, "operator_tasks", {"items": [task] + items[:199]}, updated_by="telegram_bot")
+    task_index[conversation_id] = {"created_at": task["created_at"], "reason": reason}
+    upsert_workspace_state(business_id, "handoff_tasks", task_index, updated_by="telegram_bot")
+
+
+def write_ai_action_fallback(action: dict):
+    business_id = normalize_text(action.get("business_id"))
+    if not business_id:
+        return
+    state = get_workspace_state(business_id)
+    bucket = state.get("ai_actions_recent") or {}
+    items = bucket.get("items") if isinstance(bucket, dict) else []
+    if not isinstance(items, list):
+        items = []
+    upsert_workspace_state(business_id, "ai_actions_recent", {"items": [action] + items[:199]}, updated_by="telegram_bot")
+
+
+def record_sales_agent_action(
+    *,
+    business: dict,
+    channel: str,
+    customer_id: str,
+    action_type: str,
+    input_message: str,
+    decision: dict = None,
+    reply_sent: str = "",
+    tool_used: str = "",
+):
+    try:
+        payload = build_ai_action(
+            business_id=(business or {}).get("id", ""),
+            customer_id=customer_id,
+            platform="telegram",
+            channel=channel,
+            action_type=action_type,
+            input_message=input_message,
+            ai_decision=decision or {},
+            confidence=(decision or {}).get("confidence"),
+            tool_used=tool_used,
+            reply_sent=reply_sent,
+            handoff_required=bool(((decision or {}).get("handoff") or {}).get("handoff_required")),
+        )
+        save_ai_action(supabase, payload, fallback_writer=write_ai_action_fallback)
+    except Exception as exc:
+        log("Could not record Telegram sales agent action", str(exc))
+
+
+def run_sales_agent_for_telegram(
+    *,
+    business: dict,
+    customer_id: str,
+    chat_id: str,
+    channel: str,
+    message_text: str,
+    message_id: str = "",
+    customer_name: str = "",
+    media_type: str = "",
+    media_match: dict = None,
+) -> dict:
+    business_id = normalize_text((business or {}).get("id"))
+    customer_id = normalize_text(customer_id)
+    channel = standard_telegram_channel(channel)
+    if not business_id or not customer_id:
+        return {}
+    existing = get_customer_lead_state("telegram", business_id, customer_id, channel)
+    recent_rows = telegram_recent_rows_for_agent(customer_id, channel, business, limit=20)
+    decision = run_agent_cycle(
+        business=business,
+        business_id=business_id,
+        platform="telegram",
+        channel=channel,
+        customer_id=customer_id,
+        customer_name=customer_name,
+        message_text=message_text,
+        message_id=message_id,
+        media_type=media_type or "",
+        media_match=media_match or {},
+        recent_messages=sales_agent_recent_messages(recent_rows),
+        existing_lead_state=existing,
+    )
+    lead_state = normalize_agent_lead_state(decision.get("lead_state") or {})
+    upsert_customer_lead_state(business_id, "telegram", customer_id, channel, lead_state)
+    upsert_customer_lead_record(
+        business_id=business_id,
+        channel=channel,
+        customer_id=customer_id,
+        lead_state=lead_state,
+    )
+    conversation_id = telegram_conversation_id(business_id, channel, customer_id, chat_id)
+    sync_sales_agent_workspace_indexes(business_id, conversation_id, lead_state)
+    create_handoff_operator_task_once(business_id, conversation_id, lead_state)
+    record_sales_agent_action(
+        business=business,
+        channel=channel,
+        customer_id=customer_id,
+        action_type="perceive_reason",
+        input_message=message_text,
+        decision=decision,
+        tool_used="product_matcher" if media_match else "",
+    )
+    return decision
 
 
 def get_business_channels(business_id: str, aliases: list[str]):
@@ -809,6 +1134,23 @@ def is_chat_ai_enabled(platform, channel, customer_id, business_id=None):
         return True
 
 
+def set_chat_ai_enabled(business_id, platform, channel, customer_id, enabled):
+    try:
+        payload = {
+            "business_id": business_id,
+            "platform": platform,
+            "channel": channel or "",
+            "customer_id": str(customer_id),
+            "ai_enabled": bool(enabled),
+        }
+        supabase.table("chat_ai_settings").upsert(
+            payload,
+            on_conflict="business_id,platform,channel,customer_id",
+        ).execute()
+    except Exception as exc:
+        log("Could not update Telegram chat AI setting", str(exc))
+
+
 def get_active_business():
     result = (
         supabase.table("businesses")
@@ -866,10 +1208,12 @@ Runtime settings:
 
 DEFAULT_AI_PROMPT_SETTINGS = {
     "global_prompt": (
-        "You are a real human sales assistant for this business. "
-        "Sound like a real Uzbek Telegram seller, not customer support software. "
+        "You are the business virtual sales assistant. "
+        "Sound natural for Uzbek Telegram sales conversations, not like customer support software. "
+        "When introducing yourself, be transparent that you are the business virtual assistant. "
         "Represent the company clearly, answer in the customer's language, and guide the customer toward the next useful buying step. "
-        "Keep every reply short, natural, and human. Ask one question at a time. "
+        "Keep every reply short and natural. Ask one question at a time. "
+        "Never pretend to be a human salesperson. "
         "Do not repeat product names in every message or sound corporate."
     ),
     "telegram_prompt": (
@@ -880,7 +1224,7 @@ DEFAULT_AI_PROMPT_SETTINGS = {
         "- Share Telegram catalog/group links only when relevant.\n"
         "- If customer is ready to make a deal/order, use the configured business contact or ask for their name and phone."
     ),
-    "opening_message": "Assalomu alaykum 😊 Qanday yordam kerak?",
+    "opening_message": "Assalomu alaykum 😊 Men virtual yordamchiman. Mahsulot, narx, yetkazib berish yoki buyurtma bo‘yicha yordam beraman.",
     "lead_collection_rules": (
         "Do not ask for name, phone, address, or full details at the beginning. "
         "First answer naturally and understand what the customer wants. "
@@ -1082,7 +1426,9 @@ Safety rules:
 - Use only the business facts above.
 - If information is missing, ask one short clarifying question first.
 - Only mention a manager when the customer asks for a human or is ready to order.
-- Never mention AI, database, API, prompt, automation, or internal system.
+- If introducing yourself, say you are the business virtual assistant.
+- Never pretend to be a human salesperson.
+- Never mention database, API, prompt, automation, or internal system details.
 - Do not use markdown, bold formatting, or long paragraphs.
 """
 
@@ -1454,7 +1800,15 @@ def neutral_media_redirect_reply(user_text: str, business: dict = None) -> str:
         return "Нақты модель атауын не кодын жіберіңіз, мен ары қарай көмектесемін."
     return "Aniq model nomi yoki kodini yuboring, men keyin davom ettiraman."
 
-def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private"):
+def get_ai_reply(
+    user_text,
+    business,
+    customer_id,
+    channel="telegram_bot_private",
+    media_context: str = "",
+    media_reply_hint: str = "",
+    lead_state: dict = None,
+):
     if wants_business_location(user_text):
         return business_location_reply(user_text, business)
 
@@ -1474,6 +1828,25 @@ def get_ai_reply(user_text, business, customer_id, channel="telegram_bot_private
     )
 
     messages = [{"role": "system", "content": build_telegram_system_prompt(business)}]
+    if lead_state:
+        messages.append({
+            "role": "system",
+            "content": (
+                "Known customer sales state:\n"
+                f"- stage: {lead_state.get('stage', 'new')}\n"
+                f"- score: {lead_state.get('score', 0)}\n"
+                f"- phone_collected: {'yes' if lead_state.get('phone_collected') else 'no'}\n"
+                f"- name_collected: {'yes' if lead_state.get('name_collected') else 'no'}\n"
+                "- Do not ask again for fields already collected."
+            ),
+        })
+    if media_context:
+        messages.append({"role": "system", "content": media_context})
+    if media_reply_hint:
+        messages.append({
+            "role": "system",
+            "content": f"Suggested product answer from media matcher: {media_reply_hint}. Keep the answer in the customer's language.",
+        })
 
     for msg in history:
         role = msg.get("role") or "user"
@@ -1990,12 +2363,29 @@ async def telegram_webhook(request: Request):
             if is_low_signal_message(combined_text):
                 return JSONResponse({"status": "ignored_low_signal"})
 
-            reply = get_ai_reply(
-                user_text=combined_text,
+            sales_agent_decision = run_sales_agent_for_telegram(
                 business=business,
-                customer_id=customer_id,
+                customer_id=str(customer_id),
+                chat_id=str(chat_id),
                 channel=channel,
+                message_text=combined_text,
+                message_id=str(message_id or ""),
+                customer_name=conversation_name or customer_name,
             )
+            handoff_result = (sales_agent_decision or {}).get("handoff") or {}
+            agent_context = normalize_text((sales_agent_decision or {}).get("reply_context"))
+
+            if handoff_result.get("handoff_required") and normalize_text(handoff_result.get("customer_reply")):
+                reply = normalize_text(handoff_result.get("customer_reply"))
+            else:
+                reply = get_ai_reply(
+                    user_text=combined_text,
+                    business=business,
+                    customer_id=customer_id,
+                    channel=channel,
+                    media_context=agent_context,
+                    lead_state=(sales_agent_decision or {}).get("lead_state") or {},
+                )
 
             should_send_catalog = bool(get_catalog_link(business)) and wants_catalog(combined_text) and not is_greeting_only(combined_text)
 
@@ -2027,6 +2417,17 @@ async def telegram_webhook(request: Request):
                 customer_name=conversation_name or customer_name,
                 chat_id=chat_id,
             )
+            record_sales_agent_action(
+                business=business,
+                channel=channel,
+                customer_id=str(customer_id),
+                action_type="reply_sent",
+                input_message=combined_text,
+                decision=sales_agent_decision,
+                reply_sent=saved_reply_text,
+            )
+            if handoff_result.get("handoff_required"):
+                set_chat_ai_enabled(business.get("id"), "telegram", channel, customer_id, False)
 
         elif message.get("photo"):
             photos = message.get("photo", [])
@@ -2061,14 +2462,37 @@ async def telegram_webhook(request: Request):
                 caption or "📸 Photo",
                 media_type="photo",
             )
-            reply = get_ai_reply(
-                user_text=caption or "📸 Photo",
+            sales_agent_decision = run_sales_agent_for_telegram(
                 business=business,
-                customer_id=customer_id,
+                customer_id=str(customer_id),
+                chat_id=str(chat_id),
                 channel=channel,
-                media_context=media_match.get("context", "") if media_match else "",
-                media_reply_hint=media_match.get("reply_hint", "") if media_match else "",
+                message_text=caption or "Customer sent product photo.",
+                message_id=str(message_id or ""),
+                customer_name=conversation_name or customer_name,
+                media_type="photo",
+                media_match=media_match or {},
             )
+            handoff_result = (sales_agent_decision or {}).get("handoff") or {}
+            agent_context = normalize_text((sales_agent_decision or {}).get("reply_context"))
+            media_context = "\n".join(
+                item for item in [
+                    media_match.get("context", "") if media_match else "",
+                    agent_context,
+                ] if normalize_text(item)
+            )
+            if handoff_result.get("handoff_required") and normalize_text(handoff_result.get("customer_reply")):
+                reply = normalize_text(handoff_result.get("customer_reply"))
+            else:
+                reply = get_ai_reply(
+                    user_text=caption or "📸 Photo",
+                    business=business,
+                    customer_id=customer_id,
+                    channel=channel,
+                    media_context=media_context,
+                    media_reply_hint=media_match.get("reply_hint", "") if media_match else "",
+                    lead_state=(sales_agent_decision or {}).get("lead_state") or {},
+                )
 
             send_result = send_telegram_bot_message(
                 chat_id=chat_id,
@@ -2087,6 +2511,18 @@ async def telegram_webhook(request: Request):
                 customer_name=conversation_name or customer_name,
                 chat_id=chat_id,
             )
+            record_sales_agent_action(
+                business=business,
+                channel=channel,
+                customer_id=str(customer_id),
+                action_type="reply_sent",
+                input_message=caption,
+                decision=sales_agent_decision,
+                reply_sent=reply,
+                tool_used="product_matcher" if media_match else "",
+            )
+            if handoff_result.get("handoff_required"):
+                set_chat_ai_enabled(business.get("id"), "telegram", channel, customer_id, False)
 
         elif message.get("video"):
             video = message.get("video", {})
@@ -2273,14 +2709,37 @@ async def process_telegram_user_event(event):
 
                 if media_type == "photo" and business_allows_auto_reply(business, "telegram_bot") and is_chat_ai_enabled("telegram", "telegram_user_private", sender_id, business.get("id")):
                     media_match = analyze_catalog_media(media_url or "", caption or "📸 Photo", media_type="photo")
-                    reply = get_ai_reply(
-                        user_text=caption or "📸 Photo",
+                    sales_agent_decision = run_sales_agent_for_telegram(
                         business=business,
-                        customer_id=sender_id,
+                        customer_id=str(sender_id),
+                        chat_id=str(chat_id),
                         channel="telegram_user_private",
-                        media_context=media_match.get("context", "") if media_match else "",
-                        media_reply_hint=media_match.get("reply_hint", "") if media_match else "",
+                        message_text=caption or "Customer sent product photo.",
+                        message_id=str(message_id or ""),
+                        customer_name=customer_name,
+                        media_type="photo",
+                        media_match=media_match or {},
                     )
+                    handoff_result = (sales_agent_decision or {}).get("handoff") or {}
+                    agent_context = normalize_text((sales_agent_decision or {}).get("reply_context"))
+                    media_context = "\n".join(
+                        item for item in [
+                            media_match.get("context", "") if media_match else "",
+                            agent_context,
+                        ] if normalize_text(item)
+                    )
+                    if handoff_result.get("handoff_required") and normalize_text(handoff_result.get("customer_reply")):
+                        reply = normalize_text(handoff_result.get("customer_reply"))
+                    else:
+                        reply = get_ai_reply(
+                            user_text=caption or "📸 Photo",
+                            business=business,
+                            customer_id=sender_id,
+                            channel="telegram_user_private",
+                            media_context=media_context,
+                            media_reply_hint=media_match.get("reply_hint", "") if media_match else "",
+                            lead_state=(sales_agent_decision or {}).get("lead_state") or {},
+                        )
                     sent = await event.respond(reply)
 
                     save_telegram_message(
@@ -2297,6 +2756,18 @@ async def process_telegram_user_event(event):
                         customer_name=customer_name,
                         chat_id=chat_id,
                     )
+                    record_sales_agent_action(
+                        business=business,
+                        channel="telegram_user_private",
+                        customer_id=str(sender_id),
+                        action_type="reply_sent",
+                        input_message=caption,
+                        decision=sales_agent_decision,
+                        reply_sent=reply,
+                        tool_used="product_matcher" if media_match else "",
+                    )
+                    if handoff_result.get("handoff_required"):
+                        set_chat_ai_enabled(business.get("id"), "telegram", "telegram_user_private", sender_id, False)
 
         elif text:
             buffer_key = f"user:{chat_id}:{sender_id}"
@@ -2329,12 +2800,28 @@ async def process_telegram_user_event(event):
             if is_low_signal_message(combined_text):
                 return
 
-            reply = get_ai_reply(
-                user_text=combined_text,
+            sales_agent_decision = run_sales_agent_for_telegram(
                 business=business,
-                customer_id=sender_id,
+                customer_id=str(sender_id),
+                chat_id=str(chat_id),
                 channel="telegram_user_private",
+                message_text=combined_text,
+                message_id=str(message_id or ""),
+                customer_name=customer_name,
             )
+            handoff_result = (sales_agent_decision or {}).get("handoff") or {}
+            agent_context = normalize_text((sales_agent_decision or {}).get("reply_context"))
+            if handoff_result.get("handoff_required") and normalize_text(handoff_result.get("customer_reply")):
+                reply = normalize_text(handoff_result.get("customer_reply"))
+            else:
+                reply = get_ai_reply(
+                    user_text=combined_text,
+                    business=business,
+                    customer_id=sender_id,
+                    channel="telegram_user_private",
+                    media_context=agent_context,
+                    lead_state=(sales_agent_decision or {}).get("lead_state") or {},
+                )
 
             should_send_catalog = bool(get_catalog_link(business)) and wants_catalog(combined_text) and not is_greeting_only(combined_text)
             outbound_text = reply
@@ -2361,6 +2848,17 @@ async def process_telegram_user_event(event):
                 customer_name=customer_name,
                 chat_id=chat_id,
             )
+            record_sales_agent_action(
+                business=business,
+                channel="telegram_user_private",
+                customer_id=str(sender_id),
+                action_type="reply_sent",
+                input_message=combined_text,
+                decision=sales_agent_decision,
+                reply_sent=outbound_text,
+            )
+            if handoff_result.get("handoff_required"):
+                set_chat_ai_enabled(business.get("id"), "telegram", "telegram_user_private", sender_id, False)
 
     except Exception as exc:
         log("Telegram user account event error", str(exc))
