@@ -5571,6 +5571,31 @@ def clean_ai_reply_for_catalog(reply_text: str, business: dict) -> str:
     return complete_sentence_reply(reply_text, limit=1000)
 
 
+def catalog_request_reply(user_text: str, business: dict = None) -> str:
+    lang = detect_customer_language(user_text)
+    if lang == "en":
+        return "Of course, I will send the catalog. Which products are you interested in?"
+    if lang == "ru":
+        return "Конечно, отправлю каталог. Какие товары вас интересуют?"
+    if lang == "kk":
+        return "Әрине, каталогты жіберемін. Қай тауарлар қызықтырады?"
+    return "Albatta, katalogni yuboraman. Qaysi mahsulotlar sizni qiziqtiryapti?"
+
+
+def catalog_link_reply(user_text: str, business: dict = None) -> str:
+    link = get_catalog_link(business or {})
+    if not link:
+        return catalog_request_reply(user_text, business)
+    lang = detect_customer_language(user_text)
+    if lang == "en":
+        return f"Catalog: {link}\nWhich products are you interested in?"
+    if lang == "ru":
+        return f"Каталог: {link}\nКакие товары вас интересуют?"
+    if lang == "kk":
+        return f"Каталог: {link}\nҚай тауарлар қызықтырады?"
+    return f"Katalog: {link}\nQaysi mahsulotlar sizni qiziqtiryapti?"
+
+
 def catalog_card_subtitle(business: dict) -> str:
     business_name = normalize_id((business or {}).get("business_name"))
     if len(business_name) <= 22:
@@ -8369,7 +8394,17 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             or not normalize_id(message_text)
             or (media_type in {"photo", "video"} and not message.get("text"))
         ))
-        if generic_wholesale_reply:
+        should_send_catalog = (
+            bool(get_catalog_link(business))
+            and wants_catalog(message_text)
+            and not is_price_question(message_text)
+            and not is_greeting_only(message_text)
+            and not is_auto_media_placeholder_message(message_text)
+            and not (media_type in {"photo", "video", "file", "audio"})
+        )
+        if should_send_catalog:
+            reply_text = catalog_request_reply(message_text, business)
+        elif generic_wholesale_reply:
             reply_text = clean_sales_reply(generic_wholesale_reply, message_text or "photo", business, lead_state)
         elif force_direct_media_reply:
             reply_text = clean_sales_reply(media_reply_hint, message_text or "photo", business, lead_state)
@@ -8413,19 +8448,14 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             mark_processed(processed_message_ids, message_id)
             return
 
-        should_send_catalog = (
-            bool(get_catalog_link(business))
-            and wants_catalog(message_text)
-            and not is_price_question(message_text)
-            and not is_greeting_only(message_text)
-            and not is_auto_media_placeholder_message(message_text)
-            and not (media_type in {"photo", "video", "file", "audio"})
-            and not bool(media_match_context)
-            and not bool(media_reply_hint)
-        )
         if should_send_catalog:
             send_result = send_catalog_button(access_token, sender_id, business, reply_text)
-            saved_reply_text = clean_ai_reply_for_catalog(reply_text, business) + "\n[Catalog button sent]"
+            if send_result is not None and send_result.ok:
+                saved_reply_text = clean_ai_reply_for_catalog(reply_text, business) + "\n[Catalog button sent]"
+            else:
+                reply_text = catalog_link_reply(message_text, business)
+                send_result = send_dm(access_token, sender_id, reply_text, business, preserve_text=True)
+                saved_reply_text = reply_text
         else:
             send_result = send_dm(access_token, sender_id, reply_text, business)
             saved_reply_text = reply_text
