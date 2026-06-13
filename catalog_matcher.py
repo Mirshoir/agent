@@ -981,9 +981,10 @@ def build_product_match_reply(code: str, model: str, price: str, currency: str, 
     price = normalize_text(price)
     currency = normalize_text(currency)
     label = model or code or "shu model"
+    pack_info = "1 qop ichida 6 xil razmer bor: har bir razmerdan 10 tadan, jami 60 ta kiyim bo'ladi."
     if price:
-        return f"Model {label} narxi {price} {currency or '$'}. Qaysi razmer va nechta qop kerak?"
-    return f"Model {label} bo'yicha aniqroq rasm yoki kod yuboring. Qaysi razmer va nechta qop kerak?"
+        return f"Model {label} narxi {price} {currency or '$'}. {pack_info} Nechta qop kerak?"
+    return f"Model {label} bo'yicha aniqroq rasm yoki kod yuboring. {pack_info} Nechta qop kerak?"
 
 
 def build_manual_review_reply(user_text: str, analysis: CustomerImageAnalysis) -> str:
@@ -1008,9 +1009,10 @@ def build_model_verified_reply(model: str, code: str, price: str, currency: str)
     code = normalize_text(code)
     price = normalize_text(price)
     currency = normalize_text(currency) or "USD"
+    pack_info = "1 qop ichida 6 xil razmer bor: har bir razmerdan 10 tadan, jami 60 ta kiyim bo'ladi."
     if price:
-        return f"Model {model or code} narxi {price} {currency}. Qaysi razmer va nechta qop kerak?"
-    return f"Model {model or code} bo'yicha aniq narxni aytaman. Qaysi razmer va nechta qop kerak?"
+        return f"Model {model or code} narxi {price} {currency}. {pack_info} Nechta qop kerak?"
+    return f"Model {model or code} bo'yicha aniq narxni aytaman. {pack_info} Nechta qop kerak?"
 
 
 def build_model_price_ambiguous_reply(model: str) -> str:

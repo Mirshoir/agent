@@ -6689,6 +6689,8 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
         "top_score": top_score,
         "top_match_code": code,
         "top_match_model": model,
+        "top_match_price": price,
+        "top_match_currency": currency,
         "matches": matches,
     }
 
@@ -6872,10 +6874,12 @@ def analyze_media_for_sales_reply(media_url: str, user_text: str, media_type: st
 
     return {
         "context": "\n".join(context_lines),
-        "reply_hint": normalize_id(body.get("llm_reply")) or build_product_match_reply(code, model, price, currency, top_score),
+        "reply_hint": build_product_match_reply(code, model, price, currency, top_score),
         "top_score": top_score,
         "top_match_code": code,
         "top_match_model": model,
+        "top_match_price": price,
+        "top_match_currency": currency,
     }
 
 
