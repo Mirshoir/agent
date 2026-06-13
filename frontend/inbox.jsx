@@ -1653,7 +1653,8 @@ const WORKSPACE_TEXT = {
     promptFormula: 'Prompt formula', noBusinesses: 'No businesses returned from the backend.', connectInstagram: 'Connect Instagram', connectFacebook: 'Connect Facebook',
     unnamedBusiness: 'Unnamed business', active: 'active', paused: 'paused', botEnabled: 'Bot enabled', botEnabledHint: 'Controls automatic replies for this business.',
     instagramDms: 'Instagram DMs', instagramDmsHint: 'Automatic Instagram direct-message replies.', instagramComments: 'Instagram comments',
-    instagramDmTestAllowlist: 'Instagram DM test allowlist', instagramDmTestAllowlistHint: 'Optional. While filled, AI replies only to these Instagram usernames.', instagramDmTestAllowlistPlaceholder: '@mirshoir_mirolimzoda',
+    instagramDmTestMode: 'Instagram DM test mode', instagramDmTestModeHint: 'When on, AI replies only to usernames or IDs in the allowlist below.',
+    instagramDmTestAllowlist: 'Instagram DM test allowlist', instagramDmTestAllowlistHint: 'Used only when test mode is on. Add usernames or numeric sender IDs separated by commas.', instagramDmTestAllowlistPlaceholder: '@mirshoir_mirolimzoda',
     instagramCommentsHint: 'Automatic comment replies.', language: 'Language', tone: 'Tone', aiModel: 'AI model', provider: 'Provider', model: 'Model',
     customModel: 'Custom model', temperature: 'Temperature', maxTokens: 'Max tokens', apiKeys: 'API keys', key: 'key', saved: 'Saved', pasteApiKey: 'Paste API key',
     clear: 'Clear', promptReady: 'Prompt suggestion ready', promptLocal: 'Prompt suggestion generated locally', noBusinessLocal: 'Generated locally because no live business is selected.',
@@ -1737,7 +1738,8 @@ const WORKSPACE_TEXT = {
     promptFormula: 'Prompt formulasi', noBusinesses: 'Backenddan bizneslar kelmadi.', connectInstagram: 'Instagram ulash', connectFacebook: 'Facebook ulash',
     unnamedBusiness: 'Nomsiz biznes', active: 'faol', paused: 'pauza', botEnabled: 'Bot yoqilgan', botEnabledHint: 'Bu biznes uchun avtomatik javoblarni boshqaradi.',
     instagramDms: 'Instagram DM', instagramDmsHint: 'Instagram DM avtomatik javoblari.', instagramComments: 'Instagram kommentlar',
-    instagramDmTestAllowlist: 'Instagram DM test ro‘yxati', instagramDmTestAllowlistHint: 'Ixtiyoriy. To‘ldirilsa, AI faqat shu Instagram username’larga javob beradi.', instagramDmTestAllowlistPlaceholder: '@mirshoir_mirolimzoda',
+    instagramDmTestMode: 'Instagram DM test rejimi', instagramDmTestModeHint: 'Yoqilganida AI faqat pastdagi ro‘yxatdagi username yoki IDlarga javob beradi.',
+    instagramDmTestAllowlist: 'Instagram DM test ro‘yxati', instagramDmTestAllowlistHint: 'Faqat test rejimi yoqilganda ishlaydi. Username yoki numeric sender IDlarni vergul bilan kiriting.', instagramDmTestAllowlistPlaceholder: '@mirshoir_mirolimzoda',
     instagramCommentsHint: 'Kommentlarga avtomatik javoblar.', language: 'Til', tone: 'Ohang', aiModel: 'AI model', provider: 'Provider', model: 'Model',
     customModel: 'Custom model', temperature: 'Temperature', maxTokens: 'Max token', apiKeys: 'API kalitlar', key: 'kalit', saved: 'Saqlangan', pasteApiKey: 'API kalitni kiriting',
     clear: 'Tozalash', promptReady: 'Prompt tavsiyasi tayyor', promptLocal: 'Prompt tavsiyasi lokal yaratildi', noBusinessLocal: 'Live biznes tanlanmagani uchun lokal yaratildi.',
@@ -1821,7 +1823,8 @@ const WORKSPACE_TEXT = {
     promptFormula: 'Формула prompt', noBusinesses: 'Backend не вернул бизнесы.', connectInstagram: 'Подключить Instagram', connectFacebook: 'Подключить Facebook',
     unnamedBusiness: 'Без названия', active: 'активен', paused: 'пауза', botEnabled: 'Бот включен', botEnabledHint: 'Управляет автоответами для бизнеса.',
     instagramDms: 'Instagram DM', instagramDmsHint: 'Автоответы в Instagram DM.', instagramComments: 'Комментарии Instagram',
-    instagramDmTestAllowlist: 'Тестовый список Instagram DM', instagramDmTestAllowlistHint: 'Необязательно. Если заполнено, ИИ отвечает только этим Instagram username.', instagramDmTestAllowlistPlaceholder: '@mirshoir_mirolimzoda',
+    instagramDmTestMode: 'Тестовый режим Instagram DM', instagramDmTestModeHint: 'Когда включено, ИИ отвечает только username или ID из списка ниже.',
+    instagramDmTestAllowlist: 'Тестовый список Instagram DM', instagramDmTestAllowlistHint: 'Используется только когда тестовый режим включен. Укажите username или числовые sender ID через запятую.', instagramDmTestAllowlistPlaceholder: '@mirshoir_mirolimzoda',
     instagramCommentsHint: 'Автоответы на комментарии.', language: 'Язык', tone: 'Тон', aiModel: 'AI модель', provider: 'Провайдер', model: 'Модель',
     customModel: 'Своя модель', temperature: 'Temperature', maxTokens: 'Макс. токены', apiKeys: 'API ключи', key: 'ключ', saved: 'Сохранен', pasteApiKey: 'Вставьте API ключ',
     clear: 'Очистить', promptReady: 'Prompt готов', promptLocal: 'Prompt сгенерирован локально', noBusinessLocal: 'Создано локально, потому что live бизнес не выбран.',
@@ -3620,6 +3623,8 @@ function WorkspacePanel({
   onSelectBusiness,
   onRefresh,
   onBusinessSetting,
+  instagramDmTestMode,
+  onInstagramDmTestMode,
   instagramDmTestAllowlist,
   onInstagramDmTestAllowlist,
   promptSettings,
@@ -3962,6 +3967,13 @@ function WorkspacePanel({
             hint={w.instagramCommentsHint}
             checked={selectedBusiness.auto_reply_comments !== false}
             onChange={(enabled) => onBusinessSetting(selectedBusiness.id, { auto_reply_comments: enabled }, true)}
+            w={w}
+          />
+          <ToggleRow
+            label={w.instagramDmTestMode}
+            hint={w.instagramDmTestModeHint}
+            checked={instagramDmTestMode === true}
+            onChange={(enabled) => onInstagramDmTestMode?.(enabled, true)}
             w={w}
           />
           <label className="field-row">
@@ -5186,6 +5198,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
   const [leadReasons, setLeadReasons] = useState(() => readStoredObject(LEAD_REASONS_STORAGE_KEY));
   const [leadPrices, setLeadPrices] = useState(() => readStoredObject(LEAD_PRICES_STORAGE_KEY));
   const [needsHuman, setNeedsHuman] = useState(() => readStoredObject(NEEDS_HUMAN_STORAGE_KEY));
+  const [instagramDmTestMode, setInstagramDmTestMode] = useState(false);
   const [instagramDmTestAllowlist, setInstagramDmTestAllowlist] = useState('');
   const [clientOwners, setClientOwners] = useState(() => readStoredObject(CLIENT_OWNERS_STORAGE_KEY));
   const [manualClients, setManualClients] = useState(() => {
@@ -5510,6 +5523,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       } else {
         setInstagramDmTestAllowlist('');
       }
+      setInstagramDmTestMode(state.instagram_dm_test_mode_enabled === true || state.instagram_dm_test_mode_enabled === 'true');
       if (state.client_owners && typeof state.client_owners === 'object') {
         setClientOwners(state.client_owners);
         writeStoredObject(CLIENT_OWNERS_STORAGE_KEY, state.client_owners);
@@ -5579,6 +5593,15 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     if (persist) {
       queueWorkspaceStateSave({ instagram_dm_test_allowlist: next });
       showToast(next.trim() ? 'Instagram DM test allowlist saved' : 'Instagram DM test allowlist cleared');
+    }
+  };
+
+  const updateInstagramDmTestMode = (enabled, persist = false) => {
+    const next = enabled === true;
+    setInstagramDmTestMode(next);
+    if (persist) {
+      queueWorkspaceStateSave({ instagram_dm_test_mode_enabled: next });
+      showToast(next ? 'Instagram DM test mode enabled' : 'Instagram DM test mode disabled');
     }
   };
 
@@ -6844,6 +6867,8 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
             onSelectBusiness={setSelectedBusinessId}
             onRefresh={refreshWorkspace}
             onBusinessSetting={updateBusinessSetting}
+            instagramDmTestMode={instagramDmTestMode}
+            onInstagramDmTestMode={updateInstagramDmTestMode}
             instagramDmTestAllowlist={instagramDmTestAllowlist}
             onInstagramDmTestAllowlist={updateInstagramDmTestAllowlist}
             promptSettings={promptSettings}

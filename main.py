@@ -2603,9 +2603,12 @@ def instagram_dm_allowed_for_test_customer(
     recent_rows: list = None,
 ) -> bool:
     state = get_workspace_state(business_id)
+    if not normalize_bool(state.get("instagram_dm_test_mode_enabled"), False):
+        return True
+
     allowed = parse_instagram_test_allowlist(state.get("instagram_dm_test_allowlist"))
     if not allowed:
-        return True
+        return False
 
     candidates = instagram_dm_test_allowlist_candidates(
         sender_id=sender_id,
@@ -8428,23 +8431,64 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             updated_by="instagram_bot",
         )
 
-        allowed = parse_instagram_test_allowlist(
-            get_workspace_state(business.get("id")).get("instagram_dm_test_allowlist")
-        )
-        if allowed:
+        workspace_state = get_workspace_state(business.get("id"))
+        test_mode_enabled = normalize_bool(workspace_state.get("instagram_dm_test_mode_enabled"), False)
+        allowed = parse_instagram_test_allowlist(workspace_state.get("instagram_dm_test_allowlist"))
+        if test_mode_enabled:
             candidates = instagram_dm_test_allowlist_candidates(
                 sender_id=sender_id,
                 sender_profile=sender_profile,
                 customer_name=customer_display_name,
                 recent_rows=recent_lead_rows,
             )
-            log("Instagram DM test allowlist configured but not enforced", {
+            if not allowed:
+                log("Instagram DM reply skipped: test mode enabled without allowlist", {
+                    "business_id": business.get("id"),
+                    "customer_id": sender_id,
+                    "message_id": message_id,
+                    "customer_display_name": customer_display_name,
+                })
+                mark_instagram_processed_message(
+                    business.get("id"),
+                    message_id,
+                    sender_id,
+                    "dm",
+                    status="skipped_test_mode_empty_allowlist",
+                )
+                mark_processed(processed_message_ids, message_id)
+                return
+            if not allowed.intersection(candidates):
+                log("Instagram DM reply skipped: test mode allowlist mismatch", {
+                    "business_id": business.get("id"),
+                    "customer_id": sender_id,
+                    "message_id": message_id,
+                    "allowed": sorted(allowed),
+                    "candidates": sorted(candidates),
+                    "customer_display_name": customer_display_name,
+                })
+                mark_instagram_processed_message(
+                    business.get("id"),
+                    message_id,
+                    sender_id,
+                    "dm",
+                    status="skipped_test_allowlist",
+                )
+                mark_processed(processed_message_ids, message_id)
+                return
+            log("Instagram DM test mode allowlist matched", {
                 "business_id": business.get("id"),
                 "customer_id": sender_id,
                 "message_id": message_id,
                 "allowed": sorted(allowed),
                 "candidates": sorted(candidates),
                 "customer_display_name": customer_display_name,
+            })
+        elif allowed:
+            log("Instagram DM test allowlist configured while test mode is off", {
+                "business_id": business.get("id"),
+                "customer_id": sender_id,
+                "message_id": message_id,
+                "allowed": sorted(allowed),
             })
 
         if is_conversation_finished_message(message_text):
@@ -11856,6 +11900,7 @@ async def update_workspace_state_v2(
             "lead_prices",
             "needs_human",
             "handoff_tasks",
+            "instagram_dm_test_mode_enabled",
             "instagram_dm_test_allowlist",
             "manual_clients",
             "manual_leads",
@@ -11867,6 +11912,9 @@ async def update_workspace_state_v2(
         state = payload.get("state") or {}
         if not isinstance(state, dict):
             return JSONResponse({"error": "state must be an object"}, status_code=400)
+        test_mode_keys = {"instagram_dm_test_mode_enabled", "instagram_dm_test_allowlist"}
+        if test_mode_keys.intersection(state.keys()) and not can_manage_business(access, business_id):
+            return JSONResponse({"error": "Only owner/admin can update Instagram DM test settings"}, status_code=403)
 
         updated_keys = []
         for key, value in state.items():
@@ -11955,6 +12003,8 @@ async def api_update_combined_settings(
     allowed_workspace_keys = {
         "lead_stages",
         "lead_prices",
+        "instagram_dm_test_mode_enabled",
+        "instagram_dm_test_allowlist",
         "manual_clients",
         "manual_leads",
         "client_owners",
@@ -11963,6 +12013,9 @@ async def api_update_combined_settings(
         "operator_tasks",
     }
     if isinstance(workspace_state, dict) and workspace_state:
+        test_mode_keys = {"instagram_dm_test_mode_enabled", "instagram_dm_test_allowlist"}
+        if test_mode_keys.intersection(workspace_state.keys()) and not can_manage_business(access, business_id):
+            return JSONResponse({"status": "error", "message": "Only owner/admin can update Instagram DM test settings"}, status_code=403)
         updated_workspace = []
         for key, value in workspace_state.items():
             if key not in allowed_workspace_keys:
