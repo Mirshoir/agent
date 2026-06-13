@@ -3032,10 +3032,12 @@ def has_recent_outbound_text(
 
 def get_message_count(platform=None, business_ids=None):
     try:
+        if business_ids is not None and not business_ids:
+            return 0
         q = supabase.table("inbox_messages").select("id", count="exact")
         if platform:
             q = q.eq("platform", platform)
-        if business_ids:
+        if business_ids is not None:
             q = q.in_("business_id", business_ids)
         result = q.execute()
         return result.count or 0
@@ -3104,6 +3106,17 @@ def _safe_state_items(value) -> list:
     return value if isinstance(value, list) else []
 
 
+def _safe_rows(value) -> list:
+    return value if isinstance(value, list) else []
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def normalize_manual_lead(item: dict) -> dict:
     if not isinstance(item, dict):
         return {}
@@ -3122,6 +3135,8 @@ def normalize_manual_lead(item: dict) -> dict:
 
 def collect_sales_agent_lead_states(business_id: str) -> list[dict]:
     state = get_workspace_state(business_id)
+    if not isinstance(state, dict):
+        return []
     leads = []
     for key, value in state.items():
         if isinstance(key, str) and key.startswith("lead_state:") and isinstance(value, dict):
@@ -3148,7 +3163,7 @@ def load_ai_actions_for_metrics(business_ids: list[str], limit: int = 1000) -> l
         )
         if clean_ids:
             query = query.in_("business_id", clean_ids)
-        actions = query.execute().data or []
+        actions = _safe_rows(query.execute().data)
     except Exception:
         actions = []
 
@@ -3169,7 +3184,7 @@ def estimate_average_response_minutes(business_ids: list[str], limit: int = 1200
         )
         if clean_ids:
             query = query.in_("business_id", clean_ids)
-        rows = list(reversed(query.execute().data or []))
+        rows = list(reversed(_safe_rows(query.execute().data)))
     except Exception:
         return 0.0
 
@@ -3204,7 +3219,7 @@ def build_sales_agent_metrics(business_ids: list[str]) -> dict:
     clean_ids = [normalize_id(item) for item in (business_ids or []) if normalize_id(item)]
     leads = []
     for business_id in clean_ids:
-        leads.extend(collect_sales_agent_lead_states(business_id))
+        leads.extend(_safe_rows(collect_sales_agent_lead_states(business_id)))
 
     today = datetime.utcnow().date()
     stage_counts = {}
@@ -3217,10 +3232,10 @@ def build_sales_agent_metrics(business_ids: list[str]) -> dict:
         for lead in leads
         if normalize_phone_number(lead.get("phone"))
     }
-    actions = load_ai_actions_for_metrics(clean_ids)
+    actions = _safe_rows(load_ai_actions_for_metrics(clean_ids))
     action_count = len(actions)
     handoff_actions = [action for action in actions if action.get("handoff_required")]
-    low_confidence = [action for action in actions if float(action.get("confidence") or 0) and float(action.get("confidence") or 0) < 0.45]
+    low_confidence = [action for action in actions if 0 < _safe_float(action.get("confidence")) < 0.45]
     manager_corrections = [action for action in actions if action.get("manager_corrected")]
 
     new_today = 0
@@ -10922,18 +10937,17 @@ async def get_stats_v2(
             return {'status': 'ok', 'data': cached.get("data", {})}
 
         if access.get("is_admin"):
-            businesses = get_all_businesses()
+            businesses = _safe_rows(get_all_businesses())
         else:
             businesses = []
             if scoped_ids:
-                businesses = (
+                businesses = _safe_rows(
                     supabase.table("businesses")
                     .select("id,bot_enabled")
                     .in_("id", scoped_ids)
                     .order("created_at", desc=True)
                     .execute()
                     .data
-                    or []
                 )
 
         payload = {
