@@ -7505,7 +7505,7 @@ def load_instagram_message_media_reference(business_id: str, customer_id: str, m
     try:
         result = (
             supabase.table("inbox_messages")
-            .select("media_url,media_type,raw_payload")
+            .select("media_url,media_type,raw_payload,post_image_url,post_permalink,post_media_type")
             .eq("business_id", business_id)
             .eq("platform", "instagram")
             .eq("customer_id", customer_id)
@@ -7522,6 +7522,9 @@ def load_instagram_message_media_reference(business_id: str, customer_id: str, m
         if not media_url:
             media_url, payload_media_type = extract_instagram_media_url_from_payload(row.get("raw_payload") or {})
             media_type = media_type or payload_media_type
+        if not media_url:
+            media_url = normalize_id(row.get("post_image_url") or row.get("post_permalink"))
+            media_type = media_type or normalize_id(row.get("post_media_type")).lower()
         if not media_url:
             return {}
         return {"media_url": media_url, "media_type": media_type or "photo"}
@@ -7543,7 +7546,7 @@ def load_recent_instagram_media_reference(
     try:
         result = (
             supabase.table("inbox_messages")
-            .select("external_message_id,created_at,media_url,media_type,raw_payload")
+            .select("external_message_id,created_at,media_url,media_type,raw_payload,post_image_url,post_permalink,post_media_type")
             .eq("business_id", business_id)
             .eq("platform", "instagram")
             .eq("channel", "dm")
@@ -7575,6 +7578,9 @@ def load_recent_instagram_media_reference(
             if not media_url:
                 media_url, payload_media_type = extract_instagram_media_url_from_payload(row.get("raw_payload") or {})
                 media_type = media_type or payload_media_type
+            if not media_url:
+                media_url = normalize_id(row.get("post_image_url") or row.get("post_permalink"))
+                media_type = media_type or normalize_id(row.get("post_media_type")).lower()
             if not media_url:
                 continue
             if media_type not in {"photo", "video", "file"}:
@@ -8419,6 +8425,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         resolved_media_match = {}
         verified_exact_media_match = False
         sales_agent_decision = {}
+        media_followup_requested = should_reuse_recent_media_match(message_text or "", media_type or "", business)
 
         if post_knowledge_context:
             media_match_context = post_knowledge_context
@@ -8476,7 +8483,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                     "media_type": media_type,
                     "source_url_host": urlparse(matcher_source_url).netloc if matcher_source_url else "",
                 })
-        elif should_reuse_recent_media_match(message_text or "", media_type or "", business):
+        elif media_followup_requested:
             cached_match = load_recent_instagram_media_match(business_id=business_id, customer_id=sender_id)
             if cached_match:
                 recent_media_context_found = True
@@ -8611,6 +8618,19 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                             "message_id": message_id,
                             "media_type": recent_media_type,
                         })
+
+            if not media_match_context and not media_reply_hint and not recent_media_context_found and is_price_question(message_text):
+                media_reply_hint = product_media_price_fallback_reply(message_text, business)
+                media_match_context = (
+                    "The customer is asking for the price after recent product context, "
+                    "but no usable recent media reference or verified catalog match was found. "
+                    "Reply with a short helpful fallback and ask for a clearer photo or model code."
+                )
+                force_direct_media_reply = True
+                log("Instagram DM price follow-up fallback without recent media", {
+                    "customer_id": sender_id,
+                    "message_id": message_id,
+                })
 
         sales_agent_decision = run_sales_agent_for_inbound(
             business=business,
