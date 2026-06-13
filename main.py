@@ -1325,6 +1325,170 @@ def fetch_instagram_media_info(access_token: str, post_id: str, business: dict =
     return {"post_permalink": f"https://www.instagram.com/p/{post_id}/", "post_image_url": "", "post_media_type": ""}
 
 
+def normalize_instagram_post_url(value: str) -> str:
+    value = normalize_id(unwrap_meta_redirect_url(value))
+    if not value:
+        return ""
+    try:
+        parsed = urlparse(value)
+        host = normalize_id(parsed.netloc).lower()
+        if "instagram.com" not in host:
+            return value.lower().rstrip("/")
+        path = re.sub(r"/+", "/", parsed.path or "/").rstrip("/")
+        return f"https://www.instagram.com{path}".lower()
+    except Exception:
+        return value.lower().split("?")[0].rstrip("/")
+
+
+def instagram_post_shortcode(value: str) -> str:
+    url = normalize_instagram_post_url(value)
+    match = re.search(r"/(?:p|reel|tv)/([^/?#]+)/?", url)
+    return normalize_id(match.group(1)).lower() if match else ""
+
+
+def normalize_instagram_post_item(item: dict) -> dict:
+    item = item if isinstance(item, dict) else {}
+    post_id = normalize_id(item.get("post_id") or item.get("id"))
+    permalink = normalize_id(item.get("permalink") or item.get("post_permalink"))
+    return {
+        "post_id": post_id,
+        "shortcode": normalize_id(item.get("shortcode")) or instagram_post_shortcode(permalink),
+        "permalink": permalink,
+        "caption": normalize_id(item.get("caption")),
+        "media_type": normalize_id(item.get("media_type")).upper(),
+        "media_product_type": normalize_id(item.get("media_product_type")),
+        "media_url": normalize_id(item.get("media_url")),
+        "thumbnail_url": normalize_id(item.get("thumbnail_url") or item.get("post_image_url")),
+        "timestamp": normalize_id(item.get("timestamp")),
+        "like_count": int(_safe_float(item.get("like_count"), 0)),
+        "comments_count": int(_safe_float(item.get("comments_count"), 0)),
+        "extra_info": normalize_id(item.get("extra_info") or item.get("knowledge")),
+    }
+
+
+def instagram_post_match_keys(item: dict) -> list[str]:
+    item = normalize_instagram_post_item(item)
+    keys = [
+        normalize_id(item.get("post_id")),
+        normalize_id(item.get("shortcode")),
+        normalize_instagram_post_url(item.get("permalink")),
+        normalize_instagram_post_url(item.get("media_url")),
+        normalize_instagram_post_url(item.get("thumbnail_url")),
+    ]
+    return [key for key in dict.fromkeys(keys) if key]
+
+
+def get_instagram_post_items(business_id: str) -> list[dict]:
+    state = get_workspace_state(business_id)
+    raw = state.get("instagram_posts")
+    if isinstance(raw, dict):
+        raw = raw.get("items") if isinstance(raw.get("items"), list) else []
+    if not isinstance(raw, list):
+        return []
+    return [normalize_instagram_post_item(item) for item in raw if isinstance(item, dict)]
+
+
+def save_instagram_post_items(business_id: str, items: list[dict], updated_by: str = "") -> list[dict]:
+    normalized = [normalize_instagram_post_item(item) for item in (items or []) if isinstance(item, dict)]
+    deduped = {}
+    key_index = {}
+    for item in normalized:
+        keys = instagram_post_match_keys(item)
+        key = next((key_index.get(candidate) for candidate in keys if key_index.get(candidate)), keys[0] if keys else "")
+        if not key:
+            continue
+        existing = deduped.get(key, {})
+        merged = {**existing, **item}
+        if not normalize_id(item.get("extra_info")) and normalize_id(existing.get("extra_info")):
+            merged["extra_info"] = normalize_id(existing.get("extra_info"))
+        deduped[key] = merged
+        for candidate in keys:
+            key_index[candidate] = key
+    rows = list(deduped.values())
+    rows.sort(key=lambda item: normalize_id(item.get("timestamp")), reverse=True)
+    upsert_workspace_state(business_id, "instagram_posts", {"items": rows[:500]}, updated_by=updated_by)
+    return rows[:500]
+
+
+def match_instagram_post_knowledge(business_id: str, post_id: str = "", permalink: str = "", media_url: str = "") -> dict:
+    post_id = normalize_id(post_id)
+    normalized_urls = {
+        normalize_instagram_post_url(permalink),
+        normalize_instagram_post_url(media_url),
+    }
+    shortcodes = {instagram_post_shortcode(url) for url in normalized_urls if url}
+    for item in get_instagram_post_items(business_id):
+        item_id = normalize_id(item.get("post_id"))
+        item_url = normalize_instagram_post_url(item.get("permalink"))
+        item_shortcode = normalize_id(item.get("shortcode")) or instagram_post_shortcode(item_url)
+        if post_id and item_id and post_id == item_id:
+            return item
+        if item_url and item_url in normalized_urls:
+            return item
+        if item_shortcode and item_shortcode in shortcodes:
+            return item
+    return {}
+
+
+def build_instagram_post_knowledge_context(post: dict) -> str:
+    post = post if isinstance(post, dict) else {}
+    extra = normalize_id(post.get("extra_info"))
+    caption = normalize_id(post.get("caption"))
+    permalink = normalize_id(post.get("permalink"))
+    if not extra and not caption:
+        return ""
+    lines = [
+        "Post-specific knowledge for the forwarded Instagram post/reel:",
+        "- Use this post knowledge first when replying about this forwarded post/reel.",
+        "- Do not invent price, size, fabric, availability, or delivery details beyond this post knowledge and business knowledge.",
+    ]
+    if extra:
+        lines.append(f"Owner notes: {extra}")
+    if caption:
+        lines.append(f"Post caption: {caption[:1200]}")
+    if permalink:
+        lines.append(f"Post link: {permalink}")
+    return "\n".join(lines)
+
+
+def fetch_instagram_posts_from_graph(business: dict, max_items: int = 100) -> list[dict]:
+    access_token = get_business_access_token(business)
+    ig_id = normalize_id(
+        business.get("instagram_business_id")
+        or business.get("ig_user_id")
+        or business.get("instagram_user_id")
+    )
+    if not access_token or not ig_id:
+        return []
+    max_items = max(1, min(int(max_items or 100), 300))
+    fields = "id,caption,media_type,media_product_type,media_url,thumbnail_url,permalink,timestamp,like_count,comments_count"
+    rows = []
+    urls = [
+        f"{GRAPH_FACEBOOK}/{ig_id}/media",
+        f"{GRAPH_INSTAGRAM}/{ig_id}/media",
+    ]
+    for first_url in urls:
+        url = first_url
+        params = {"fields": fields, "limit": min(100, max_items), "access_token": access_token}
+        rows = []
+        try:
+            while url and len(rows) < max_items:
+                res = requests.get(url, params=params, timeout=30)
+                body = safe_json(res)
+                if not res.ok:
+                    raise RuntimeError(normalize_id(body.get("error", {}).get("message") if isinstance(body.get("error"), dict) else body))
+                rows.extend([normalize_instagram_post_item(item) for item in (body.get("data") or []) if isinstance(item, dict)])
+                next_url = ((body.get("paging") or {}).get("next") or "")
+                url = next_url if next_url and len(rows) < max_items else ""
+                params = {}
+            if rows:
+                return rows[:max_items]
+        except Exception as exc:
+            log("Could not import Instagram posts", {"url": first_url, "error": str(exc)})
+            continue
+    return []
+
+
 def encode_comment_scope(customer_id: str, post_id: str) -> str:
     """
     Canonical Instagram comment-thread scope.
@@ -8111,7 +8275,15 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             mark_processed(processed_message_ids, message_id)
             return
 
-        if is_forwarded_instagram_share_placeholder(message_text):
+        post_knowledge = match_instagram_post_knowledge(
+            business_id=business.get("id"),
+            post_id=share_asset_id,
+            permalink=post_permalink,
+            media_url=media_url,
+        )
+        post_knowledge_context = build_instagram_post_knowledge_context(post_knowledge)
+
+        if is_forwarded_instagram_share_placeholder(message_text) and not post_knowledge_context:
             log("Instagram DM forwarded share saved without auto-reply", {
                 "customer_id": sender_id,
                 "message_id": message_id,
@@ -8158,6 +8330,16 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         verified_exact_media_match = False
         sales_agent_decision = {}
 
+        if post_knowledge_context:
+            media_match_context = post_knowledge_context
+            media_reply_hint = ""
+            log("Instagram DM post knowledge matched", {
+                "customer_id": sender_id,
+                "message_id": message_id,
+                "post_id": normalize_id(post_knowledge.get("post_id")),
+                "shortcode": normalize_id(post_knowledge.get("shortcode")),
+            })
+
         if matcher_source_url and media_type in {"photo", "video", "file"}:
             log("Instagram DM media matcher request", {
                 "customer_id": sender_id,
@@ -8174,7 +8356,8 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             if media_match:
                 resolved_media_match = media_match
                 verified_exact_media_match = is_verified_media_match(media_match)
-                media_match_context = media_match.get("context", "")
+                matcher_context = normalize_id(media_match.get("context"))
+                media_match_context = "\n".join([part for part in [post_knowledge_context, matcher_context] if part]).strip()
                 media_reply_hint = media_match.get("reply_hint", "")
                 remember_instagram_media_match(
                     business_id=business_id,
@@ -9642,6 +9825,147 @@ async def api_video_analyzer_analyze(request: Request):
         if VideoAnalyzerError is not None and isinstance(exc, VideoAnalyzerError):
             return JSONResponse({"status": "error", "message": exc.message}, status_code=exc.status_code)
         return JSONResponse({"status": "error", "message": f"Video analyzer error: {exc}"}, status_code=500)
+
+
+@app.get("/api/v2/instagram-posts")
+async def api_instagram_posts(
+    business_id: str = "",
+    refresh: bool = False,
+    limit: int = 300,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    business_id = normalize_id(business_id)
+    if not business_id:
+        return JSONResponse({"status": "error", "message": "Missing business_id"}, status_code=400)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+
+    rows = get_instagram_post_items(business_id)
+    if refresh:
+        business = get_business_by_id(business_id) or {}
+        imported = fetch_instagram_posts_from_graph(business, max_items=limit)
+        if imported:
+            existing = {}
+            for row in rows:
+                for key in instagram_post_match_keys(row):
+                    existing[key] = row
+            merged = []
+            for item in imported:
+                old = next((existing.get(key) for key in instagram_post_match_keys(item) if existing.get(key)), {})
+                merged.append({**item, "extra_info": normalize_id(old.get("extra_info"))})
+            rows = save_instagram_post_items(business_id, merged, updated_by=access.get("email", ""))
+    return {"status": "ok", "count": len(rows[:limit]), "data": rows[:limit]}
+
+
+@app.post("/api/v2/instagram-posts/import")
+async def api_import_instagram_posts(
+    request: Request,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    payload = await request.json()
+    business_id = normalize_id(payload.get("business_id"))
+    max_items = max(1, min(int(payload.get("max_items") or 100), 300))
+    if not business_id:
+        return JSONResponse({"status": "error", "message": "Missing business_id"}, status_code=400)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+
+    business = get_business_by_id(business_id) or {}
+    existing_rows = get_instagram_post_items(business_id)
+    imported = fetch_instagram_posts_from_graph(business, max_items=max_items)
+    if not imported:
+        return {
+            "status": "ok",
+            "message": "No posts imported. Meta permissions may still be in tester/app-review mode.",
+            "count": len(existing_rows),
+            "data": existing_rows[:max_items],
+        }
+
+    existing_by_key = {}
+    for item in existing_rows:
+        for key in instagram_post_match_keys(item):
+            existing_by_key[key] = item
+    merged_rows = list(existing_rows)
+    for item in imported:
+        old = next((existing_by_key.get(key) for key in instagram_post_match_keys(item) if existing_by_key.get(key)), {})
+        merged_rows.append({**item, "extra_info": normalize_id(old.get("extra_info"))})
+    rows = save_instagram_post_items(business_id, merged_rows, updated_by=access.get("email", ""))
+    return {"status": "ok", "count": len(rows[:max_items]), "data": rows[:max_items]}
+
+
+@app.post("/api/v2/instagram-posts/extra-info")
+async def api_instagram_post_extra_info(
+    request: Request,
+    authorization: str = Header(default=""),
+    x_dashboard_secret: str = Header(default=""),
+):
+    access = resolve_dashboard_access(authorization=authorization, x_dashboard_secret=x_dashboard_secret)
+    if not access:
+        return JSONResponse({"status": "error", "message": "Unauthorized"}, status_code=401)
+    payload = await request.json()
+    business_id = normalize_id(payload.get("business_id"))
+    post_id = normalize_id(payload.get("post_id"))
+    permalink = normalize_id(payload.get("permalink") or payload.get("post_permalink"))
+    caption = normalize_id(payload.get("caption"))
+    media_type = normalize_id(payload.get("media_type"))
+    extra_info = normalize_id(payload.get("extra_info"))
+    if not business_id or not (post_id or permalink):
+        return JSONResponse({"status": "error", "message": "business_id and post_id/permalink are required"}, status_code=400)
+    if not can_access_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Forbidden"}, status_code=403)
+    if not can_manage_business(access, business_id):
+        return JSONResponse({"status": "error", "message": "Only owner/admin can update post knowledge"}, status_code=403)
+
+    normalized_permalink = normalize_instagram_post_url(permalink)
+    shortcode = instagram_post_shortcode(normalized_permalink)
+    post_key = post_id or shortcode or normalized_permalink
+    rows = get_instagram_post_items(business_id)
+    found = False
+    next_rows = []
+    for item in rows:
+        item_matches = (
+            (post_id and normalize_id(item.get("post_id")) == post_id)
+            or (normalized_permalink and normalize_instagram_post_url(item.get("permalink")) == normalized_permalink)
+            or (shortcode and normalize_id(item.get("shortcode")) == shortcode)
+        )
+        if item_matches:
+            item = {
+                **item,
+                "post_id": normalize_id(item.get("post_id")) or post_key,
+                "permalink": normalize_id(item.get("permalink")) or normalized_permalink,
+                "shortcode": normalize_id(item.get("shortcode")) or shortcode,
+                "caption": caption or normalize_id(item.get("caption")),
+                "media_type": media_type or normalize_id(item.get("media_type")),
+                "extra_info": extra_info,
+            }
+            found = True
+        next_rows.append(item)
+    if not found:
+        next_rows.append(normalize_instagram_post_item({
+            "post_id": post_key,
+            "shortcode": shortcode,
+            "permalink": normalized_permalink,
+            "caption": caption,
+            "media_type": media_type,
+            "extra_info": extra_info,
+        }))
+    saved = save_instagram_post_items(business_id, next_rows, updated_by=access.get("email", ""))
+    return {
+        "status": "ok",
+        "data": next((
+            item for item in saved
+            if normalize_id(item.get("post_id")) == post_key
+            or (normalized_permalink and normalize_instagram_post_url(item.get("permalink")) == normalized_permalink)
+        ), {}),
+    }
 
 
 @app.get("/api/catalog/embeddings/status")

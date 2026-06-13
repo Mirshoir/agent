@@ -2239,12 +2239,15 @@ function PostsWorkspace({
   onImportPosts,
   onRefreshPosts,
   onSaveExtraInfo,
+  onCreatePostKnowledge,
   selectedBusiness,
   onToast,
   w = WORKSPACE_TEXT.en,
 }) {
   const selected = posts.find(item => item.post_id === selectedPostId) || posts[0] || null;
   const [draft, setDraft] = useState('');
+  const [manualLink, setManualLink] = useState('');
+  const [manualInfo, setManualInfo] = useState('');
 
   useEffect(() => {
     setDraft(selected?.extra_info || '');
@@ -2273,6 +2276,31 @@ function PostsWorkspace({
         onToast={onToast}
         w={w}
       />
+
+      <div className="post-details manual-post-knowledge">
+        <label className="field-row prompt-row">
+          <span>Post/Reel link</span>
+          <input value={manualLink} onChange={(e) => setManualLink(e.target.value)} placeholder="https://www.instagram.com/reel/..." />
+        </label>
+        <label className="field-row prompt-row">
+          <span>{w.postExtraInfo}</span>
+          <textarea rows={3} value={manualInfo} onChange={(e) => setManualInfo(e.target.value)} placeholder="Model, price, sizes, fabric, delivery note..." />
+        </label>
+        <div className="panel-actions">
+          <button
+            disabled={!manualLink.trim() || !manualInfo.trim()}
+            onClick={async () => {
+              const saved = await onCreatePostKnowledge?.(manualLink.trim(), manualInfo.trim());
+              if (saved) {
+                setManualLink('');
+                setManualInfo('');
+              }
+            }}
+          >
+            Save post knowledge
+          </button>
+        </div>
+      </div>
 
       {!loading && !error && posts.length > 0 && (
         <div className="posts-grid">
@@ -3581,6 +3609,7 @@ function WorkspacePanel({
   onImportPosts,
   onRefreshPosts,
   onSavePostInfo,
+  onCreatePostKnowledge,
   growthAnalyzer,
   growthAnalyzerLoading,
   growthAnalyzerError,
@@ -3688,6 +3717,7 @@ function WorkspacePanel({
           onImportPosts={onImportPosts}
           onRefreshPosts={onRefreshPosts}
           onSaveExtraInfo={onSavePostInfo}
+          onCreatePostKnowledge={onCreatePostKnowledge}
           selectedBusiness={selectedBusiness}
           onToast={onToast}
           w={w}
@@ -5412,6 +5442,36 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
     }
   };
 
+  const createInstagramPostKnowledge = async (permalink, extraInfo) => {
+    const business = resolveBusinessId(selectedBusinessId);
+    const cleanPermalink = String(permalink || '').trim();
+    if (!business || !cleanPermalink || !String(extraInfo || '').trim()) return null;
+    try {
+      const response = await API.postJson('/api/v2/instagram-posts/extra-info', {
+        business_id: business,
+        permalink: cleanPermalink,
+        extra_info: extraInfo || '',
+      });
+      const saved = response?.data || {};
+      if (saved?.post_id) {
+        setPosts(items => {
+          const exists = items.some(item => item.post_id === saved.post_id);
+          return exists
+            ? items.map(item => item.post_id === saved.post_id ? { ...item, ...saved } : item)
+            : [saved, ...items];
+        });
+        setSelectedPostId(saved.post_id);
+      } else {
+        await loadInstagramPosts(business, { silent: true });
+      }
+      showToast((WORKSPACE_TEXT[lang] || WORKSPACE_TEXT.en).postSaved);
+      return saved || {};
+    } catch (e) {
+      showToast(e.message || 'Could not save post knowledge');
+      return null;
+    }
+  };
+
   const loadWorkspaceState = async (businessId = selectedBusinessId) => {
     const business = String(businessId || '').trim();
     if (!business || !liveModeRef.current) return;
@@ -6773,6 +6833,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
             onImportPosts={() => importInstagramPosts(selectedBusinessId)}
             onRefreshPosts={() => loadInstagramPosts(selectedBusinessId, { refresh: true })}
             onSavePostInfo={saveInstagramPostInfo}
+            onCreatePostKnowledge={createInstagramPostKnowledge}
             growthAnalyzer={growthAnalyzer}
             growthAnalyzerLoading={growthAnalyzerLoading}
             growthAnalyzerError={growthAnalyzerError}
