@@ -10872,6 +10872,8 @@ async def get_conversations_v2(
         business_id: str = "",
         include_raw: bool = False,
         fast: bool = False,
+        history_days: int = 0,
+        fetch_limit: int = 0,
         no_cache: bool = False,
         authorization: str = Header(default=""),
         x_dashboard_secret: str = Header(default=""),
@@ -10901,6 +10903,8 @@ async def get_conversations_v2(
                 "search": normalize_id(search).strip().lower(),
                 "include_raw": bool(include_raw),
                 "fast": bool(fast),
+                "history_days": int(history_days or 0),
+                "fetch_limit": int(fetch_limit or 0),
             },
             sort_keys=True,
         )
@@ -10932,9 +10936,12 @@ async def get_conversations_v2(
             query = query.eq("platform", platform)
 
         if fast:
-            recent_cutoff = (datetime.utcnow() - timedelta(days=CONVERSATIONS_FAST_LOOKBACK_DAYS)).strftime("%Y-%m-%dT00:00:00Z")
+            requested_days = int(history_days or CONVERSATIONS_FAST_LOOKBACK_DAYS)
+            requested_days = max(7, min(365, requested_days))
+            recent_cutoff = (datetime.utcnow() - timedelta(days=requested_days)).strftime("%Y-%m-%dT00:00:00Z")
             query = query.gte("created_at", recent_cutoff)
-            target_rows = CONVERSATIONS_FAST_FETCH_LIMIT
+            requested_limit = int(fetch_limit or CONVERSATIONS_FAST_FETCH_LIMIT)
+            target_rows = max(80, min(5000, requested_limit))
         else:
             target_rows = CONVERSATIONS_MAX_FETCH_ROWS
 

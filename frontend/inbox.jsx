@@ -10,6 +10,8 @@ const IS_LOCALHOST = ['localhost', '127.0.0.1'].includes(window.location.hostnam
 
 const ENV_API_BASE = import.meta.env.VITE_API_URL || 'https://agent-1-xi6h.onrender.com';
 const ENV_DASHBOARD_SECRET = import.meta.env.VITE_DASHBOARD_SECRET || '';
+const ENV_INBOX_HISTORY_DAYS = Math.max(7, Math.min(365, Number(import.meta.env.VITE_INBOX_HISTORY_DAYS || 365)));
+const ENV_INBOX_FETCH_LIMIT = Math.max(80, Math.min(5000, Number(import.meta.env.VITE_INBOX_FETCH_LIMIT || 3000)));
 
 const urlParams = new URLSearchParams(window.location.search);
 if (urlParams.get('clear_auth')) {
@@ -5875,7 +5877,7 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
       if (sideLoad || !businessesRef.current.length) {
         await loadBusinesses({ silent: true, ownerEmailOverride });
       }
-      const data = await API.get('/api/v2/conversations?no_cache=1&fast=1', { timeoutMs: 25000 });
+      const data = await API.get(`/api/v2/conversations?no_cache=1&fast=1&history_days=${ENV_INBOX_HISTORY_DAYS}&fetch_limit=${ENV_INBOX_FETCH_LIMIT}`, { timeoutMs: 25000 });
       const selectedCurrent = selectedIdRef.current;
       const ownerScoped = normalizeOwnerEmail(ownerEmailOverride || ownerEmail);
       const allowedBusinessIds = new Set((businessesRef.current || []).map(row => row.id).filter(Boolean));
