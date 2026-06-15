@@ -5574,6 +5574,42 @@ def build_generic_wholesale_intro_reply(user_text: str, business: dict = None) -
     return base + (" Xohlasangiz, katalogni ham yuboraman." if has_catalog else "")
 
 
+def wants_purchase_instruction(text: str) -> bool:
+    s = normalize_id(text).lower()
+    if not s:
+        return False
+    buy_markers = [
+        "sotib ol", "sotvol", "sotv ol", "qanday qilib", "qandayqilib", "qanaqa qilib",
+        "buyurtma bersam", "zakaz qilsam", "zakaz ber", "olish uchun", "olmoqchiman",
+        "qanday olsam", "qanday xarid", "xarid qil", "how to buy", "how can i buy",
+        "how do i order", "place order", "purchase", "купить", "заказать", "как купить",
+        "как заказать", "қалай сатып", "қалай заказ",
+    ]
+    product_markers = [
+        "tovar", "mahsulot", "model", "kiyim", "katalog", "sizlarda", "sizdan",
+        "product", "item", "goods", "товар", "модель", "продукт", "тауар",
+    ]
+    has_buy_intent = any(marker in s for marker in buy_markers)
+    has_product_context = any(marker in s for marker in product_markers) or has_strong_business_sales_context(s)
+    return has_buy_intent and has_product_context
+
+
+def purchase_instruction_reply(user_text: str, business: dict = None) -> str:
+    has_catalog = bool(get_catalog_link(business or {}))
+    lang = detect_customer_language(user_text)
+    if lang == "en":
+        catalog_part = "You can choose from the catalog or send a screenshot/model code." if has_catalog else "Send a screenshot or model code."
+        return f"{catalog_part} I will confirm price and availability, then you leave your phone number so the manager can confirm the order."
+    if lang == "ru":
+        catalog_part = "Выберите товар из каталога или отправьте скрин/код модели." if has_catalog else "Отправьте скрин или код модели."
+        return f"{catalog_part} Я уточню цену и наличие, затем оставьте номер телефона, чтобы менеджер подтвердил заказ."
+    if lang == "kk":
+        catalog_part = "Каталогтан таңдаңыз немесе скрин/модель кодын жіберіңіз." if has_catalog else "Скрин немесе модель кодын жіберіңіз."
+        return f"{catalog_part} Бағасы мен бар-жоғын нақтылаймын, кейін тапсырысты растау үшін телефон нөміріңізді қалдырыңыз."
+    catalog_part = "Katalogdan tanlang yoki rasm/model kodini yuboring." if has_catalog else "Rasm yoki model kodini yuboring."
+    return f"{catalog_part} Men narx va borligini aniqlab beraman, keyin buyurtmani tasdiqlash uchun telefon raqamingizni qoldirasiz."
+
+
 def product_media_price_fallback_reply(user_text: str, business: dict = None) -> str:
     lang = detect_customer_language(user_text)
     if lang == "en":
@@ -8228,6 +8264,9 @@ def get_ai_reply(
     lead_state: dict = None,
 ):
     try:
+        if wants_purchase_instruction(user_text):
+            return purchase_instruction_reply(user_text, business)
+
         if wants_business_phone_number(user_text):
             direct_phone_reply = sales_phone_reply(user_text, business)
             if direct_phone_reply:
@@ -9127,11 +9166,44 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             media_match = selected_media_match
             if media_match:
                 media_match["media_matches"] = merge_media_matches_for_memory(verified_media_matches, media_match.get("media_matches") or [])
+                if asks_about_multiple_media_products(message_text):
+                    cached_album_match = load_recent_instagram_media_match(business_id=business_id, customer_id=sender_id)
+                    if cached_album_match:
+                        media_match["media_matches"] = merge_media_matches_for_memory(
+                            media_match.get("media_matches") or [],
+                            [cached_album_match],
+                            cached_album_match.get("media_matches") or [],
+                        )
+                    if len(media_match.get("media_matches") or []) < 2:
+                        matcher_context = normalize_id(media_match.get("context"))
+                        remember_instagram_media_match(
+                            business_id=business_id,
+                            customer_id=sender_id,
+                            context="\n".join([part for part in [post_knowledge_context, matcher_context] if part]).strip(),
+                            reply_hint="",
+                            top_match_code=media_match.get("top_match_code", ""),
+                            top_match_model=media_match.get("top_match_model", ""),
+                            top_match_price=media_match.get("top_match_price", ""),
+                            top_match_currency=media_match.get("top_match_currency", ""),
+                            match_strategy=media_match.get("match_strategy", ""),
+                            top_score=media_match.get("top_score", 0.0),
+                            media_matches=media_match.get("media_matches") or [],
+                        )
+                        log("Instagram DM cached partial multi-media match without single reply", {
+                            "customer_id": sender_id,
+                            "message_id": message_id,
+                            "matched_count": len(media_match.get("media_matches") or []),
+                        })
+                        mark_instagram_processed_message(business.get("id"), message_id, sender_id, "dm", status="cached_partial_multi_media_match")
+                        mark_processed(processed_message_ids, message_id)
+                        return
                 resolved_media_match = media_match
                 verified_exact_media_match = is_verified_media_match(media_match)
                 matcher_context = normalize_id(media_match.get("context"))
                 media_match_context = "\n".join([part for part in [post_knowledge_context, matcher_context] if part]).strip()
                 media_reply_hint = media_match.get("reply_hint", "")
+                if len(media_match.get("media_matches") or []) >= 2:
+                    media_reply_hint = ""
                 remember_instagram_media_match(
                     business_id=business_id,
                     customer_id=sender_id,
