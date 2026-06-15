@@ -7751,6 +7751,28 @@ def asks_about_multiple_media_products(text: str) -> bool:
     return any(marker in low for marker in markers)
 
 
+def extract_each_media_meshok_count(text: str) -> int | None:
+    low = normalize_id(text).lower()
+    if not low:
+        return None
+    each_markers = [
+        "har bir", "har biridan", "har bittasidan", "har bittadan", "har modeldan",
+        "ikkalasidan", "ikkalasi", "hammasidan", "each", "each one", "both", "all of them",
+        "кажд", "оба", "все", "әр", "екеуінен",
+    ]
+    if not any(marker in low for marker in each_markers):
+        return None
+    match = re.search(r"(\d+)\s*(?:qop|qopdan|meshok|мешок|sack|bag)\b", low)
+    if match:
+        try:
+            return max(1, int(match.group(1)))
+        except Exception:
+            return 1
+    if any(marker in low for marker in ["qop", "meshok", "мешок", "sack", "bag"]):
+        return 1
+    return None
+
+
 def media_match_label(media_match: dict) -> str:
     return normalize_id(media_match.get("top_match_model")) or normalize_id(media_match.get("top_match_code")) or "shu model"
 
@@ -7775,6 +7797,42 @@ def build_multi_media_match_reply(user_text: str, media_matches: list[dict], bus
     if len(matches) < 2:
         return ""
     lang = detect_customer_language(user_text) or "uz"
+    each_meshok_count = extract_each_media_meshok_count(user_text)
+    if each_meshok_count is not None:
+        items_per_meshok = configured_items_per_meshok(business)
+        total_sum = 0.0
+        currency = ""
+        lines = []
+        for idx, match in enumerate(matches[:4], start=1):
+            unit_price = _parse_numeric_price(match.get("top_match_price", ""))
+            if unit_price is None:
+                continue
+            match_currency = normalize_id(match.get("top_match_currency")) or "USD"
+            currency = currency or match_currency
+            label = media_match_label(match)
+            total_items = each_meshok_count * items_per_meshok
+            subtotal = unit_price * total_items
+            total_sum += subtotal
+            subtotal_str = f"{subtotal:.1f}".rstrip("0").rstrip(".")
+            if lang == "ru":
+                lines.append(f"{idx}) {label}: {each_meshok_count} мешок = {total_items} шт., сумма {subtotal_str} {match_currency}")
+            elif lang == "en":
+                lines.append(f"{idx}) {label}: {each_meshok_count} bag = {total_items} pcs, subtotal {subtotal_str} {match_currency}")
+            elif lang == "kk":
+                lines.append(f"{idx}) {label}: {each_meshok_count} қап = {total_items} дана, жалпы {subtotal_str} {match_currency}")
+            else:
+                lines.append(f"{idx}) {label}: {each_meshok_count} qop = {total_items} ta, jami {subtotal_str} {match_currency}")
+        if lines:
+            total_str = f"{total_sum:.1f}".rstrip("0").rstrip(".")
+            contact_question = order_contact_question(lang)
+            if lang == "ru":
+                return f"{'; '.join(lines)}. Общая сумма {total_str} {currency or 'USD'}. {contact_question}"
+            if lang == "en":
+                return f"{'; '.join(lines)}. Total {total_str} {currency or 'USD'}. {contact_question}"
+            if lang == "kk":
+                return f"{'; '.join(lines)}. Жалпы сумма {total_str} {currency or 'USD'}. {contact_question}"
+            return f"{'; '.join(lines)}. Umumiy summa {total_str} {currency or 'USD'}. {contact_question}"
+
     ordinal_idx = ordinal_media_match_index(user_text)
     if ordinal_idx is not None:
         if ordinal_idx < len(matches):
@@ -9429,6 +9487,8 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             bool(get_catalog_link(business))
             and wants_catalog(message_text)
             and not is_price_question(message_text)
+            and not quantity_followup
+            and not force_direct_media_reply
             and not is_greeting_only(message_text)
             and not is_auto_media_placeholder_message(message_text)
             and not (media_type in {"photo", "video", "file", "audio"})
