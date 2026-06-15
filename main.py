@@ -8621,6 +8621,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
         workspace_state = get_workspace_state(business.get("id"))
         test_mode_enabled = normalize_bool(workspace_state.get("instagram_dm_test_mode_enabled"), False)
         allowed = parse_instagram_test_allowlist(workspace_state.get("instagram_dm_test_allowlist"))
+        test_mode_allowlist_matched = False
         if test_mode_enabled:
             candidates = instagram_dm_test_allowlist_candidates(
                 sender_id=sender_id,
@@ -8662,6 +8663,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 )
                 mark_processed(processed_message_ids, message_id)
                 return
+            test_mode_allowlist_matched = True
             log("Instagram DM test mode allowlist matched", {
                 "business_id": business.get("id"),
                 "customer_id": sender_id,
@@ -8706,7 +8708,14 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             mark_processed(processed_message_ids, message_id)
             return
 
-        if not is_chat_ai_enabled("instagram", "dm", sender_id, business.get("id")):
+        chat_ai_enabled = is_chat_ai_enabled("instagram", "dm", sender_id, business.get("id"))
+        if not chat_ai_enabled and test_mode_allowlist_matched:
+            log("Instagram DM test mode overriding stale chat AI pause", {
+                "business_id": business.get("id"),
+                "customer_id": sender_id,
+                "message_id": message_id,
+            })
+        elif not chat_ai_enabled:
             log("Instagram DM reply skipped: chat AI disabled", {
                 "business_id": business.get("id"),
                 "customer_id": sender_id,
