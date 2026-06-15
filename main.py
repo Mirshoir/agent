@@ -7389,6 +7389,7 @@ def remember_instagram_media_match(
     top_match_currency: str = "",
     match_strategy: str = "",
     top_score: float = 0.0,
+    media_matches: list[dict] | None = None,
 ):
     key = _instagram_media_memory_key(business_id, customer_id)
     if not key or not normalize_id(context):
@@ -7403,6 +7404,7 @@ def remember_instagram_media_match(
         "top_match_currency": normalize_id(top_match_currency),
         "match_strategy": normalize_id(match_strategy),
         "top_score": _safe_score(top_score),
+        "media_matches": merge_media_matches_for_memory(media_matches or []),
     }
 
 
@@ -7685,6 +7687,120 @@ def build_verified_meshok_price_reply(
 def is_verified_media_match(media_match: dict = None) -> bool:
     strategy = normalize_id((media_match or {}).get("match_strategy"))
     return strategy in {"exact_code_match", "exact_model_match"}
+
+
+def compact_media_match_for_memory(media_match: dict = None) -> dict:
+    media_match = media_match or {}
+    return {
+        "top_match_code": normalize_id(media_match.get("top_match_code")),
+        "top_match_model": normalize_id(media_match.get("top_match_model")),
+        "top_match_price": normalize_id(media_match.get("top_match_price")),
+        "top_match_currency": normalize_id(media_match.get("top_match_currency")),
+        "match_strategy": normalize_id(media_match.get("match_strategy")),
+        "top_score": _safe_score(media_match.get("top_score")),
+        "reply_hint": normalize_id(media_match.get("reply_hint")),
+    }
+
+
+def merge_media_matches_for_memory(*groups) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[tuple[str, str, str]] = set()
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for item in group:
+            if not isinstance(item, dict):
+                continue
+            compact = compact_media_match_for_memory(item)
+            key = (
+                normalize_id(compact.get("top_match_code")),
+                normalize_id(compact.get("top_match_model")),
+                normalize_id(compact.get("top_match_price")),
+            )
+            if not any(key) or key in seen:
+                continue
+            merged.append(compact)
+            seen.add(key)
+    return merged[:8]
+
+
+def ordinal_media_match_index(text: str) -> int | None:
+    low = normalize_id(text).lower()
+    if not low:
+        return None
+    ordinal_markers = [
+        (0, ["birinchi", "1-", "1chi", "1-si", "first", "перв", "один"]),
+        (1, ["ikkinchi", "ikkinchis", "2-", "2chi", "2-si", "second", "втор"]),
+        (2, ["uchinchi", "3-", "3chi", "3-si", "third", "трет"]),
+        (3, ["to'rtinchi", "tortinchi", "4-", "4chi", "4-si", "fourth", "четвер"]),
+    ]
+    for idx, markers in ordinal_markers:
+        if any(marker in low for marker in markers):
+            return idx
+    return None
+
+
+def asks_about_multiple_media_products(text: str) -> bool:
+    low = normalize_id(text).lower()
+    if not low:
+        return False
+    markers = [
+        "bular", "ikkalasi", "hammasi", "hammasini", "rasmlar", "shu ikkisi",
+        "these", "both", "all of them", "эти", "оба", "все",
+    ]
+    return any(marker in low for marker in markers)
+
+
+def media_match_label(media_match: dict) -> str:
+    return normalize_id(media_match.get("top_match_model")) or normalize_id(media_match.get("top_match_code")) or "shu model"
+
+
+def media_match_unit_price_reply(media_match: dict, business: dict = None, lang: str = "uz") -> str:
+    price = normalize_id(media_match.get("top_match_price"))
+    currency = normalize_id(media_match.get("top_match_currency")) or "USD"
+    label = media_match_label(media_match)
+    pack_info = default_pack_size_sentence(lang, business=business)
+    pack_question = default_pack_count_question(lang)
+    if lang == "en":
+        return f"Model {label} price is {price} {currency}. {pack_info} {pack_question}"
+    if lang == "ru":
+        return f"Цена модели {label}: {price} {currency}. {pack_info} {pack_question}"
+    if lang == "kk":
+        return f"Модель {label} бағасы {price} {currency}. {pack_info} {pack_question}"
+    return f"Model {label} narxi {price} {currency}. {pack_info} {pack_question}"
+
+
+def build_multi_media_match_reply(user_text: str, media_matches: list[dict], business: dict = None) -> str:
+    matches = merge_media_matches_for_memory(media_matches)
+    if len(matches) < 2:
+        return ""
+    lang = detect_customer_language(user_text) or "uz"
+    ordinal_idx = ordinal_media_match_index(user_text)
+    if ordinal_idx is not None:
+        if ordinal_idx < len(matches):
+            return media_match_unit_price_reply(matches[ordinal_idx], business=business, lang=lang)
+        return "Bu tartibdagi rasm topilmadi. Iltimos, kerakli model rasmini yana yuboring."
+
+    if not (is_price_question(user_text) or asks_about_multiple_media_products(user_text)):
+        return ""
+
+    lines = []
+    for idx, match in enumerate(matches[:4], start=1):
+        price = normalize_id(match.get("top_match_price"))
+        currency = normalize_id(match.get("top_match_currency")) or "USD"
+        label = media_match_label(match)
+        if price:
+            lines.append(f"{idx}) Model {label}: {price} {currency}")
+    if not lines:
+        return ""
+    pack_info = default_pack_size_sentence(lang, business=business)
+    if lang == "ru":
+        return f"{'; '.join(lines)}. {pack_info} Какой модели сколько мешков нужно?"
+    if lang == "en":
+        return f"{'; '.join(lines)}. {pack_info} How many bags do you need from each model?"
+    if lang == "kk":
+        return f"{'; '.join(lines)}. {pack_info} Әр модельден қанша қап керек?"
+    return f"{'; '.join(lines)}. {pack_info} Har bir modeldan nechta qop kerak?"
 
 
 def recent_outbound_memory_key(business_id: str, customer_id: str, channel: str = "dm") -> str:
@@ -8920,6 +9036,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             })
             selected_media_match = {}
             selected_candidate = {}
+            verified_media_matches: list[dict] = []
             for candidate in matcher_candidates:
                 candidate_url = normalize_id(candidate.get("url"))
                 candidate_type = normalize_id(candidate.get("media_type")).lower() or media_type or "photo"
@@ -8943,12 +9060,15 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                     selected_media_match = media_match
                     selected_candidate = candidate
                 if is_verified_media_match(media_match):
+                    verified_media_matches = merge_media_matches_for_memory(verified_media_matches, [media_match])
                     selected_media_match = media_match
                     selected_candidate = candidate
-                    break
+                    if len(matcher_candidates) == 1:
+                        break
 
             media_match = selected_media_match
             if media_match:
+                media_match["media_matches"] = merge_media_matches_for_memory(verified_media_matches, media_match.get("media_matches") or [])
                 resolved_media_match = media_match
                 verified_exact_media_match = is_verified_media_match(media_match)
                 matcher_context = normalize_id(media_match.get("context"))
@@ -8965,6 +9085,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                     top_match_currency=media_match.get("top_match_currency", ""),
                     match_strategy=media_match.get("match_strategy", ""),
                     top_score=media_match.get("top_score", 0.0),
+                    media_matches=media_match.get("media_matches") or [],
                 )
                 log("Instagram DM media matcher hit", {
                     "customer_id": sender_id,
@@ -9024,6 +9145,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                         "source_url_host": urlparse(replied_media_url).netloc,
                     })
                     media_match = {}
+                    reply_verified_matches: list[dict] = []
                     for candidate in reply_media_candidates:
                         candidate_url = normalize_id(candidate.get("url"))
                         candidate_type = normalize_id(candidate.get("media_type")).lower() or replied_media_type
@@ -9040,8 +9162,11 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                         if not media_match or is_verified_media_match(candidate_match):
                             media_match = candidate_match
                         if is_verified_media_match(candidate_match):
-                            break
+                            reply_verified_matches = merge_media_matches_for_memory(reply_verified_matches, [candidate_match])
+                            if len(reply_media_candidates) == 1:
+                                break
                     if media_match:
+                        media_match["media_matches"] = merge_media_matches_for_memory(reply_verified_matches, media_match.get("media_matches") or [])
                         resolved_media_match = media_match
                         verified_exact_media_match = is_verified_media_match(media_match)
                         media_match_context = (
@@ -9060,6 +9185,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                             top_match_currency=media_match.get("top_match_currency", ""),
                             match_strategy=media_match.get("match_strategy", ""),
                             top_score=media_match.get("top_score", 0.0),
+                            media_matches=media_match.get("media_matches") or [],
                         )
                         log("Instagram DM reply-to media matcher hit", {
                             "customer_id": sender_id,
@@ -9099,6 +9225,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                         "source_url_host": urlparse(recent_media_url).netloc,
                     })
                     media_match = {}
+                    recent_verified_matches: list[dict] = []
                     for candidate in recent_media_candidates:
                         candidate_url = normalize_id(candidate.get("url"))
                         candidate_type = normalize_id(candidate.get("media_type")).lower() or recent_media_type
@@ -9115,8 +9242,11 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                         if not media_match or is_verified_media_match(candidate_match):
                             media_match = candidate_match
                         if is_verified_media_match(candidate_match):
-                            break
+                            recent_verified_matches = merge_media_matches_for_memory(recent_verified_matches, [candidate_match])
+                            if len(recent_media_candidates) == 1:
+                                break
                     if media_match:
+                        media_match["media_matches"] = merge_media_matches_for_memory(recent_verified_matches, media_match.get("media_matches") or [])
                         resolved_media_match = media_match
                         verified_exact_media_match = is_verified_media_match(media_match)
                         media_match_context = (
@@ -9135,6 +9265,7 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                             top_match_currency=media_match.get("top_match_currency", ""),
                             match_strategy=media_match.get("match_strategy", ""),
                             top_score=media_match.get("top_score", 0.0),
+                            media_matches=media_match.get("media_matches") or [],
                         )
                         log("Instagram DM recent-media matcher hit", {
                             "customer_id": sender_id,
@@ -9222,7 +9353,16 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
             if media_reply_hint:
                 force_direct_media_reply = True
 
-        if verified_exact_media_match and (is_price_question(message_text) or quantity_followup):
+        multi_media_reply = build_multi_media_match_reply(
+            message_text,
+            (resolved_media_match or {}).get("media_matches") or [],
+            business,
+        )
+        if multi_media_reply:
+            media_reply_hint = multi_media_reply
+            force_direct_media_reply = True
+
+        if verified_exact_media_match and not multi_media_reply and (is_price_question(message_text) or quantity_followup):
             verified_meshok_reply = build_verified_meshok_price_reply(
                 message_text,
                 resolved_media_match,
