@@ -3115,6 +3115,17 @@ def save_inbox_message(
 ):
     try:
         customer_id = sender_id if direction == "inbound" else recipient_id
+        if platform_message_id:
+            existing = load_inbox_message_by_external_id(
+                business.get("id") if business else "",
+                platform,
+                customer_id,
+                platform_message_id,
+                direction=direction,
+            )
+            if existing:
+                return
+
         payload = dict(raw_payload or {})
         if post_permalink:
             payload["post_permalink"] = post_permalink
@@ -4140,6 +4151,136 @@ def mark_instagram_processed_message(business_id: str, message_id: str, customer
         upsert_workspace_state(business_id, state_key, state_value)
     except Exception as exc:
         log("Could not mark Instagram processed message", {"business_id": business_id, "message_id": message_id, "error": str(exc)})
+
+
+def get_instagram_processed_message_status(business_id: str, message_id: str) -> str:
+    business_id = normalize_id(business_id)
+    state_key = instagram_processed_message_state_key(message_id)
+    if not business_id or not state_key:
+        return ""
+    try:
+        rows = (
+            supabase.table("dashboard_workspace_state")
+            .select("state_value")
+            .eq("business_id", business_id)
+            .eq("state_key", state_key)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        state_value = rows[0].get("state_value") if rows and isinstance(rows[0], dict) else {}
+        return normalize_id((state_value or {}).get("status")).lower()
+    except Exception as exc:
+        log("Could not inspect Instagram processed message status", {
+            "business_id": business_id,
+            "message_id": message_id,
+            "error": str(exc),
+        })
+        return ""
+
+
+def instagram_recovery_message_is_recent(created_at: str, window_seconds: int = 20 * 60) -> bool:
+    created_at = normalize_id(created_at)
+    if not created_at:
+        return False
+    try:
+        created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00")).replace(tzinfo=None)
+        return 0 <= (datetime.utcnow() - created_dt).total_seconds() <= window_seconds
+    except Exception:
+        return False
+
+
+def build_instagram_recovery_messaging(row: dict, business: dict) -> tuple[str, dict]:
+    row = row or {}
+    business = business or {}
+    sender_id = normalize_id(row.get("customer_id"))
+    recipient_id = normalize_id(business.get("instagram_business_id"))
+    message_id = normalize_id(row.get("external_message_id") or row.get("id"))
+    message_text = normalize_id(row.get("content"))
+    media_type = normalize_id(row.get("media_type")).lower()
+    media_url = normalize_id(row.get("media_url") or row.get("post_image_url") or row.get("post_permalink"))
+    raw_payload = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
+
+    if raw_payload.get("message") or raw_payload.get("sender") or raw_payload.get("recipient"):
+        messaging = dict(raw_payload)
+        messaging.setdefault("sender", {"id": sender_id})
+        messaging.setdefault("recipient", {"id": recipient_id})
+        messaging.setdefault("timestamp", int(time.time() * 1000))
+        message = messaging.get("message") if isinstance(messaging.get("message"), dict) else {}
+        message.setdefault("mid", message_id)
+        if message_text and not message.get("text"):
+            message["text"] = message_text
+        messaging["message"] = message
+        return normalize_id(messaging.get("recipient", {}).get("id")) or recipient_id, messaging
+
+    message = {"mid": message_id}
+    if message_text:
+        message["text"] = message_text
+    if media_url and media_type in {"photo", "image", "video", "file"}:
+        attachment_type = "image" if media_type in {"photo", "image"} else ("video" if media_type == "video" else "file")
+        message["attachments"] = [{"type": attachment_type, "payload": {"url": media_url}}]
+    return recipient_id, {
+        "sender": {"id": sender_id},
+        "recipient": {"id": recipient_id},
+        "timestamp": int(time.time() * 1000),
+        "message": message,
+        "recovered_from_inbox": True,
+    }
+
+
+async def recover_recent_unanswered_instagram_dm_rows(business_id: str, customer_id: str, rows: list):
+    business_id = normalize_id(business_id)
+    customer_id = normalize_id(customer_id)
+    if not business_id or not customer_id or not rows:
+        return
+    business = get_business_by_id(business_id)
+    if not business:
+        return
+    candidates = []
+    for row in reversed(rows[-8:]):
+        if not isinstance(row, dict):
+            continue
+        if normalize_id(row.get("platform")).lower() != "instagram":
+            continue
+        if standard_channel("instagram", row.get("channel")) != "dm":
+            continue
+        if normalize_id(row.get("direction")).lower() != "inbound":
+            continue
+        if normalize_id(row.get("customer_id")) != customer_id:
+            continue
+        message_id = normalize_id(row.get("external_message_id") or row.get("id"))
+        if not message_id or get_instagram_processed_message_status(business_id, message_id):
+            continue
+        created_at = normalize_id(row.get("created_at"))
+        if not instagram_recovery_message_is_recent(created_at):
+            continue
+        if has_outbound_reply_after(business_id, "instagram", customer_id, created_at, "dm"):
+            continue
+        if not normalize_id(row.get("content")) and not normalize_id(row.get("media_url") or row.get("post_image_url") or row.get("post_permalink")):
+            continue
+        candidates.append(row)
+
+    if not candidates:
+        return
+
+    row = candidates[0]
+    message_id = normalize_id(row.get("external_message_id") or row.get("id"))
+    entry_id, messaging = build_instagram_recovery_messaging(row, business)
+    if not entry_id:
+        log("Instagram DM recovery skipped: missing recipient entry id", {
+            "business_id": business_id,
+            "customer_id": customer_id,
+            "message_id": message_id,
+        })
+        return
+    log("Instagram DM recovery processing recent inbox row", {
+        "business_id": business_id,
+        "customer_id": customer_id,
+        "message_id": message_id,
+        "content_preview": normalize_id(row.get("content"))[:120],
+    })
+    await process_instagram_messaging_event(entry_id, messaging)
 
 
 def list_business_operator_ids(business_id: str) -> list[str]:
@@ -11117,7 +11258,9 @@ async def get_conversation_messages_v2(
             "id,direction,role,created_at,media_type,content,platform,channel,customer_id,"
             "external_message_id,media_url,post_permalink,post_image_url,post_media_type"
         )
-        select_fields = f"{base_fields},raw_payload" if include_raw else base_fields
+        # Keep raw_payload available internally so missed-webhook recovery can reconstruct
+        # the original Instagram event without requiring the UI to request raw rows.
+        select_fields = f"{base_fields},raw_payload"
 
         query = (
             supabase.table("inbox_messages")
@@ -11158,6 +11301,15 @@ async def get_conversation_messages_v2(
                 .limit(limit)
             )
             rows = list(reversed(fallback_query.execute().data or []))
+
+        if platform == "instagram" and channel in ("dm", "instagram_dm", "instagram_private") and rows:
+            if background_tasks is not None:
+                background_tasks.add_task(
+                    recover_recent_unanswered_instagram_dm_rows,
+                    business_id,
+                    customer_id,
+                    rows,
+                )
 
         # Backfill old forwarded Instagram messages that were saved without preview URLs.
         # This keeps forwarded reels stable in UI (no random "NO PREVIEW" regressions).
