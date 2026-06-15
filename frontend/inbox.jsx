@@ -5889,9 +5889,6 @@ function App({ lang, setLang, onSignOut, onAuthExpired, currentUser }) {
           return conversationOwnerEmail(item) === ownerScoped;
         })
         .filter(item => !deletedConversationsRef.current[item.id])
-        .map(item => Object.prototype.hasOwnProperty.call(aiOverridesRef.current, item.id)
-          ? { ...item, aiOn: aiOverridesRef.current[item.id] === true }
-          : item)
         .map(item => item.id === selectedCurrent ? clearConversationUnread(item) : item)
         .map(item => {
           const localMessages = rememberedLocalOutboundMessages(item.id);

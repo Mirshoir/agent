@@ -3023,6 +3023,37 @@ def is_chat_ai_enabled(platform, channel, customer_id, business_id=None):
         return True
 
 
+def load_chat_ai_settings_lookup(business_ids: list[str]) -> dict:
+    clean_business_ids = sorted({normalize_id(item) for item in business_ids if normalize_id(item)})
+    if not clean_business_ids:
+        return {}
+    try:
+        query = (
+            supabase.table("chat_ai_settings")
+            .select("business_id,platform,channel,customer_id,ai_enabled")
+        )
+        if len(clean_business_ids) == 1:
+            query = query.eq("business_id", clean_business_ids[0])
+        else:
+            query = query.in_("business_id", clean_business_ids)
+        rows = query.limit(5000).execute().data or []
+        lookup = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            platform = normalize_id(row.get("platform")).lower()
+            channel = standard_channel(platform, row.get("channel"))
+            business_id = normalize_id(row.get("business_id"))
+            customer_id = normalize_id(row.get("customer_id"))
+            if not platform or not business_id or not customer_id:
+                continue
+            lookup[f"{platform}::{business_id}::{channel or ''}::{customer_id}"] = bool(row.get("ai_enabled", True))
+        return lookup
+    except Exception as e:
+        log("Could not load chat AI settings lookup", str(e))
+        return {}
+
+
 def set_chat_ai_enabled(business_id, platform, channel, customer_id, enabled):
     platform = normalize_id(platform).lower()
     channel = standard_channel(platform, channel)
@@ -11133,6 +11164,11 @@ async def get_conversations_v2(
 
         conversations = []
         business_lookup = {}
+        chat_ai_lookup = load_chat_ai_settings_lookup([
+            key.split("::")[1]
+            for key in conversations_map.keys()
+            if len(key.split("::")) > 1
+        ])
         for key, conv_rows in conversations_map.items():
             key_parts = key.split("::")
             row_business_id = key_parts[1] if len(key_parts) > 1 else ""
@@ -11145,6 +11181,8 @@ async def get_conversations_v2(
                 ai_lookup_enabled=(not fast),
             )
             if conv:
+                if key in chat_ai_lookup:
+                    conv["aiOn"] = chat_ai_lookup[key]
                 conversations.append(conv)
 
         if search.strip():
