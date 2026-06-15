@@ -7762,6 +7762,80 @@ def extract_instagram_media_url_from_payload(raw_payload: dict) -> tuple[str, st
     return "", ""
 
 
+def infer_instagram_candidate_media_type(url: str, attachment_type: str = "", fallback_type: str = "") -> str:
+    attachment_type = normalize_id(attachment_type).lower()
+    fallback_type = normalize_id(fallback_type).lower()
+    url_l = normalize_id(url).lower()
+    if attachment_type in {"image", "photo"}:
+        return "photo"
+    if attachment_type in {"video", "ig_reel", "reel"}:
+        return "video"
+    if attachment_type in {"audio", "voice"}:
+        return "audio"
+    if attachment_type in {"file", "document"}:
+        return "file"
+    if re.search(r"\.(jpg|jpeg|png|gif|webp|bmp|heic|heif)(\?|$)", url_l):
+        return "photo"
+    if re.search(r"\.(mp4|mov|m4v|webm|avi|mkv)(\?|$)", url_l) or any(token in url_l for token in ("/reel/", "ig_reel")):
+        return "video"
+    if re.search(r"\.(mp3|m4a|wav|ogg|oga|aac|opus)(\?|$)", url_l):
+        return "audio"
+    if fallback_type in {"photo", "video", "file", "audio"}:
+        return fallback_type
+    return "file"
+
+
+def collect_instagram_media_match_candidates(
+    raw_payload: dict,
+    media_url: str = "",
+    media_type: str = "",
+    post_image_url: str = "",
+    post_permalink: str = "",
+    post_media_type: str = "",
+) -> list[dict]:
+    candidates: list[dict] = []
+
+    def add(url: str, candidate_type: str = ""):
+        clean_url = normalize_id(url)
+        if not clean_url or not clean_url.startswith(("http://", "https://")):
+            return
+        unwrapped = unwrap_meta_redirect_url(clean_url)
+        if is_instagram_public_link(unwrapped):
+            return
+        inferred = infer_instagram_candidate_media_type(clean_url, fallback_type=candidate_type)
+        if inferred not in {"photo", "video", "file"}:
+            return
+        if any(item["url"] == clean_url for item in candidates):
+            return
+        candidates.append({"url": clean_url, "media_type": inferred})
+
+    add(media_url, media_type)
+    add(post_image_url, "photo" if not post_media_type else post_media_type)
+
+    raw_payload = raw_payload or {}
+    message = raw_payload.get("message") if isinstance(raw_payload.get("message"), dict) else {}
+    attachments = message.get("attachments") if isinstance(message.get("attachments"), list) else []
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        attachment_type = normalize_id(att.get("type")).lower()
+        payload = att.get("payload") if isinstance(att.get("payload"), dict) else {}
+        url_candidates: list[str] = []
+        for key in ("url", "media_url", "image_url", "video_url", "external_url", "link", "permalink", "src"):
+            direct = payload.get(key)
+            if isinstance(direct, str) and direct.startswith(("http://", "https://")) and direct not in url_candidates:
+                url_candidates.append(direct)
+        _collect_instagram_payload_urls(payload, url_candidates)
+        _collect_instagram_payload_urls(att, url_candidates)
+        for url in url_candidates:
+            add(url, infer_instagram_candidate_media_type(url, attachment_type=attachment_type))
+
+    if post_permalink and post_image_url:
+        add(post_image_url, "photo")
+
+    return candidates[:8]
+
+
 def load_instagram_message_media_reference(business_id: str, customer_id: str, message_id: str) -> dict:
     business_id = normalize_id(business_id)
     customer_id = normalize_id(customer_id)
@@ -7793,7 +7867,18 @@ def load_instagram_message_media_reference(business_id: str, customer_id: str, m
             media_type = media_type or normalize_id(row.get("post_media_type")).lower()
         if not media_url:
             return {}
-        return {"media_url": media_url, "media_type": media_type or "photo"}
+        return {
+            "media_url": media_url,
+            "media_type": media_type or "photo",
+            "media_candidates": collect_instagram_media_match_candidates(
+                row.get("raw_payload") or {},
+                media_url=media_url,
+                media_type=media_type or "photo",
+                post_image_url=row.get("post_image_url") or "",
+                post_permalink=row.get("post_permalink") or "",
+                post_media_type=row.get("post_media_type") or "",
+            ),
+        }
     except Exception as exc:
         log("Could not load Instagram reply-to media reference", str(exc))
         return {}
@@ -7855,6 +7940,14 @@ def load_recent_instagram_media_reference(
                 "media_url": media_url,
                 "media_type": media_type,
                 "external_message_id": external_message_id,
+                "media_candidates": collect_instagram_media_match_candidates(
+                    row.get("raw_payload") or {},
+                    media_url=media_url,
+                    media_type=media_type,
+                    post_image_url=row.get("post_image_url") or "",
+                    post_permalink=row.get("post_permalink") or "",
+                    post_media_type=row.get("post_media_type") or "",
+                ),
             }
     except Exception as exc:
         log("Could not load recent Instagram media reference", str(exc))
@@ -8790,7 +8883,15 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
 
         media_match_context = ""
         media_reply_hint = ""
-        matcher_source_url = media_url or post_image_url
+        matcher_candidates = collect_instagram_media_match_candidates(
+            messaging,
+            media_url=media_url or "",
+            media_type=media_type or "",
+            post_image_url=post_image_url or "",
+            post_permalink=post_permalink or "",
+            post_media_type=post_media_type or "",
+        )
+        matcher_source_url = normalize_id((matcher_candidates[0] or {}).get("url")) if matcher_candidates else (media_url or post_image_url)
         business_id = normalize_id(business.get("id"))
         recent_media_context_found = False
         force_direct_media_reply = False
@@ -8809,19 +8910,44 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 "shortcode": normalize_id(post_knowledge.get("shortcode")),
             })
 
-        if matcher_source_url and media_type in {"photo", "video", "file"}:
+        if matcher_candidates and media_type in {"photo", "video", "file"}:
             log("Instagram DM media matcher request", {
                 "customer_id": sender_id,
                 "message_id": message_id,
                 "media_type": media_type,
+                "candidate_count": len(matcher_candidates),
                 "source_url_host": urlparse(matcher_source_url).netloc if matcher_source_url else "",
             })
-            media_match = analyze_media_for_sales_reply(
-                media_url=matcher_source_url,
-                user_text=message_text or "",
-                media_type=media_type or "",
-                access_token=access_token,
-            )
+            selected_media_match = {}
+            selected_candidate = {}
+            for candidate in matcher_candidates:
+                candidate_url = normalize_id(candidate.get("url"))
+                candidate_type = normalize_id(candidate.get("media_type")).lower() or media_type or "photo"
+                if not candidate_url or candidate_type not in {"photo", "video", "file"}:
+                    continue
+                media_match = analyze_media_for_sales_reply(
+                    media_url=candidate_url,
+                    user_text=message_text or "",
+                    media_type=candidate_type,
+                    access_token=access_token,
+                )
+                if not media_match:
+                    log("Instagram DM media matcher candidate miss", {
+                        "customer_id": sender_id,
+                        "message_id": message_id,
+                        "media_type": candidate_type,
+                        "source_url_host": urlparse(candidate_url).netloc,
+                    })
+                    continue
+                if not selected_media_match:
+                    selected_media_match = media_match
+                    selected_candidate = candidate
+                if is_verified_media_match(media_match):
+                    selected_media_match = media_match
+                    selected_candidate = candidate
+                    break
+
+            media_match = selected_media_match
             if media_match:
                 resolved_media_match = media_match
                 verified_exact_media_match = is_verified_media_match(media_match)
@@ -8843,7 +8969,8 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 log("Instagram DM media matcher hit", {
                     "customer_id": sender_id,
                     "message_id": message_id,
-                    "media_type": media_type,
+                    "media_type": normalize_id(selected_candidate.get("media_type")) or media_type,
+                    "candidate_count": len(matcher_candidates),
                     "top_match_code": media_match.get("top_match_code"),
                     "top_match_model": media_match.get("top_match_model"),
                     "top_score": media_match.get("top_score"),
@@ -8885,19 +9012,35 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 replied_media_type = normalize_id(media_ref.get("media_type")).lower() or "photo"
                 if replied_media_url and replied_media_type in {"photo", "video", "file"}:
                     recent_media_context_found = True
+                    reply_media_candidates = media_ref.get("media_candidates") if isinstance(media_ref.get("media_candidates"), list) else []
+                    if not reply_media_candidates:
+                        reply_media_candidates = [{"url": replied_media_url, "media_type": replied_media_type}]
                     log("Instagram DM reply-to media matcher request", {
                         "customer_id": sender_id,
                         "message_id": message_id,
                         "reply_to_message_id": reply_to_message_id,
                         "media_type": replied_media_type,
+                        "candidate_count": len(reply_media_candidates),
                         "source_url_host": urlparse(replied_media_url).netloc,
                     })
-                    media_match = analyze_media_for_sales_reply(
-                        media_url=replied_media_url,
-                        user_text=message_text or "",
-                        media_type=replied_media_type,
-                        access_token=access_token,
-                    )
+                    media_match = {}
+                    for candidate in reply_media_candidates:
+                        candidate_url = normalize_id(candidate.get("url"))
+                        candidate_type = normalize_id(candidate.get("media_type")).lower() or replied_media_type
+                        if not candidate_url or candidate_type not in {"photo", "video", "file"}:
+                            continue
+                        candidate_match = analyze_media_for_sales_reply(
+                            media_url=candidate_url,
+                            user_text=message_text or "",
+                            media_type=candidate_type,
+                            access_token=access_token,
+                        )
+                        if not candidate_match:
+                            continue
+                        if not media_match or is_verified_media_match(candidate_match):
+                            media_match = candidate_match
+                        if is_verified_media_match(candidate_match):
+                            break
                     if media_match:
                         resolved_media_match = media_match
                         verified_exact_media_match = is_verified_media_match(media_match)
@@ -8944,19 +9087,35 @@ async def process_instagram_messaging_event(entry_id: str, messaging: dict):
                 recent_media_type = normalize_id(recent_media_ref.get("media_type")).lower() or "photo"
                 if recent_media_url and recent_media_type in {"photo", "video", "file"}:
                     recent_media_context_found = True
+                    recent_media_candidates = recent_media_ref.get("media_candidates") if isinstance(recent_media_ref.get("media_candidates"), list) else []
+                    if not recent_media_candidates:
+                        recent_media_candidates = [{"url": recent_media_url, "media_type": recent_media_type}]
                     log("Instagram DM recent-media matcher request", {
                         "customer_id": sender_id,
                         "message_id": message_id,
                         "recent_media_message_id": normalize_id(recent_media_ref.get("external_message_id")),
                         "media_type": recent_media_type,
+                        "candidate_count": len(recent_media_candidates),
                         "source_url_host": urlparse(recent_media_url).netloc,
                     })
-                    media_match = analyze_media_for_sales_reply(
-                        media_url=recent_media_url,
-                        user_text=message_text or "",
-                        media_type=recent_media_type,
-                        access_token=access_token,
-                    )
+                    media_match = {}
+                    for candidate in recent_media_candidates:
+                        candidate_url = normalize_id(candidate.get("url"))
+                        candidate_type = normalize_id(candidate.get("media_type")).lower() or recent_media_type
+                        if not candidate_url or candidate_type not in {"photo", "video", "file"}:
+                            continue
+                        candidate_match = analyze_media_for_sales_reply(
+                            media_url=candidate_url,
+                            user_text=message_text or "",
+                            media_type=candidate_type,
+                            access_token=access_token,
+                        )
+                        if not candidate_match:
+                            continue
+                        if not media_match or is_verified_media_match(candidate_match):
+                            media_match = candidate_match
+                        if is_verified_media_match(candidate_match):
+                            break
                     if media_match:
                         resolved_media_match = media_match
                         verified_exact_media_match = is_verified_media_match(media_match)

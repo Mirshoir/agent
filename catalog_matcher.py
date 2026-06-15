@@ -52,6 +52,19 @@ PRODUCT_MATCHER_EMBEDDING_ENABLED = env_bool("PRODUCT_MATCHER_EMBEDDING_ENABLED"
 PRODUCT_MATCHER_LOCAL_ENABLED = env_bool("PRODUCT_MATCHER_LOCAL_ENABLED", True)
 PRODUCT_MATCHER_LOCAL_CATALOG_TABLE = normalize_text(os.getenv("PRODUCT_MATCHER_LOCAL_CATALOG_TABLE", "milana_products")) or "milana_products"
 PRODUCT_MATCHER_LOCAL_OVERRIDES_TABLE = normalize_text(os.getenv("PRODUCT_MATCHER_LOCAL_OVERRIDES_TABLE", "milana_product_overrides")) or "milana_product_overrides"
+PRODUCT_MATCHER_PUBLIC_CATALOG_JSON_URL = normalize_text(
+    os.getenv(
+        "PRODUCT_MATCHER_PUBLIC_CATALOG_JSON_URL",
+        "https://shmirzaev.github.io/Milana-Premium-Catalog/outputs/catalog_processing/milana_products_latest.json",
+    )
+)
+PRODUCT_MATCHER_PUBLIC_IMAGE_BASE_URL = normalize_text(
+    os.getenv(
+        "PRODUCT_MATCHER_PUBLIC_IMAGE_BASE_URL",
+        "https://shmirzaev.github.io/Milana-Premium-Catalog/outputs/catalog_processing/storage_images/latest/",
+    )
+).rstrip("/")
+PRODUCT_MATCHER_PUBLIC_JSON_ENABLED = env_bool("PRODUCT_MATCHER_PUBLIC_JSON_ENABLED", True)
 PRODUCT_MATCHER_LOCAL_CATALOG_CACHE_TTL_SECONDS = max(30, min(60 * 60, int(os.getenv("PRODUCT_MATCHER_LOCAL_CATALOG_CACHE_TTL_SECONDS", "300"))))
 PRODUCT_MATCHER_LOCAL_FETCH_LIMIT = max(50, min(3000, int(os.getenv("PRODUCT_MATCHER_LOCAL_FETCH_LIMIT", "1200"))))
 PRODUCT_MATCHER_MIN_SCORE = max(0.0, min(1.0, float(os.getenv("PRODUCT_MATCHER_MIN_SCORE", "0.20"))))
@@ -174,6 +187,61 @@ def _parse_float_list(value: Any, limit: int = 12) -> list[float]:
         except Exception:
             continue
     return out
+
+
+def public_catalog_image_url(row: dict, allow_path_fallback: bool = False) -> str:
+    image_url = normalize_text(row.get("image_url"))
+    if image_url:
+        return image_url
+    if not allow_path_fallback:
+        return ""
+    image_path = normalize_text(row.get("image_path") or row.get("image_storage_path"))
+    if not image_path or not PRODUCT_MATCHER_PUBLIC_IMAGE_BASE_URL:
+        return ""
+    filename = image_path.replace("\\", "/").rstrip("/").split("/")[-1]
+    if not filename:
+        return ""
+    return f"{PRODUCT_MATCHER_PUBLIC_IMAGE_BASE_URL}/{filename}"
+
+
+def product_row_key(row: dict) -> tuple[str, str, str, str, str]:
+    return (
+        normalize_product_code(row.get("product_code")),
+        normalize_product_code(row.get("model_code")),
+        normalize_text(row.get("source_pdf")),
+        normalize_text(row.get("page")),
+        normalize_text(row.get("card_index")),
+    )
+
+
+def product_record_from_row(row: dict, source: str) -> ProductRecord:
+    return ProductRecord(
+        product_code=normalize_product_code(row.get("product_code")),
+        model_code=normalize_product_code(row.get("model_code")),
+        price=normalize_text(row.get("price")),
+        currency=normalize_text(row.get("currency")),
+        combined_text=normalize_text(
+            row.get("combined_text")
+            or "\n".join(
+                part
+                for part in [
+                    normalize_text(row.get("ocr_text")),
+                    normalize_text(row.get("native_text")),
+                ]
+                if part
+            )
+        ),
+        image_url=public_catalog_image_url(row, allow_path_fallback=source == "public_catalog_json"),
+        image_sha256=normalize_text(row.get("image_sha256")).lower(),
+        image_fingerprint=normalize_text(row.get("image_fingerprint") or row.get("image_storage_path") or row.get("image_path")),
+        embedding_preview=_parse_float_list(row.get("embedding_preview"), limit=12),
+        text_embedding=[],
+        source_pdf=normalize_text(row.get("source_pdf")),
+        page=row.get("page"),
+        card_index=row.get("card_index"),
+        source=source,
+        catalog_group=derive_catalog_group(row.get("source_pdf")),
+    )
 
 
 def product_cache_key(product: ProductRecord) -> str:
@@ -423,66 +491,53 @@ def _get_local_catalog_rows(force_refresh: bool = False) -> list[ProductRecord]:
 
     override_map = {(normalize_text(r.get("product_code")), normalize_text(r.get("model_code"))): r for r in overrides if isinstance(r, dict)}
     rows: list[ProductRecord] = []
-    seen_keys: set[tuple[str, str]] = set()
+    seen_keys: set[tuple[str, str, str, str, str]] = set()
     override_only = 0
 
     for row in products:
         if not isinstance(row, dict):
             continue
-        key = (normalize_text(row.get("product_code")), normalize_text(row.get("model_code")))
+        key = product_row_key(row)
         merged = dict(row)
-        override = override_map.get(key)
+        override = override_map.get((normalize_text(row.get("product_code")), normalize_text(row.get("model_code"))))
         if override:
             for field in ("price", "currency", "image_url", "source_pdf"):
                 if override.get(field) is not None:
                     merged[field] = override[field]
         seen_keys.add(key)
-        rows.append(
-            ProductRecord(
-                product_code=normalize_product_code(merged.get("product_code")),
-                model_code=normalize_product_code(merged.get("model_code")),
-                price=normalize_text(merged.get("price")),
-                currency=normalize_text(merged.get("currency")),
-                combined_text=normalize_text(merged.get("combined_text")),
-                image_url=normalize_text(merged.get("image_url")),
-                image_sha256=normalize_text(merged.get("image_sha256")).lower(),
-                image_fingerprint=normalize_text(merged.get("image_fingerprint")),
-                embedding_preview=_parse_float_list(merged.get("embedding_preview"), limit=12),
-                text_embedding=[],
-                source_pdf=normalize_text(merged.get("source_pdf")),
-                page=merged.get("page"),
-                card_index=merged.get("card_index"),
-                source="milana_products",
-                catalog_group=derive_catalog_group(merged.get("source_pdf")),
-            )
-        )
+        rows.append(product_record_from_row(merged, "milana_products"))
 
     for row in overrides:
         if not isinstance(row, dict):
             continue
-        key = (normalize_text(row.get("product_code")), normalize_text(row.get("model_code")))
+        key = product_row_key(row)
         if key in seen_keys:
             continue
-        rows.append(
-            ProductRecord(
-                product_code=normalize_product_code(row.get("product_code")),
-                model_code=normalize_product_code(row.get("model_code")),
-                price=normalize_text(row.get("price")),
-                currency=normalize_text(row.get("currency")),
-                combined_text="",
-                image_url=normalize_text(row.get("image_url")),
-                image_sha256="",
-                image_fingerprint=normalize_text(row.get("image_storage_path")),
-                embedding_preview=[],
-                text_embedding=[],
-                source_pdf=normalize_text(row.get("source_pdf")),
-                page=row.get("page"),
-                card_index=row.get("card_index"),
-                source="milana_product_overrides",
-                catalog_group=derive_catalog_group(row.get("source_pdf")),
-            )
-        )
+        rows.append(product_record_from_row(row, "milana_product_overrides"))
+        seen_keys.add(key)
         override_only += 1
+
+    public_rows = []
+    public_added = 0
+    if PRODUCT_MATCHER_PUBLIC_JSON_ENABLED and PRODUCT_MATCHER_PUBLIC_CATALOG_JSON_URL:
+        try:
+            response = requests.get(PRODUCT_MATCHER_PUBLIC_CATALOG_JSON_URL, timeout=20)
+            response.raise_for_status()
+            payload = response.json()
+            public_rows = payload if isinstance(payload, list) else []
+            for row in public_rows:
+                if not isinstance(row, dict):
+                    continue
+                if row.get("is_visible") is False:
+                    continue
+                key = product_row_key(row)
+                if key in seen_keys:
+                    continue
+                rows.append(product_record_from_row(row, "public_catalog_json"))
+                seen_keys.add(key)
+                public_added += 1
+        except Exception as exc:
+            log("Public catalog JSON fetch failed", {"error": str(exc)})
 
     _catalog_cache["rows"] = rows
     _catalog_cache["loaded_at"] = now
@@ -490,6 +545,8 @@ def _get_local_catalog_rows(force_refresh: bool = False) -> list[ProductRecord]:
         "base_table_rows": len(products),
         "override_table_rows": len(overrides),
         "override_only_products": override_only,
+        "public_json_rows": len(public_rows),
+        "public_json_added": public_added,
         "unique_searchable_products": len(rows),
     }
     hydrate_products_with_cached_embeddings(rows)
@@ -618,8 +675,17 @@ def extract_codes_from_blob(value: str | None) -> set[str]:
     return {normalize_code(x) for x in re.findall(r"\b[A-Z]{1,4}-?\d{2,6}\b", normalize_blob(value)) if normalize_code(x)}
 
 
+def analysis_code_candidates(analysis: CustomerImageAnalysis, user_text: str = "") -> set[str]:
+    values: list[str] = []
+    values.extend(analysis.visible_codes or [])
+    values.extend(extract_codes_from_text(analysis.visible_text or ""))
+    values.extend(extract_codes_from_text(analysis.notes or ""))
+    values.extend(extract_codes_from_text(user_text or ""))
+    return {normalize_code(code) for code in values if normalize_code(code)}
+
+
 def find_exact_code_matches(analysis: CustomerImageAnalysis, products: list[ProductRecord]) -> list[ProductRecord]:
-    codes = {normalize_code(code) for code in analysis.visible_codes if normalize_code(code)}
+    codes = analysis_code_candidates(analysis)
     if not codes:
         return []
     matches: list[ProductRecord] = []
@@ -639,7 +705,7 @@ def find_exact_code_matches(analysis: CustomerImageAnalysis, products: list[Prod
 
 
 def split_exact_matches_by_code_type(analysis: CustomerImageAnalysis, products: list[ProductRecord]) -> tuple[list[ProductRecord], list[ProductRecord]]:
-    codes = {normalize_code(code) for code in analysis.visible_codes if normalize_code(code)}
+    codes = analysis_code_candidates(analysis)
     product_matches: list[ProductRecord] = []
     model_matches: list[ProductRecord] = []
     seen_product: set[tuple[str, str]] = set()
@@ -1046,8 +1112,11 @@ def analyze_media_for_sales_reply_local(media_url: str, user_text: str, media_ty
 
     analysis = analyze_customer_image(media_bytes, user_text=user_text)
     garment_hint = requested_garment_hint(user_text)
-    exact_matches = find_exact_code_matches(analysis, scoped_products)
-    exact_product_matches, exact_model_matches = split_exact_matches_by_code_type(analysis, scoped_products)
+    # Exact OCR/model-code matches must search the full catalog. Scope is only for
+    # fuzzy visual reranking, otherwise a visible kids code can be falsely reported
+    # as missing when the configured visual scope is women/men.
+    exact_matches = find_exact_code_matches(analysis, all_products)
+    exact_product_matches, exact_model_matches = split_exact_matches_by_code_type(analysis, all_products)
     matches: list[ProductRecord] = []
     warning = ""
     top: ProductRecord | None = None
